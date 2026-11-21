@@ -23,6 +23,7 @@ import {
   mockScript,
   mockScriptQa,
   mockScriptRewrite,
+  type MockScenario,
 } from "@/lib/claude-mocks";
 import { splitSamples } from "@/lib/brand-input";
 import { isMockClaude, readEnv } from "@/lib/config";
@@ -179,6 +180,8 @@ export interface ClaudeClient {
 export type ClaudeDeps = {
   /** Defaults to MOCK_CLAUDE (mock unless exactly "false"). */
   mock: boolean;
+  /** Mock mode only (tests, golden set): force failing drafts. See MockScenario in lib/claude-mocks.ts. */
+  mockScenario?: MockScenario;
   client?: ClaudeClient;
   createClient: () => ClaudeClient;
   logUsage: (row: UsageRow) => Promise<void>;
@@ -426,18 +429,18 @@ const defaultDeps = (): ClaudeDeps => ({
 // Mock answers
 // ---------------------------------------------------------------------------
 
-function mockAnswer(task: ClaudeTaskName, brand: ClaudeBrand, input: unknown): unknown {
+function mockAnswer(task: ClaudeTaskName, brand: ClaudeBrand, input: unknown, scenario: MockScenario): unknown {
   switch (task) {
     case "brand_profile":
       return mockBrandProfile(brand);
     case "plan":
       return mockPlan(brand, planInput.parse(input));
     case "script":
-      return mockScript(brand, scriptInput.parse(input));
+      return mockScript(brand, scriptInput.parse(input), scenario);
     case "script_qa":
       return mockScriptQa(brand, scriptQaInput.parse(input));
     case "script_rewrite":
-      return mockScriptRewrite(brand, scriptRewriteInput.parse(input));
+      return mockScriptRewrite(brand, scriptRewriteInput.parse(input), scenario);
     case "pronunciation_suggest":
       return mockPronunciation(pronunciationInput.parse(input));
   }
@@ -463,7 +466,7 @@ export async function runClaudeTask<T extends ClaudeTaskName>(
   const input = def.input.parse(ctx.input);
 
   if (deps.mock) {
-    const answer = def.output.parse(mockAnswer(task, ctx.brand, input));
+    const answer = def.output.parse(mockAnswer(task, ctx.brand, input, deps.mockScenario ?? "good"));
     await deps.logUsage({
       brand_id: ctx.brand.id,
       task,

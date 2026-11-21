@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PLANS } from "@/lib/plans";
+import { memoryStore, type MemoryStore } from "../helpers/memory-store";
 
 const BRAND_ID = "10000000-0000-0000-0000-000000000001";
 const POST_ID = "20000000-0000-0000-0000-000000000001";
@@ -23,6 +24,8 @@ const BRAND = {
   profile_md: "Profile",
   words_per_second: 2.4,
   current_version: 1,
+  is_managed: true,
+  autopilot_level: "review_everything",
 };
 const POST = {
   id: POST_ID,
@@ -39,8 +42,10 @@ const requireAdmin = vi.fn();
 const getBrand = vi.fn();
 const getPost = vi.fn();
 const getOwnerPlan = vi.fn(async (_ownerId: string) => null as string | null);
-const saveFirstScript = vi.fn(async (_row: Record<string, unknown>) => {});
+const saveFirstScript = vi.fn(async (_row: Record<string, unknown>): Promise<string> => "");
+const getScriptForChecks = vi.fn();
 const runClaudeTask = vi.fn();
+let store: MemoryStore;
 
 vi.mock("@/lib/auth", () => ({ requireAdmin: () => requireAdmin() }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
@@ -49,23 +54,29 @@ vi.mock("@/lib/posts", () => ({
   getPost: (id: string) => getPost(id),
   getOwnerPlan: (id: string) => getOwnerPlan(id),
   saveFirstScript: (row: Record<string, unknown>) => saveFirstScript(row),
+  getScriptForChecks: (id: string) => getScriptForChecks(id),
 }));
+vi.mock("@/lib/qa/store", () => ({ createQaStore: () => store }));
 vi.mock("@/lib/claude", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/claude")>();
   return { ...actual, runClaudeTask: (...args: unknown[]) => runClaudeTask(...args) };
 });
 
-const { writeScript } = await import("@/app/admin/clients/[id]/actions");
-const { runClaudeTask: realRun } = await vi.importActual<typeof import("@/lib/claude")>("@/lib/claude");
+const { checkScript, writeScript } = await import("@/app/admin/clients/[id]/actions");
+const { runClaudeTask: realRun, ClaudeError } = await vi.importActual<typeof import("@/lib/claude")>("@/lib/claude");
 
 const idle = { status: "idle" as const, message: "" };
 
 beforeEach(() => {
+  store = memoryStore();
   requireAdmin.mockReset().mockResolvedValue({ id: "admin-1", email: "a@x.com", isAdmin: true });
   getBrand.mockReset().mockResolvedValue(BRAND);
   getPost.mockReset().mockResolvedValue(POST);
   getOwnerPlan.mockReset().mockResolvedValue(null);
-  saveFirstScript.mockReset().mockResolvedValue(undefined);
+  saveFirstScript
+    .mockReset()
+    .mockImplementation(async (row) => store.insertScriptVersion({ ...row, spoken_text: null } as never));
+  getScriptForChecks.mockReset().mockResolvedValue(null);
   runClaudeTask.mockReset().mockImplementation((task, ctx) => realRun(task, ctx, { mock: true, logUsage: async () => {} }));
 });
 
@@ -81,7 +92,7 @@ describe("Write script", () => {
   it("writes with Claude MAIN and saves version 1, QA pending, within the Creator limit by default", async () => {
     const state = await writeScript(POST_ID, idle);
     expect(state.status).toBe("ok");
-    expect(state.message).toMatch(/^Script written \(about \d+ seconds\)\.$/);
+    expect(state.message).toMatch(/^Script written \(about \d+ seconds\)\. Checked: ready for script review\.$/);
     expect(runClaudeTask.mock.calls[0][0]).toBe("script");
     expect(runClaudeTask.mock.calls[0][1].input.max_seconds).toBe(PLANS.creator.max_seconds_per_video);
     expect(getOwnerPlan).toHaveBeenCalledWith("owner-1");
@@ -133,5 +144,83 @@ describe("Write script", () => {
     expect(state).toEqual({ status: "error", message: "Couldn't write the script. Please try again in a minute." });
     expect(log).toHaveBeenCalledWith("[admin] write script failed", expect.objectContaining({ postId: POST_ID }));
     log.mockRestore();
+  });
+
+  it("runs Gate 1 and Gate 2 right after saving, and moves the post on", async () => {
+    await writeScript(POST_ID, idle);
+    expect(store.reports.map((r) => [r.gate, r.passed])).toEqual([
+      ["script", true],
+      ["pronunciation_prep", true],
+    ]);
+    expect(store.scripts[0].qa_status).toBe("passed");
+    expect(store.scripts[0].spoken_text).toBeTruthy();
+    expect(store.posts.get(POST_ID)).toEqual({ status: "script_review", status_reason: null });
+  });
+
+  it("keeps the script when the checks fail to run, and says to press Run checks", async () => {
+    runClaudeTask.mockImplementation((task, ctx) =>
+      task === "script_qa"
+        ? Promise.reject(new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes."))
+        : realRun(task, ctx, { mock: true, logUsage: async () => {} }),
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const state = await writeScript(POST_ID, idle);
+    log.mockRestore();
+    expect(state.status).toBe("error");
+    expect(state.message).toBe(
+      "Script written, but the checks didn't finish: Claude is busy right now. Try again in a few minutes. Press “Run checks” to try again.",
+    );
+    expect(store.scripts).toHaveLength(1);
+    expect(store.scripts[0].qa_status).toBe("pending");
+  });
+});
+
+describe("Run checks", () => {
+  const pending = () => ({
+    script: {
+      id: "script-9",
+      post_id: POST_ID,
+      version: 1,
+      est_seconds: 4,
+      qa_status: "pending",
+      spoken_text: null,
+      hook: "Why do new leads burn out first?",
+      body: "Hello. Ask for help early.",
+      cta: "Book your leadership sprint today.",
+      display_text: "Why do new leads burn out first? Hello. Ask for help early. Book your leadership sprint today.",
+      captions: { instagram: "a", tiktok: "b", linkedin: "c", x: "d" },
+      hashtags: ["#a", "#b", "#c"],
+      broll_keywords: [],
+      edit_plan: { broll_moments: [], emphasis_words: [] },
+    },
+    post: { ...POST, status: "scripting" },
+  });
+
+  it("checks admin before anything else", async () => {
+    requireAdmin.mockRejectedValue(new Error("NEXT_NOT_FOUND"));
+    await expect(checkScript("script-9", idle)).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(getScriptForChecks).not.toHaveBeenCalled();
+    expect(runClaudeTask).not.toHaveBeenCalled();
+  });
+
+  it("says so plainly when the script doesn't exist", async () => {
+    expect(await checkScript("script-9", idle)).toEqual({ status: "error", message: "Script not found." });
+  });
+
+  it("runs the gates on a pending script", async () => {
+    const found = pending();
+    await store.insertScriptVersion(found.script as never);
+    found.script.id = store.scripts[0].id;
+    getScriptForChecks.mockResolvedValue(found);
+    const state = await checkScript(found.script.id, idle);
+    expect(state).toEqual({ status: "ok", message: "Checked: ready for script review." });
+    expect(store.reports.map((r) => r.gate)).toEqual(["script", "pronunciation_prep"]);
+  });
+
+  it("refuses a script that was already checked", async () => {
+    const found = pending();
+    getScriptForChecks.mockResolvedValue({ ...found, script: { ...found.script, qa_status: "passed", spoken_text: "x" } });
+    expect(await checkScript("script-9", idle)).toEqual({ status: "error", message: "This script has already been checked." });
+    expect(runClaudeTask).not.toHaveBeenCalled();
   });
 });

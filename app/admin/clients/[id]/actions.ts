@@ -9,7 +9,17 @@ import { runClaudeTask } from "@/lib/claude";
 import type { ActionState } from "@/lib/plain-error";
 import { createMonthlyPlan, planStartDate } from "@/lib/planner";
 import { localDateString, timezoneFor } from "@/lib/posting-times";
-import { getOwnerPlan, getPost, insertPosts, lastPlannedDate, loadPlanSettings, saveFirstScript } from "@/lib/posts";
+import {
+  getOwnerPlan,
+  getPost,
+  getScriptForChecks,
+  insertPosts,
+  lastPlannedDate,
+  loadPlanSettings,
+  saveFirstScript,
+} from "@/lib/posts";
+import { runScriptChecks, type PostStatus } from "@/lib/qa/script-pipeline";
+import { createQaStore } from "@/lib/qa/store";
 import { maxSecondsFor, writeScriptForPost } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -63,9 +73,18 @@ export async function planNextFourWeeks(brandId: string, _prev: ActionState): Pr
   }
 }
 
-/** "Write script" for one planned post: Claude (MAIN) writes it, our code checks the length, we save version 1. */
+/** One sentence for where the post went after the checks. */
+const CHECK_OUTCOME: Record<PostStatus, string> = {
+  script_review: "Checked: ready for script review.",
+  approved: "Checked and approved.",
+  team_review: "It failed the checks after one rewrite and is in the team queue.",
+  needs_you: "It failed the checks after one rewrite; the client sees “Needs you”.",
+};
+
+/** "Write script" for one planned post: Claude (MAIN) writes it, our code checks the length, we save version 1, then Gates 1 and 2 run. */
 export async function writeScript(postId: string, _prev: ActionState): Promise<ActionState> {
   await requireAdmin();
+  let written: string | null = null;
   try {
     const post = await getPost(postId);
     if (!post) return { status: "error", message: "Post not found." };
@@ -79,14 +98,59 @@ export async function writeScript(postId: string, _prev: ActionState): Promise<A
       maxSeconds,
       runScript: (ctx) => runClaudeTask("script", ctx),
     });
-    await saveFirstScript(row);
+    const id = await saveFirstScript(row);
+    written = `Script written (about ${Math.round(row.est_seconds)} seconds).`;
     revalidatePath(`/admin/clients/${brand.id}`);
-    return { status: "ok", message: `Script written (about ${Math.round(row.est_seconds)} seconds).` };
+    const checks = await runScriptChecks({
+      brand,
+      postId: post.id,
+      script: { ...row, id, spoken_text: null },
+      maxSeconds,
+      run: runClaudeTask,
+      store: createQaStore(),
+    });
+    revalidatePath(`/admin/clients/${brand.id}`);
+    return { status: "ok", message: `${written} ${CHECK_OUTCOME[checks.outcome]}` };
   } catch (error) {
-    logAdminError("[admin] write script failed", { postId }, error);
+    logAdminError(written ? "[admin] script checks failed" : "[admin] write script failed", { postId }, error);
+    if (written) {
+      const why = plainAdminMessage(error, "something went wrong.");
+      return { status: "error", message: `Script written, but the checks didn't finish: ${why} Press “Run checks” to try again.` };
+    }
     return {
       status: "error",
       message: plainAdminMessage(error, "Couldn't write the script. Please try again in a minute."),
+    };
+  }
+}
+
+/** "Run checks": Gates 1 and 2 for a script still pending (or passed but without spoken_text). */
+export async function checkScript(scriptId: string, _prev: ActionState): Promise<ActionState> {
+  await requireAdmin();
+  try {
+    const found = await getScriptForChecks(scriptId);
+    if (!found) return { status: "error", message: "Script not found." };
+    const { script, post } = found;
+    const runnable = script.qa_status === "pending" || (script.qa_status === "passed" && !script.spoken_text);
+    if (!runnable) return { status: "error", message: "This script has already been checked." };
+    const brand = await getBrand(post.brand_id);
+    if (!brand) return NOT_FOUND;
+    const maxSeconds = maxSecondsFor(await getOwnerPlan(brand.owner_id));
+    const checks = await runScriptChecks({
+      brand,
+      postId: post.id,
+      script,
+      maxSeconds,
+      run: runClaudeTask,
+      store: createQaStore(),
+    });
+    revalidatePath(`/admin/clients/${brand.id}`);
+    return { status: "ok", message: CHECK_OUTCOME[checks.outcome] };
+  } catch (error) {
+    logAdminError("[admin] script checks failed", { scriptId }, error);
+    return {
+      status: "error",
+      message: plainAdminMessage(error, "Couldn't run the checks. Please try again in a minute."),
     };
   }
 }

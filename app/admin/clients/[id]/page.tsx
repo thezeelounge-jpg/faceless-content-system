@@ -18,7 +18,7 @@ import { PlanGrid, PlanList } from "@/components/admin/plan-view";
 import { getBrand, listBrandVersions } from "@/lib/brands";
 import { timezoneFor } from "@/lib/posting-times";
 import { listPosts } from "@/lib/posts";
-import { generateBrandProfile, planNextFourWeeks, saveProfileEdit, writeScript } from "./actions";
+import { checkScript, generateBrandProfile, planNextFourWeeks, saveProfileEdit, writeScript } from "./actions";
 
 export default function BrandPage({ params }: PageProps<"/admin/clients/[id]">) {
   return (
@@ -135,17 +135,31 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
               <PlanList
                 posts={posts}
                 timezone={timezone}
-                actions={(post) =>
-                  post.status === "planned" && post.scripts.length === 0 ? (
+                actions={(post) => {
+                  if (post.status === "planned" && post.scripts.length === 0) {
+                    return (
+                      <ActionButton
+                        action={writeScript.bind(null, post.id)}
+                        label="Write script"
+                        pendingLabel="Writing and checking… (a few minutes)"
+                        variant="outline"
+                        size="sm"
+                      />
+                    );
+                  }
+                  const latest = [...post.scripts].sort((a, b) => b.version - a.version)[0];
+                  const needsChecks =
+                    latest && (latest.qa_status === "pending" || (latest.qa_status === "passed" && !latest.spoken_text));
+                  return needsChecks ? (
                     <ActionButton
-                      action={writeScript.bind(null, post.id)}
-                      label="Write script"
-                      pendingLabel="Writing… (up to a minute)"
+                      action={checkScript.bind(null, latest.id)}
+                      label="Run checks"
+                      pendingLabel="Checking… (up to a few minutes)"
                       variant="outline"
                       size="sm"
                     />
-                  ) : null
-                }
+                  ) : null;
+                }}
               />
             </>
           ) : (

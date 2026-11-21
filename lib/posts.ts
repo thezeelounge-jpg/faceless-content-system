@@ -2,6 +2,7 @@ import "server-only";
 import { z } from "zod";
 import type { PlannedPostRow, PlanSettings } from "@/lib/planner";
 import { localDateString } from "@/lib/posting-times";
+import type { StoredScript } from "@/lib/qa/script-pipeline";
 import type { NewScriptRow } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -48,6 +49,7 @@ export type PostRow = {
   hook: string | null;
   format: "talking" | "story";
   status: string;
+  status_reason?: string | null;
 };
 
 export type PostWithScript = PostRow & {
@@ -57,6 +59,7 @@ export type PostWithScript = PostRow & {
     qa_status: string;
     est_seconds: number | null;
     display_text: string | null;
+    spoken_text: string | null;
     hashtags: string[];
   }[];
 };
@@ -66,7 +69,7 @@ export async function listPosts(brandId: string): Promise<PostWithScript[]> {
   const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const { data, error } = await createAdminClient()
     .from("posts")
-    .select("id, brand_id, scheduled_for, pillar, title, hook, format, status, scripts(id, version, qa_status, est_seconds, display_text, hashtags)")
+    .select("id, brand_id, scheduled_for, pillar, title, hook, format, status, status_reason, scripts(id, version, qa_status, est_seconds, display_text, spoken_text, hashtags)")
     .eq("brand_id", brandId)
     .gte("scheduled_for", since)
     .order("scheduled_for", { ascending: true })
@@ -83,12 +86,13 @@ export async function getOwnerPlan(ownerId: string): Promise<string | null> {
 }
 
 /**
- * Saves version 1 of a post's script and marks the post "scripting" (Gate 1
- * moves it on in part B2). The unique (post_id, version) rule stops doubles.
+ * Saves version 1 of a post's script, marks the post "scripting" (the QA
+ * gates move it on) and returns the script id. The unique (post_id, version)
+ * rule stops doubles.
  */
-export async function saveFirstScript(row: NewScriptRow): Promise<void> {
+export async function saveFirstScript(row: NewScriptRow): Promise<string> {
   const db = createAdminClient();
-  const { error } = await db.from("scripts").insert(row);
+  const { data, error } = await db.from("scripts").insert(row).select("id").single();
   if (error) throw new Error(`Could not save script: ${error.message}`);
   const { error: postError } = await db
     .from("posts")
@@ -96,6 +100,21 @@ export async function saveFirstScript(row: NewScriptRow): Promise<void> {
     .eq("id", row.post_id)
     .eq("status", "planned");
   if (postError) throw new Error(`Could not update post status: ${postError.message}`);
+  return (data as { id: string }).id;
+}
+
+const SCRIPT_COLUMNS =
+  "id, post_id, version, est_seconds, qa_status, spoken_text, hook, body, cta, display_text, captions, hashtags, broll_keywords, edit_plan";
+
+/** A script and its post, for "Run checks". */
+export async function getScriptForChecks(scriptId: string): Promise<{ script: StoredScript; post: PostRow } | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(scriptId)) return null;
+  const { data, error } = await createAdminClient().from("scripts").select(SCRIPT_COLUMNS).eq("id", scriptId).maybeSingle();
+  if (error) throw new Error(`Could not load script: ${error.message}`);
+  if (!data) return null;
+  const script = { ...(data as unknown as StoredScript), est_seconds: Number((data as { est_seconds: unknown }).est_seconds) };
+  const post = await getPost(script.post_id);
+  return post ? { script, post } : null;
 }
 
 export async function getPost(postId: string): Promise<PostRow | null> {

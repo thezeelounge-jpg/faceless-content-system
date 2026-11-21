@@ -9,6 +9,16 @@ import type {
   ScriptOutput,
   ScriptQaOutput,
 } from "@/lib/ai-schemas";
+import { firstSentence } from "@/lib/qa/script-checks";
+
+/**
+ * Test-only switch for mock mode, so the Gate 1 rewrite path can be exercised
+ * without spending anything:
+ * - "good" (default): drafts that pass;
+ * - "bad_first_draft": the first draft breaks the rules, the rewrite fixes it;
+ * - "always_bad": the first draft and the rewrite both break the rules.
+ */
+export type MockScenario = "good" | "bad_first_draft" | "always_bad";
 
 export type MockBrand = {
   name: string;
@@ -19,6 +29,8 @@ export type MockBrand = {
   sound_answers: Record<string, string>;
   banned_words: string[];
   words_per_second: number;
+  samples?: string | null;
+  profile_md?: string | null;
 };
 
 const NICHE_PILLARS: Record<string, string[]> = {
@@ -59,6 +71,12 @@ export function mainOffer(offers: string | null): string {
   const first = (offers ?? "").split(/[,\n;]/)[0]?.trim() ?? "";
   const name = first.split(/\s+(?:for|at|@|-|–)\s+/i)[0]?.trim();
   return name || "free call";
+}
+
+/** The first offer as written, starting lower case: "Online consultation for Rs 2,999" → "online consultation for Rs 2,999". */
+export function firstOffer(offers: string | null): string {
+  const first = (offers ?? "").split(/[\n;]/)[0]?.split(/,(?!\d)/)[0]?.trim() ?? "";
+  return first ? first.charAt(0).toLowerCase() + first.slice(1) : "free call";
 }
 
 const words = (text: string) => text.split(/\s+/).filter(Boolean);
@@ -134,7 +152,8 @@ export function mockPlan(brand: MockBrand, input: { slots: string[]; pillars: st
 
 function fitScript(brand: MockBrand, parts: { hook: string; body: string; cta: string }, maxSeconds: number, wps: number) {
   const budget = Math.floor(maxSeconds * wps);
-  const hook = firstWords(parts.hook, 12);
+  let hook = firstWords(parts.hook, 12);
+  if (!/[.?!]$/.test(hook)) hook += "?";
   const cta = parts.cta;
   const room = Math.max(0, budget - words(hook).length - words(cta).length);
   let body = firstWords(parts.body, room);
@@ -170,40 +189,83 @@ function scriptExtras(brand: MockBrand, core: { hook: string; body: string; cta:
   };
 }
 
-export function mockScript(
-  brand: MockBrand,
-  input: { title: string; hook: string; pillar: string; format: string; max_seconds: number; words_per_second: number },
-): ScriptOutput {
-  const offer = mainOffer(brand.offers);
+type ScriptRequest = {
+  title: string;
+  hook: string;
+  pillar: string;
+  format: string;
+  max_seconds: number;
+  words_per_second: number;
+};
+
+export function mockScript(brand: MockBrand, input: ScriptRequest, scenario: MockScenario = "good"): ScriptOutput {
+  if (scenario !== "good") return badDraft(brand, input);
   const hook = /[?.!]$/.test(input.hook.trim()) ? input.hook.trim() : `${input.hook.trim()}?`;
   const body =
     `${brand.sound_answers.greeting ?? "Hi"}. Let's talk about ${input.title.toLowerCase()}. ` +
     `Most ${short(brand.audience, 4, "people")} only hear the loud advice. ` +
     `Here is the simple version: start small, stay consistent, and ask for help early. ` +
     `${brand.sound_answers.phrases ?? ""}`.trim();
-  const core = fitScript(brand, { hook, body, cta: `Book your ${offer} today.` }, input.max_seconds, input.words_per_second);
+  const cta = `Book your ${firstOffer(brand.offers)} today.`;
+  const core = fitScript(brand, { hook, body, cta }, input.max_seconds, input.words_per_second);
   return clean(scriptExtras(brand, core, input.pillar, input.format), brand.banned_words);
+}
+
+/** A draft that breaks the rules on purpose: long hook, banned word, made-up result, no offer in the CTA. */
+function badDraft(brand: MockBrand, input: ScriptRequest): ScriptOutput {
+  const banned = brand.banned_words.find((word) => word.trim());
+  const core = {
+    hook: "Listen carefully because this is the one simple thing that nobody in your city ever tells you.",
+    body: `${banned ? `This ${banned} trick changes everything. ` : ""}9 out of 10 of my clients see results in one week.`,
+    cta: "Follow for more.",
+  };
+  return scriptExtras(brand, core, input.pillar, input.format);
+}
+
+const NUMBER = /\d[\d,.]*/g;
+const plainNumber = (n: string) => n.replace(/[,.]+$/, "").replace(/,/g, "");
+
+/** Numbers we may say: the ones in the brand's offers, profile and samples ("2,999" → "2999"). */
+function knownNumbers(brand: MockBrand): Set<string> {
+  const facts = [brand.offers, brand.profile_md, brand.samples].join(" ");
+  return new Set((facts.match(NUMBER) ?? []).map(plainNumber));
+}
+
+const sentences = (text: string) => text.split(/(?<=[.?!])\s+/).filter(Boolean);
+
+/** Sentences with a number that isn't in the brand details (a made-up fact). */
+function unsupportedSentences(brand: MockBrand, text: string): string[] {
+  const known = knownNumbers(brand);
+  return sentences(text).filter((sentence) => (sentence.match(NUMBER) ?? []).some((n) => !known.has(plainNumber(n))));
+}
+
+/** Sounds like them: the greeting or a favourite phrase is in the script. */
+function soundsLikeThem(brand: MockBrand, text: string): boolean {
+  const marks = [brand.sound_answers.greeting, brand.sound_answers.phrases].filter((m): m is string => Boolean(m?.trim()));
+  return marks.length === 0 || marks.some((mark) => text.toLowerCase().includes(mark.trim().toLowerCase()));
 }
 
 export function mockScriptQa(
   brand: MockBrand,
   input: { script: { hook: string; body: string; cta: string; display_text: string } },
 ): ScriptQaOutput {
-  const firstSentence = input.script.display_text.split(/(?<=[.?!])\s/)[0] ?? "";
-  const hookOk = words(firstSentence).length <= 12;
+  const hookWords = words(firstSentence(input.script.display_text)).length;
+  const hookOk = hookWords <= 12;
   const ctaOk = input.script.cta.toLowerCase().includes(mainOffer(brand.offers).toLowerCase());
+  const madeUp = unsupportedSentences(brand, input.script.display_text);
   const issues = [
-    ...(hookOk ? [] : [{ code: "hook", detail: `The first sentence has ${words(firstSentence).length} words; keep it to 12.` }]),
+    ...(hookOk ? [] : [{ code: "hook", detail: `The first sentence has ${hookWords} words; keep it to 12.` }]),
     ...(ctaOk ? [] : [{ code: "cta", detail: `The call to action should point to "${mainOffer(brand.offers)}".` }]),
+    ...madeUp.map((sentence) => ({ code: "made_up_fact", detail: `"${sentence}" is not in the brand details. Remove it.` })),
   ];
   return {
     hook_ok: hookOk,
     cta_matches_offers: ctaOk,
-    no_made_up_facts: true,
+    no_made_up_facts: madeUp.length === 0,
     risky_claims_softened: true,
     language_matches: true,
     platform_safe: true,
-    voice_score: 8,
+    voice_score: soundsLikeThem(brand, input.script.display_text) ? 8 : 6,
     issues,
   };
 }
@@ -211,12 +273,26 @@ export function mockScriptQa(
 export function mockScriptRewrite(
   brand: MockBrand,
   input: { script: ScriptOutput; max_seconds: number; words_per_second: number },
+  scenario: MockScenario = "good",
 ): ScriptOutput {
-  const offer = mainOffer(brand.offers);
+  if (scenario === "always_bad") return input.script;
   const pillar = input.script.broll_keywords[0] ?? "tips";
+  const unsupported = new Set(unsupportedSentences(brand, input.script.body));
+  let body = removeBannedWords(
+    sentences(input.script.body)
+      .filter((sentence) => !unsupported.has(sentence))
+      .join(" "),
+    brand.banned_words,
+  );
+  const greeting = brand.sound_answers.greeting;
+  if (greeting && !soundsLikeThem(brand, body)) body = `${greeting}. ${body}`.trim();
+  const hook =
+    words(input.script.hook).length > 12
+      ? `${firstWords(input.script.hook, 10).replace(/[.,!?]+$/, "")}?`
+      : input.script.hook;
   const core = fitScript(
     brand,
-    { hook: input.script.hook, body: input.script.body, cta: `Book your ${offer} today.` },
+    { hook, body: body || "Here is the one thing to remember.", cta: `Book your ${firstOffer(brand.offers)} today.` },
     input.max_seconds,
     input.words_per_second,
   );

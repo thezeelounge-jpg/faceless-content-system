@@ -57,6 +57,7 @@ export function PlanList({
               {longDate(date)} · {localTimeString(new Date(post.scheduled_for), timezone)} · {post.format} · {post.pillar ?? "—"} ·{" "}
               {post.status}
             </div>
+            {post.status_reason && <div className="text-destructive text-xs">{post.status_reason}</div>}
             <div className="font-medium">{post.title}</div>
             {post.hook && <div className="text-muted-foreground">“{post.hook}”</div>}
             {script && (
@@ -65,6 +66,11 @@ export function PlanList({
                   Script v{script.version} · about {Math.round(Number(script.est_seconds ?? 0))} s · QA {script.qa_status}
                 </summary>
                 <p className="mt-1 break-words whitespace-pre-wrap">{script.display_text}</p>
+                {script.spoken_text && (
+                  <p className="text-muted-foreground mt-1 break-words whitespace-pre-wrap">
+                    <span className="font-medium">Spoken:</span> {script.spoken_text}
+                  </p>
+                )}
                 <p className="text-muted-foreground mt-1">{script.hashtags.join(" ")}</p>
               </details>
             )}
