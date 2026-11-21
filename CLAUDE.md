@@ -74,9 +74,9 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 - If unsure about an API, read its docs first.
 
 ## Status (update at the end of every session)
-- Phase: 2 (the brain), branch `phase-2-brain`. Part A (items 0-3) done.
-- Done: MOCK_CLAUDE switch; onboarding form (`components/onboarding/brand-form.tsx`, schema `lib/brand-input.ts`) + Admin → Clients → New client; `lib/claude.ts` (only entry point `runClaudeTask`, mock answers in `lib/claude-mocks.ts`, prices in `lib/ai-prices.ts`, prompts in `/prompts`); brand profile + versions (`save_brand_version` rpc, `lib/brand-versions.ts`, brand page).
+- Phase: 2 (the brain), branch `phase-2-brain`. Part A (items 0-3) and part B1 (items 4-5 + QA fixes) done.
+- Done: MOCK_CLAUDE switch; onboarding form (`components/onboarding/brand-form.tsx`, schema `lib/brand-input.ts`) + Admin → Clients → New client; `lib/claude.ts` (only entry point `runClaudeTask`, stable API, one FAST fallback on 529, mock answers in `lib/claude-mocks.ts`, prices in `lib/ai-prices.ts`, prompts in `/prompts`); brand profile + versions (`save_brand_version` rpc, `lib/brand-versions.ts`, brand page). B1: `lib/plans.ts`; `lib/posting-times.ts` (primary country = first audience country); `lib/planner.ts` (our slots, Claude fills them) + "Plan next 4 weeks"; `lib/scripts.ts` + "Write script" (version 1, qa_status pending, post → scripting); `ai_usage.cost_usd` numeric(12,6); bundle secret scan (`tests/security`); admin errors via `lib/admin-errors.ts` (`PlainError` messages only).
 - In progress: nothing.
-- Next: Part B: item 4 monthly planner (`lib/posting-times.ts`), 5 script writer (`lib/plans.ts`), 6 Gate 1, 7 Gate 2, 8 golden set.
+- Next: Part B2: item 6 Gate 1 (runs on scripts with qa_status pending, one rewrite), 7 Gate 2 (fills spoken_text), 8 golden set.
 - Known issues: Claude prices are estimates.
 - QA thresholds last calibrated: never.
