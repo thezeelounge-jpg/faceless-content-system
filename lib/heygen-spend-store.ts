@@ -51,5 +51,28 @@ export function createSpendStore(): SpendStore {
       const { error } = await db.from("provider_usage").update(patch).eq("id", id);
       if (error) fail("finish", error);
     },
+    async pauseRenders() {
+      const { error } = await db.from("app_settings").upsert({ key: "renders_paused", value: true }, { onConflict: "key" });
+      if (error) fail("pause renders", error);
+    },
+    async queueCapAlert(alert) {
+      if (alert.recipients.length === 0) return 0;
+      // Unique dedupe_key: a repeat inserts nothing (on conflict do nothing).
+      const { data, error } = await db
+        .from("email_outbox")
+        .upsert(
+          alert.recipients.map((to) => ({
+            to_email: to,
+            kind: "spend_cap_alert",
+            subject: alert.subject,
+            body: alert.body,
+            dedupe_key: `${alert.dedupeKey}:${to}`,
+          })),
+          { onConflict: "dedupe_key", ignoreDuplicates: true },
+        )
+        .select("id");
+      if (error) fail("queue cap alert", error);
+      return data?.length ?? 0;
+    },
   };
 }

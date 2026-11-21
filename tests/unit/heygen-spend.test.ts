@@ -48,10 +48,10 @@ describe("caps and the Karachi day", () => {
     expect(spend.rows.filter((r) => r.note !== "seed")).toEqual([]);
   });
 
-  it("the app_settings caps override the defaults", async () => {
+  it("the app_settings caps override the defaults (real calls; mock ones never count, decision (a))", async () => {
     const spend = memorySpendStore({ caps: { create_twin: 1 } });
-    await guardHeygenSpend({ kind: "create_twin", mock: true, store: spend.store, now: NOW });
-    await expect(guardHeygenSpend({ kind: "create_twin", mock: true, store: spend.store, now: NOW })).rejects.toThrow(
+    await guardHeygenSpend({ kind: "create_twin", mock: false, store: spend.store, now: NOW, adminEmails: [] });
+    await expect(guardHeygenSpend({ kind: "create_twin", mock: false, store: spend.store, now: NOW, adminEmails: [] })).rejects.toThrow(
       "Today's HeyGen limit for new twins is reached (1 a day).",
     );
   });
@@ -86,6 +86,136 @@ describe("caps and the Karachi day", () => {
       SpendGuardError,
     );
     expect(call).not.toHaveBeenCalled();
+  });
+});
+
+// SF4 (p3-fix2): hitting the daily cap also pauses all HeyGen work and queues
+// a mocked alert email to the ADMINS only, once per kind per Karachi day.
+describe("SF4: daily cap hit → admins alerted once, renders paused", () => {
+  const ADMINS = ["owner@example.com", "rowan@example.com"];
+  const hit = (spend: ReturnType<typeof memorySpendStore>, now = NOW, kind: "render" | "create_twin" = "render") =>
+    guardHeygenSpend({ kind, mock: false, store: spend.store, now, brandId: BRAND_ID, adminEmails: ADMINS }).catch((e) => e);
+
+  it("first hit: one mocked alert per admin, renders_paused set, same refusal as before", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    const error = await hit(spend);
+    expect(error).toBeInstanceOf(SpendGuardError);
+    expect(error.message).toBe(
+      "Today's HeyGen limit for videos is reached (3 a day). Nothing was sent to HeyGen. Try again tomorrow, or raise heygen_daily_caps in Settings.",
+    );
+    expect(spend.settings.rendersPaused).toBe(true);
+    expect(spend.alerts.map((a) => [a.to_email, a.kind, a.status, a.dedupe_key])).toEqual([
+      ["owner@example.com", "spend_cap_alert", "mocked", "spend_cap:render:2026-11-22:owner@example.com"],
+      ["rowan@example.com", "spend_cap_alert", "mocked", "spend_cap:render:2026-11-22:rowan@example.com"],
+    ]);
+    expect(spend.alerts[0].subject).toBe("HeyGen daily limit reached: videos (3 a day). HeyGen work is paused.");
+    expect(spend.alerts[0].body).toContain("renders_paused");
+  });
+
+  it("admins only: the client is never emailed (only ADMIN_EMAILS addresses)", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    await hit(spend);
+    expect(spend.alerts.every((a) => ADMINS.includes(a.to_email))).toBe(true);
+  });
+
+  it("second hit the same Karachi day (after an admin un-pauses): refused again, NO second alert", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    await hit(spend);
+    spend.settings.rendersPaused = false; // an admin turns it back off, but the cap is still reached
+    const again = await hit(spend, new Date("2026-11-22T15:00:00.000Z")); // 20:00 Karachi, same day
+    expect(again.message).toContain("Today's HeyGen limit for videos is reached");
+    expect(spend.alerts).toHaveLength(2);
+    expect(spend.settings.rendersPaused).toBe(true);
+  });
+
+  it("while paused, a further call is refused by the pause and queues nothing", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    await hit(spend);
+    const again = await hit(spend);
+    expect(again.message).toContain("renders_paused is on");
+    expect(spend.alerts).toHaveLength(2);
+  });
+
+  it("a new alert on the next Karachi day, and a separate one per kind", async () => {
+    const spend = memorySpendStore({ caps: { create_twin: 0 } });
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    await hit(spend);
+    spend.settings.rendersPaused = false;
+    await hit(spend, NOW, "create_twin");
+    spend.settings.rendersPaused = false;
+    spend.seed("render", "2026-11-22T20:00:00.000Z", 3); // 01:00 on 23 Nov in Karachi
+    await hit(spend, new Date("2026-11-22T21:00:00.000Z"));
+    expect(spend.alerts.map((a) => a.dedupe_key.split(":").slice(0, 3).join(":"))).toEqual([
+      "spend_cap:render:2026-11-22",
+      "spend_cap:render:2026-11-22",
+      "spend_cap:create_twin:2026-11-22",
+      "spend_cap:create_twin:2026-11-22",
+      "spend_cap:render:2026-11-23",
+      "spend_cap:render:2026-11-23",
+    ]);
+  });
+
+  it("with no ADMIN_EMAILS it still pauses and refuses (no alert rows to write)", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    const error = await guardHeygenSpend({ kind: "render", mock: false, store: spend.store, now: NOW, brandId: BRAND_ID, adminEmails: [] }).catch(
+      (e) => e,
+    );
+    expect(error).toBeInstanceOf(SpendGuardError);
+    expect(spend.settings.rendersPaused).toBe(true);
+    expect(spend.alerts).toEqual([]);
+  });
+
+  it("if pausing or the alert fails, the call is STILL refused with the cap message", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    spend.store.pauseRenders = async () => {
+      throw new Error("db down");
+    };
+    spend.store.queueCapAlert = async () => {
+      throw new Error("db down");
+    };
+    const error = await hit(spend);
+    expect(error).toBeInstanceOf(SpendGuardError);
+    expect(error.message).toContain("Today's HeyGen limit for videos is reached");
+  });
+});
+
+// Decision (a) (Rowan): mock rows (note 'mock', cost 0) are still recorded
+// but do NOT count toward the daily cap. Real rows still do.
+describe("decision (a): mock calls never use up the daily cap", () => {
+  it("5 mock renders over a cap of 3 all go through and are all recorded", async () => {
+    const spend = memorySpendStore();
+    for (let i = 0; i < 5; i++) {
+      await guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW, brandId: BRAND_ID, adminEmails: [] });
+    }
+    expect(spend.rows.map((r) => [r.note, r.mock, r.cost_usd])).toEqual(Array(5).fill(["mock", true, 0]));
+    expect(spend.settings.rendersPaused).toBeFalsy();
+  });
+
+  it("a failed mock call keeps its mock mark (the note is overwritten, the mark is not)", async () => {
+    const spend = memorySpendStore();
+    await withHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW, brandId: BRAND_ID }, async () => {
+      throw new HeygenError("failed", "HeyGen had a problem (500). Try again later.");
+    }).catch(() => null);
+    expect(spend.rows[0]).toMatchObject({ status: "failed", mock: true });
+  });
+
+  it("real calls are still capped, even after many mock rows today", async () => {
+    const spend = memorySpendStore();
+    for (let i = 0; i < 4; i++) {
+      await guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW, brandId: BRAND_ID });
+    }
+    for (let i = 0; i < 3; i++) {
+      await guardHeygenSpend({ kind: "render", mock: false, store: spend.store, now: NOW, brandId: BRAND_ID });
+    }
+    await expect(
+      guardHeygenSpend({ kind: "render", mock: false, store: spend.store, now: NOW, brandId: BRAND_ID, adminEmails: [] }),
+    ).rejects.toThrow("Today's HeyGen limit for videos is reached (3 a day).");
   });
 });
 

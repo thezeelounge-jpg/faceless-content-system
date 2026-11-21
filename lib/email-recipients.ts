@@ -29,6 +29,11 @@ export function consentLinkRecipients(clientEmail: string | null, adminEmails: s
   return out;
 }
 
-export function reshootRecipients(adminEmails: string[]): string[] {
+/** Admins only, each once (lower-case). */
+export function adminRecipients(adminEmails: string[]): string[] {
   return [...new Set(adminEmails.map(norm))];
+}
+
+export function reshootRecipients(adminEmails: string[]): string[] {
+  return adminRecipients(adminEmails);
 }

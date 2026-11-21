@@ -398,18 +398,85 @@ describe("HeyGen spend guard (provider_usage + reserve_heygen_spend)", () => {
       await db.exec(`insert into public.provider_usage (provider, kind, status, created_at)
                      values ('heygen', 'create_twin', 'succeeded', now() - interval '2 days')`);
       const since = new Date(Date.now() - 60_000).toISOString();
-      const first = (await reserve("create_twin", since, 2)).rows[0].id;
-      const second = (await reserve("create_twin", since, 2)).rows[0].id;
-      const third = (await reserve("create_twin", since, 2)).rows[0].id;
+      const first = (await reserve("create_twin", since, 2, null)).rows[0].id;
+      const second = (await reserve("create_twin", since, 2, null)).rows[0].id;
+      const third = (await reserve("create_twin", since, 2, null)).rows[0].id;
       expect(first).toMatch(/^[0-9a-f-]{36}$/);
       expect(second).toMatch(/^[0-9a-f-]{36}$/);
       expect(third).toBeNull();
       // Renders have their own count.
-      expect((await reserve("render", since, 1)).rows[0].id).not.toBeNull();
-      const row = await db.query("select provider, kind, status, cost_usd::float as cost, note from public.provider_usage where id = $1", [first]);
-      expect(row.rows).toEqual([{ provider: "heygen", kind: "create_twin", status: "reserved", cost: 0, note: "mock" }]);
+      expect((await reserve("render", since, 1, null)).rows[0].id).not.toBeNull();
+      const row = await db.query(
+        "select provider, kind, status, cost_usd::float as cost, note, mock from public.provider_usage where id = $1",
+        [first],
+      );
+      expect(row.rows).toEqual([{ provider: "heygen", kind: "create_twin", status: "reserved", cost: 0, note: null, mock: false }]);
       await expect(reserve("other", since, 5)).rejects.toThrow(/unknown spend kind/);
       await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  // Decision (a) (p3-fix2): mock rows are recorded but never count toward the cap.
+  it("decision (a): 5 mock reserves over a cap of 2 all succeed and are recorded (mock = true, cost 0)", async () => {
+    await asRole("service_role", null, async () => {
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const ids: (string | null)[] = [];
+      for (let i = 0; i < 5; i++) ids.push((await reserve("render", since, 2, "mock")).rows[0].id);
+      expect(ids.every((id) => typeof id === "string")).toBe(true);
+      const rows = await db.query<{ mock: boolean; cost: number; note: string }>(
+        "select mock, cost_usd::float as cost, note from public.provider_usage where kind = 'render'",
+      );
+      expect(rows.rows).toEqual(Array(5).fill({ mock: true, cost: 0, note: "mock" }));
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("decision (a): real reserves are still capped after many mock rows; the mock mark survives a note change", async () => {
+    await asRole("service_role", null, async () => {
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const mockId = (await reserve("render", since, 2, "mock")).rows[0].id;
+      await reserve("render", since, 2, "mock");
+      // withHeygenSpend overwrites the note when a call fails; the row must stay mock.
+      await db.query("update public.provider_usage set status = 'failed', note = 'HeyGen had a problem' where id = $1", [mockId]);
+      expect((await reserve("render", since, 2, null)).rows[0].id).not.toBeNull();
+      expect((await reserve("render", since, 2, null)).rows[0].id).not.toBeNull();
+      expect((await reserve("render", since, 2, null)).rows[0].id).toBeNull();
+      const counts = await db.query<{ mock: boolean; n: number }>(
+        "select mock, count(*)::int as n from public.provider_usage group by mock order by mock",
+      );
+      expect(counts.rows).toEqual([
+        { mock: false, n: 2 },
+        { mock: true, n: 2 },
+      ]);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("decision (a): race safety unchanged: 10 real reserves at once against cap 3 (with mock rows present) → exactly 3", async () => {
+    await asRole("service_role", null, async () => {
+      const since = new Date(Date.now() - 60_000).toISOString();
+      for (let i = 0; i < 4; i++) await reserve("render", since, 3, "mock");
+      const results = await Promise.all(Array.from({ length: 10 }, () => reserve("render", since, 3, null)));
+      expect(results.filter((r) => r.rows[0].id !== null)).toHaveLength(3);
+      const real = await db.query<{ n: number }>("select count(*)::int as n from public.provider_usage where not mock");
+      expect(real.rows).toEqual([{ n: 3 }]);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  // SF4 (p3-fix2): the cap alert is a mocked email_outbox row, once per dedupe_key.
+  it("SF4: a spend_cap_alert row is accepted once per dedupe_key; a repeat is ignored", async () => {
+    await asRole("service_role", null, async () => {
+      const values = `values ('owner@example.com', 'spend_cap_alert', 'Limit', 'Paused', 'spend_cap:render:2026-11-22:owner@example.com')`;
+      const columns = "insert into public.email_outbox (to_email, kind, subject, body, dedupe_key)";
+      expect((await db.query(`${columns} ${values} returning id`)).rows).toHaveLength(1);
+      await expect(db.query(`${columns} ${values}`)).rejects.toThrow(/duplicate key/);
+      // What lib/heygen-spend-store.ts does: a repeat is silently ignored.
+      expect((await db.query(`${columns} ${values} on conflict (dedupe_key) do nothing returning id`)).rows).toHaveLength(0);
+      // Other emails don't need a dedupe_key (null never collides).
+      await db.exec(`insert into public.email_outbox (to_email, kind, subject, body) values ('a@example.com', 'consent_link', 's', 'b');
+                     insert into public.email_outbox (to_email, kind, subject, body) values ('a@example.com', 'consent_link', 's', 'b');`);
+      await db.exec("delete from public.email_outbox");
     });
   });
 
