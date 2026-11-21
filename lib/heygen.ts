@@ -1,5 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { z } from "zod";
 import { isMockHeygen, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
@@ -9,6 +11,7 @@ import mockCreateAvatar from "@/tests/fixtures/heygen/create-avatar.json";
 import mockDirectUpload from "@/tests/fixtures/heygen/direct-upload.json";
 import mockLooks from "@/tests/fixtures/heygen/looks.json";
 import mockUsersMe from "@/tests/fixtures/heygen/users-me.json";
+import mockWebhookEndpoint from "@/tests/fixtures/heygen/webhook-endpoint.json";
 
 // Every HeyGen API call in the app lives in this file (CLAUDE.md "HeyGen rules").
 // - API v3 only, base https://api.heygen.com, header X-Api-Key.
@@ -31,6 +34,7 @@ export const MOCK_FIXTURE_VIDEO = "tests/fixtures/consent-good.mp4";
 
 const TIMEOUT_MS = 60_000;
 const UPLOAD_TIMEOUT_MS = 10 * 60_000;
+const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
 /**
  * SF6: the longest we will wait for HeyGen's Retry-After (seconds), in task code.
@@ -160,6 +164,28 @@ const videoSchema = z.object({
   }),
 });
 
+// Docs: "Avatar 6" says `data.video_id`; "Avatar Looks" shows `id` and "Video
+// Agent" a bare `video_id`. All three are read (UNCONFIRMED which one is real).
+const createdVideoSchema = z.object({
+  data: z.object({ video_id: z.string().optional(), id: z.string().optional() }).nullish(),
+  video_id: z.string().optional(),
+});
+
+// Docs: "Webhooks" (POST /v3/webhooks/endpoints → endpoint_id, secret).
+const webhookEndpointSchema = z.object({
+  data: z.object({ endpoint_id: z.string().optional(), secret: z.string().nullish() }).nullish(),
+  endpoint_id: z.string().optional(),
+  secret: z.string().nullish(),
+});
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 // Docs: "Direct Upload to S3".
 const directUploadSchema = z.object({
   data: z.object({
@@ -189,6 +215,23 @@ export type AvatarLook = {
   supportedEngines: string[];
   voiceId: string | null;
 };
+/** What we send to POST /v3/videos (our names; mapped to HeyGen's fields in createVideo). */
+export type NewVideo = {
+  /** HeyGen look id (`avatar_id`). */
+  lookId: string;
+  /** Our scripts.spoken_text (never display_text). Sent as HeyGen's `script`. */
+  spokenText: string;
+  voiceId: string;
+  /** The brand's chosen engine (`engine.type`). Never a silent fallback. */
+  engine: string;
+  /** Our videos.id, echoed back by HeyGen in webhooks (`callback_id`). */
+  callbackId: string;
+  /** Only when a public https site URL is configured. */
+  callbackUrl?: string | null;
+  title?: string;
+};
+export type WebhookEndpoint = { endpointId: string; secret: string | null };
+
 export type VideoStatus = {
   videoId: string;
   status: string;
@@ -288,7 +331,7 @@ async function send(
   deps: HeygenDeps,
   url: string,
   init: { method: string; headers: Record<string, string>; body?: BodyInit },
-  options: { method: string; timeoutMs?: number },
+  options: { method: string; timeoutMs?: number; read?: "json" | "bytes" },
 ): Promise<unknown> {
   const canRetryFailures = options.method === "GET";
   for (let attempt = 1; ; attempt++) {
@@ -303,7 +346,7 @@ async function send(
       }
       throw new HeygenError("failed", "Could not reach HeyGen. Try again later.", { cause });
     }
-    if (response.ok) return readJson(response);
+    if (response.ok) return options.read === "bytes" ? new Uint8Array(await response.arrayBuffer()) : readJson(response);
 
     const body = await readJson(response);
     const retryable = response.status === 429 || (canRetryFailures && response.status >= 500);
@@ -443,6 +486,74 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
         failureMessage: data.failure_message,
         fixturePath: deps.mock ? MOCK_FIXTURE_VIDEO : null,
       };
+    },
+
+    /**
+     * POST /v3/videos: starts a PAID render. Callers go through withHeygenSpend
+     * first (lib/render.ts). Docs: "Avatar 6" (body fields, `engine: {type}`,
+     * resolution, aspect_ratio) and "HeyGen Video" (callback_id; "send
+     * callback_id alone to deliver to the webhook endpoints registered for your
+     * workspace"). No idempotency key is documented for this call, so
+     * lib/render.ts keeps its own claim (videos.render_started_at).
+     */
+    async createVideo(input: NewVideo): Promise<{ videoId: string }> {
+      if (!input.spokenText.trim()) throw new HeygenError("bad_request", "There is no text to say. Write the script first.");
+      if (!input.engine) throw new HeygenError("bad_request", "No engine chosen for this client. Run the likeness test first.");
+      if (!input.lookId || !input.voiceId) {
+        throw new HeygenError("bad_request", "The twin has no look or no voice yet. Check the twin first.");
+      }
+      const body: Record<string, unknown> = {
+        type: "avatar",
+        avatar_id: input.lookId,
+        script: input.spokenText,
+        voice_id: input.voiceId,
+        engine: { type: input.engine },
+        resolution: HEYGEN_VIDEO_RESOLUTION,
+        aspect_ratio: "9:16",
+        callback_id: input.callbackId,
+      };
+      if (input.callbackUrl) body.callback_url = input.callbackUrl;
+      if (input.title) body.title = input.title;
+      const fixture = { data: { video_id: `video_mock_${input.callbackId}` } };
+      const json = await call(fixture, "/v3/videos", { method: "POST", body });
+      const parsed = parse(createdVideoSchema, json, "create video");
+      const videoId = parsed.data?.video_id ?? parsed.data?.id ?? parsed.video_id;
+      if (!videoId) throw new HeygenError("bad_output", "HeyGen gave an unexpected answer (create video).");
+      return { videoId };
+    },
+
+    /**
+     * Downloads a finished video file (the signed `video_url`, which expires:
+     * download at once). https only; our API key is NOT sent to the file host.
+     * Mock: the fixture video's bytes, no fetch.
+     */
+    async downloadVideo(url: string): Promise<Uint8Array> {
+      if (deps.mock) return new Uint8Array(await readFile(path.resolve(MOCK_FIXTURE_VIDEO)));
+      if (!isHttpsUrl(url)) throw new HeygenError("bad_output", "The video link from HeyGen is not usable.");
+      try {
+        const bytes = await send(deps, url, { method: "GET", headers: {} }, { method: "GET", timeoutMs: DOWNLOAD_TIMEOUT_MS, read: "bytes" });
+        return bytes as Uint8Array;
+      } catch (cause) {
+        throw new HeygenError("failed", "Could not download the video from HeyGen. Try again later.", { cause });
+      }
+    },
+
+    /**
+     * POST /v3/webhooks/endpoints (one-time setup script only). Docs
+     * ("Webhooks"): body `url` (https) and `events`; the answer has
+     * `endpoint_id` and `secret`, which "will not be shown again". Whether
+     * they sit under `data` is UNCONFIRMED, so both shapes are read.
+     */
+    async createWebhookEndpoint(input: { url: string; events: string[] }): Promise<WebhookEndpoint> {
+      if (!isHttpsUrl(input.url)) throw new HeygenError("bad_request", "The webhook URL must start with https://.");
+      const json = await call(mockWebhookEndpoint, "/v3/webhooks/endpoints", {
+        method: "POST",
+        body: { url: input.url, events: input.events },
+      });
+      const parsed = parse(webhookEndpointSchema, json, "webhook endpoint");
+      const endpointId = parsed.data?.endpoint_id ?? parsed.endpoint_id;
+      if (!endpointId) throw new HeygenError("bad_output", "HeyGen gave an unexpected answer (webhook endpoint).");
+      return { endpointId, secret: parsed.data?.secret ?? parsed.secret ?? null };
     },
   };
 }
