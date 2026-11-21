@@ -10,8 +10,9 @@
 // 3. Otherwise, during Ramadan (dates from app_settings "ramadan"), every
 //    network moves to after iftar / late evening.
 // 4. Otherwise, weekend times on the country's weekend, workday times on others.
-// 5. Friday: a time inside the Jumu'ah window (12:30 to 14:30 local) moves to
-//    14:30. This applies to overrides too.
+// 5. Friday, in Pakistan and the GCC only (JUMUAH_COUNTRIES): a time inside
+//    the Jumu'ah window (12:30 to 14:30 local) moves to 14:30. This applies
+//    to overrides too. Other countries (GB, US, ...) keep their Friday times.
 // All times are returned as UTC Date objects (stored as timestamptz).
 
 export const NETWORKS = ["instagram", "tiktok", "linkedin", "x"] as const;
@@ -32,11 +33,19 @@ export const DEFAULT_TIMES: { workday: DayTimes; weekend: DayTimes } = {
 /** During Ramadan: after iftar and late evening, every country. */
 export const RAMADAN_TIMES: DayTimes = { instagram: "21:30", tiktok: "22:30", linkedin: "21:00", x: "22:00" };
 
-/** Friday Jumu'ah prayer window (local time). Never post inside it. */
+/** Friday Jumu'ah prayer window (local time). Never post inside it in JUMUAH_COUNTRIES. */
 export const FRIDAY_PRAYER = { start: "12:30", end: "14:30" } as const;
+
+/** Where the Friday window applies (Rowan's decision, Nov 2026): Pakistan and the GCC. */
+export const JUMUAH_COUNTRIES: readonly string[] = ["PK", "AE", "SA", "QA", "KW", "BH", "OM"];
 
 export const DEFAULT_COUNTRY = "PK";
 
+// ---------------------------------------------------------------------------
+// POSTING TIMES TABLE: STARTING DEFAULTS, PENDING REVIEW BEFORE LAUNCH.
+// These are educated guesses, not measured data. Review them (and DEFAULT_TIMES
+// and RAMADAN_TIMES above) before launch, then tune from real results.
+// ---------------------------------------------------------------------------
 /** 0 = Sunday ... 6 = Saturday. Keys are the ISO codes in lib/brand-input.ts COUNTRIES. */
 export const COUNTRY_RULES: Record<string, CountryRule> = {
   PK: {
@@ -190,7 +199,8 @@ export function localPostingTime({ date, countries, ramadan, override, network }
       : rule.weekend.includes(weekdayOf(date))
         ? table.weekend[network]
         : table.workday[network]);
-  if (weekdayOf(date) === 5 && time >= FRIDAY_PRAYER.start && time < FRIDAY_PRAYER.end) time = FRIDAY_PRAYER.end;
+  const inPrayerWindow = time >= FRIDAY_PRAYER.start && time < FRIDAY_PRAYER.end;
+  if (weekdayOf(date) === 5 && JUMUAH_COUNTRIES.includes(country) && inPrayerWindow) time = FRIDAY_PRAYER.end;
   return time;
 }
 

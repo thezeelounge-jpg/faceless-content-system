@@ -66,6 +66,16 @@ describe("plan slots (our code picks the days and times, not Claude)", () => {
     expect(slots.map((s) => s.scheduled_for)).toEqual([...slots.map((s) => s.scheduled_for)].sort());
   });
 
+  it("the 1st post of a day keeps the Instagram time, a 2nd one gets the LinkedIn time", () => {
+    // Pakistan workday: Instagram 20:00, LinkedIn 10:00 (lib/posting-times.ts).
+    const onMonday = (posts_per_week: number) =>
+      buildPlanSlots(brand({ posting_days: [1], posts_per_week }), MON, NO_RAMADAN)
+        .filter((s) => s.date === MON)
+        .map((s) => localTimeString(new Date(s.scheduled_for), "Asia/Karachi"));
+    expect(onMonday(1)).toEqual(["20:00"]); // a single post: Instagram time
+    expect(onMonday(2)).toEqual(["10:00", "20:00"]); // two posts, in time order: LinkedIn slot, then Instagram slot
+  });
+
   it("refuses more than 2 posts a day with a plain error", () => {
     expect(() => buildPlanSlots(brand({ posting_days: [1], posts_per_week: 3 }), MON, NO_RAMADAN)).toThrow(PlanError);
     expect(() => buildPlanSlots(brand({ posting_days: [], posts_per_week: 1 }), MON, NO_RAMADAN)).toThrow(/posting day/);

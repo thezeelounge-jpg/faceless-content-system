@@ -5,6 +5,7 @@ import {
   FRIDAY_PRAYER,
   isRamadan,
   isWeekend,
+  JUMUAH_COUNTRIES,
   localTimeString,
   NETWORKS,
   postingTimeUtc,
@@ -64,8 +65,9 @@ describe("best posting times", () => {
     for (const time of Object.values(times)) expect(time).toBeInstanceOf(Date);
   });
 
-  it("never uses the Friday Jumu'ah window (12:30 to 14:30 local) in any country or network", () => {
-    for (const country of Object.keys(COUNTRY_RULES)) {
+  it("never uses the Friday Jumu'ah window (12:30 to 14:30 local) in Pakistan or the GCC, any network", () => {
+    expect([...JUMUAH_COUNTRIES].sort()).toEqual(["AE", "BH", "KW", "OM", "PK", "QA", "SA"]);
+    for (const country of JUMUAH_COUNTRIES) {
       for (const network of NETWORKS) {
         const time = postingTimeUtc({ date: FRI, countries: [country], network });
         const local = localTimeString(time, COUNTRY_RULES[country].timezone);
@@ -80,6 +82,20 @@ describe("best posting times", () => {
     // On other days the override is used as is.
     const monday = postingTimeUtc({ date: MON, countries: ["PK"], network: "x", override: { x: "13:00" } });
     expect(localTimeString(monday, "Asia/Karachi")).toBe("13:00");
+  });
+
+  it("shifts a Friday time in the window for Pakistan and a GCC country (UAE)", () => {
+    for (const [country, tz] of [["PK", "Asia/Karachi"], ["AE", "Asia/Dubai"]] as const) {
+      const time = postingTimeUtc({ date: FRI, countries: [country], network: "x", override: { x: "13:00" } });
+      expect(localTimeString(time, tz), country).toBe(FRIDAY_PRAYER.end);
+    }
+  });
+
+  it("does NOT shift Friday times in the UK or the US", () => {
+    for (const [country, tz] of [["GB", "Europe/London"], ["US", "America/New_York"]] as const) {
+      const time = postingTimeUtc({ date: FRI, countries: [country], network: "x", override: { x: "13:00" } });
+      expect(localTimeString(time, tz), country).toBe("13:00");
+    }
   });
 
   it("the brand's override wins when present (other networks keep the defaults)", () => {

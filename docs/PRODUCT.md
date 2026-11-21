@@ -110,7 +110,7 @@ Both: 9:16 at 1080x1920, word-by-word captions, quiet music, and an "AI-generate
 
 - During onboarding the customer picks posting days, posts per week (1 to 14) and up to 3 audience countries (default: Pakistan).
 - Posting times come from `lib/posting-times.ts`: starting values per network and per country, which the owner tunes over time. The customer never has to choose an hour. Settings has an optional override.
-- **Friday:** avoid Jumu'ah prayer time (about 12:30 to 2:30 pm local). The weekend follows each country (Pakistan and UAE: Saturday and Sunday; Saudi Arabia and Qatar: Friday and Saturday).
+- **Friday:** in Pakistan and the GCC (UAE, Saudi Arabia, Qatar, Kuwait, Bahrain, Oman), avoid Jumu'ah prayer time (about 12:30 to 2:30 pm local). Other countries keep their Friday times. The weekend follows each country (Pakistan and UAE: Saturday and Sunday; Saudi Arabia and Qatar: Friday and Saturday).
 - **Ramadan:** the admin sets the start and end dates each year in `app_settings`. During Ramadan, shift posts to after iftar and late evening, and lean the plan toward Ramadan-friendly topics.
 - Plans run 4 weeks ahead. The daily scriptwriter keeps the next 7 days scripted.
 
