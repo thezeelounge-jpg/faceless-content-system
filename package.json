@@ -10,11 +10,14 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:bundle": "vitest run tests/security/bundle.test.ts",
+    "eval:scripts": "vitest run --config vitest.eval.config.mts",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy",
     "db:push": "supabase db push"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
     "@base-ui/react": "^1.9.0",
     "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.119.2",

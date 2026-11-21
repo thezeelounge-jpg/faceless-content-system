@@ -1,15 +1,17 @@
 // Runs our real migration on an in-memory Postgres (PGlite) with small stand-ins
 // for Supabase's auth schema and roles, then proves the access rules work:
 // user A can never see user B's data, and customers can't write anything.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-const MIGRATION = readFileSync(
-  path.resolve(process.cwd(), "supabase/migrations/20261120000000_initial_schema.sql"),
-  "utf8",
-);
+// Every migration, in file-name order, exactly as `supabase db push` runs them.
+const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
+const MIGRATIONS = readdirSync(MIGRATIONS_DIR)
+  .filter((file) => file.endsWith(".sql"))
+  .sort()
+  .map((file) => readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
 
 // Minimal stand-ins for what Supabase provides in every project.
 const SUPABASE_STUBS = `
@@ -28,6 +30,13 @@ const SUPABASE_STUBS = `
   grant usage on schema public to anon, authenticated, service_role;
   grant usage on schema auth to anon, authenticated, service_role;
   grant execute on function auth.uid() to anon, authenticated, service_role;
+  create schema storage;
+  create table storage.buckets (
+    id text primary key,
+    name text not null,
+    public boolean default false,
+    allowed_mime_types text[]
+  );
 `;
 
 const USER_A = "00000000-0000-0000-0000-00000000000a";
@@ -58,7 +67,7 @@ async function names(sql: string): Promise<string[]> {
 beforeAll(async () => {
   db = await PGlite.create();
   await db.exec(SUPABASE_STUBS);
-  await db.exec(MIGRATION);
+  for (const migration of MIGRATIONS) await db.exec(migration);
 
   // Two sign-ups, each with a brand, a post, a script and an internal QA report.
   await db.exec(`
@@ -97,6 +106,20 @@ describe("database setup", () => {
   it("seeds the safety settings", async () => {
     const result = await db.query<{ key: string }>("select key from public.app_settings order by key");
     expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "ramadan", "renders_paused"]);
+  });
+
+  it("stores tiny Claude costs exactly (ai_usage.cost_usd has 6 decimals)", async () => {
+    const column = await db.query<{ numeric_precision: number; numeric_scale: number }>(
+      `select numeric_precision, numeric_scale from information_schema.columns
+       where table_schema = 'public' and table_name = 'ai_usage' and column_name = 'cost_usd'`,
+    );
+    expect(column.rows[0]).toEqual({ numeric_precision: 12, numeric_scale: 6 });
+    const saved = await db.query<{ cost: string }>(
+      `insert into public.ai_usage (task, model, cost_usd) values ('test', 'claude-haiku-5-5', 0.000123)
+       returning cost_usd::text as cost`,
+    );
+    expect(saved.rows[0].cost).toBe("0.000123");
+    await db.exec(`delete from public.ai_usage where task = 'test'`);
   });
 
   it("rejects values outside the allowed lists", async () => {
@@ -153,6 +176,157 @@ describe("customers only see their own rows", () => {
       expect(await names("select name from public.brands")).toEqual(["Brand A", "Brand B"]);
       const reports = await db.query("select * from public.qa_reports");
       expect(reports.rows).toHaveLength(2);
+    });
+  });
+});
+
+// One row per user in every customer-readable table, labelled "A" or "B".
+// Each test proves A sees only A's row, B only B's, and anon nothing.
+const OWNED_TABLES: { table: string; label: string }[] = [
+  { table: "consents", label: "person_legal_name" },
+  { table: "avatars", label: "heygen_group_id" },
+  { table: "pronunciations", label: "written" },
+  { table: "videos", label: "heygen_video_id" },
+  { table: "usage_ledger", label: "note" },
+  { table: "subscriptions", label: "external_id" },
+  { table: "manual_payments", label: "reference" },
+];
+
+describe("isolation for consents, twins, names, videos, usage and payments", () => {
+  beforeAll(async () => {
+    for (const [user, brand, tag] of [
+      [USER_A, BRAND_A, "A"],
+      [USER_B, BRAND_B, "B"],
+    ]) {
+      await db.exec(`
+        insert into public.consents (brand_id, person_legal_name, checkbox_at, words, words_expire_at)
+          values ('${brand}', 'Consent ${tag}', now(), '{one,two}', now() + interval '1 day');
+        insert into public.avatars (brand_id, heygen_group_id) values ('${brand}', 'Avatar ${tag}');
+        insert into public.pronunciations (brand_id, written, say_as) values ('${brand}', 'Name ${tag}', 'naym');
+        insert into public.videos (brand_id, heygen_video_id) values ('${brand}', 'Video ${tag}');
+        insert into public.usage_ledger (owner_id, period_start, delta, reason, note)
+          values ('${user}', now(), 1, 'reserve', 'Ledger ${tag}');
+        insert into public.subscriptions (owner_id, provider, external_id, plan, status)
+          values ('${user}', 'manual', 'Sub ${tag}', 'creator', 'active');
+        insert into public.manual_payments (owner_id, method, reference, amount, plan, period_start, period_end)
+          values ('${user}', 'bank', 'Payment ${tag}', 1000, 'creator', now(), now() + interval '30 days');
+      `);
+    }
+  });
+
+  for (const { table, label } of OWNED_TABLES) {
+    it(`${table}: user A sees only A's row, user B only B's`, async () => {
+      const sql = `select ${label} as name from public.${table}`;
+      await asRole("service_role", null, async () => {
+        expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["A", "B"]);
+      });
+      await asUser(USER_A, async () => {
+        expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["A"]);
+      });
+      await asUser(USER_B, async () => {
+        expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["B"]);
+      });
+    });
+
+    it(`${table}: logged-out visitors read nothing`, async () => {
+      await asRole("anon", null, async () => {
+        await expect(db.query(`select * from public.${table}`)).rejects.toThrow(/permission denied/);
+      });
+    });
+
+    it(`${table}: customers cannot write`, async () => {
+      await asUser(USER_A, async () => {
+        await expect(db.exec(`delete from public.${table}`)).rejects.toThrow(/permission denied/);
+        await expect(db.exec(`update public.${table} set ${label} = 'x'`)).rejects.toThrow(/permission denied/);
+      });
+    });
+  }
+
+  // Storage: PGlite has no real Supabase storage schema, so the test setup
+  // stubs only storage.buckets. Storage *policies* (on storage.objects) can't
+  // be tested here. Our migration adds no storage policies on purpose (server
+  // code with the secret key only), so we check the buckets are private.
+  it("storage buckets from our migration are private", async () => {
+    const buckets = await db.query<{ id: string; public: boolean }>("select id, public from storage.buckets order by id");
+    expect(buckets.rows).toEqual([
+      { id: "assets", public: false },
+      { id: "consent-clips", public: false },
+      { id: "videos", public: false },
+    ]);
+  });
+});
+
+const PILLARS = JSON.stringify([
+  { name: "One", description: "First pillar of four." },
+  { name: "Two", description: "Second pillar of four." },
+  { name: "Three", description: "Third pillar of four." },
+  { name: "Four", description: "Fourth pillar of four." },
+]);
+
+describe("brand profile versions (save_brand_version)", () => {
+  const save = (brandId: string, profile: string, pillars = PILLARS, source = "generated") =>
+    db.query<{ version: number }>(`select public.save_brand_version($1, $2, $3::jsonb, $4) as version`, [
+      brandId,
+      profile,
+      pillars,
+      source,
+    ]);
+
+  it("saves version 1, then version 2 on the next edit, and updates the brand", async () => {
+    await asRole("service_role", null, async () => {
+      expect((await save(BRAND_A, "Profile v1")).rows[0].version).toBe(1);
+      expect((await save(BRAND_A, "Profile v2", PILLARS, "edited")).rows[0].version).toBe(2);
+      const brand = await db.query<{ current_version: number; profile_md: string; pillars: unknown[] }>(
+        `select current_version, profile_md, pillars from public.brands where id = $1`,
+        [BRAND_A],
+      );
+      expect(brand.rows[0]).toMatchObject({ current_version: 2, profile_md: "Profile v2" });
+      expect(brand.rows[0].pillars).toHaveLength(4);
+      const versions = await db.query<{ version: number; source: string; profile_md: string }>(
+        `select version, source, profile_md from public.brand_versions where brand_id = $1 order by version`,
+        [BRAND_A],
+      );
+      expect(versions.rows).toEqual([
+        { version: 1, source: "generated", profile_md: "Profile v1" },
+        { version: 2, source: "edited", profile_md: "Profile v2" },
+      ]);
+    });
+  });
+
+  it("rejects fewer than 4 or more than 6 pillars, an unknown source, or a missing brand", async () => {
+    await asRole("service_role", null, async () => {
+      const three = JSON.stringify(JSON.parse(PILLARS).slice(0, 3));
+      await expect(save(BRAND_A, "x", three)).rejects.toThrow(/4 to 6 pillars/);
+      await expect(save(BRAND_A, "x", PILLARS, "magic")).rejects.toThrow();
+      await expect(save("10000000-0000-0000-0000-0000000000ff", "x")).rejects.toThrow(/not found/);
+      const brand = await db.query<{ current_version: number }>(
+        `select current_version from public.brands where id = $1`,
+        [BRAND_A],
+      );
+      expect(brand.rows[0].current_version).toBe(2);
+    });
+  });
+
+  it("customers cannot call it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(save(BRAND_A, "Sneaky")).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("logged-out visitors (anon) cannot call it", async () => {
+    await asRole("anon", null, async () => {
+      await expect(save(BRAND_A, "Sneaky")).rejects.toThrow(/permission denied/);
+    });
+    const brand = await db.query<{ profile_md: string }>(`select profile_md from public.brands where id = $1`, [BRAND_A]);
+    expect(brand.rows[0].profile_md).not.toBe("Sneaky");
+  });
+
+  it("customers read only their own versions", async () => {
+    await asRole("service_role", null, () => save(BRAND_B, "Profile B"));
+    await asUser(USER_A, async () => {
+      const rows = await db.query<{ brand_id: string }>("select brand_id from public.brand_versions");
+      expect(rows.rows.length).toBe(2);
+      expect(rows.rows.every((row) => row.brand_id === BRAND_A)).toBe(true);
     });
   });
 });

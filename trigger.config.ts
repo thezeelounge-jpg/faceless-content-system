@@ -4,7 +4,7 @@ import { defineConfig } from "@trigger.dev/sdk";
 // Replace the project ref below with yours: Trigger.dev dashboard > your
 // project > Project settings. It starts with "proj_" and is not a secret.
 export default defineConfig({
-  project: "proj_REPLACE_WITH_YOUR_PROJECT_REF",
+  project: "proj_jhdkwttfovsdwgohzkxf",
   dirs: ["./trigger"],
   maxDuration: 300, // seconds; long jobs (edits) set their own limit
   retries: {

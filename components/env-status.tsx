@@ -1,4 +1,4 @@
-import { envStatus, isMockHeygen, isMockStt } from "@/lib/config";
+import { envStatus, isMockClaude, isMockHeygen, isMockStt } from "@/lib/config";
 
 /** Shows which settings are filled in (names only, never values). */
 export function EnvStatusList({ upToPhase }: { upToPhase?: number }) {
@@ -26,6 +26,7 @@ export function MockModeList() {
   const rows = [
     { name: "HeyGen videos", mock: isMockHeygen() },
     { name: "Speech-to-text", mock: isMockStt() },
+    { name: "Claude (writing)", mock: isMockClaude() },
   ];
   return (
     <ul className="divide-border divide-y text-sm">

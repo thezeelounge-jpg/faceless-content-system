@@ -52,3 +52,6 @@ supabase/.branches
 
 # claude code personal settings
 .claude/settings.local.json
+
+# serena (code navigation tool) local state
+.serena/
