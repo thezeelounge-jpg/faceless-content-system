@@ -1,0 +1,97 @@
+import type { ClipChecksResult } from "@/lib/clip-checks/evaluate";
+
+// Rows and storage used by the consent and twin flow. The real versions use
+// Supabase (lib/consent-store.ts); tests use tests/helpers/consent-memory.ts.
+
+export type AdminStatus = "pending" | "approved" | "rejected";
+export type AvatarStatus = "training" | "consent_pending" | "likeness_test" | "ready" | "reshoot_needed" | "failed";
+
+export type ConsentRow = {
+  id: string;
+  brand_id: string;
+  person_legal_name: string;
+  checkbox_at: string;
+  words: string[];
+  words_expire_at: string;
+  clip_path: string | null;
+  clip_checks: ClipChecksResult | null;
+  admin_status: AdminStatus;
+  admin_note: string | null;
+  heygen_consent_status: string | null;
+  heygen_consent_url: string | null;
+  ip: string | null;
+  user_agent: string | null;
+  created_at: string;
+};
+
+export type NewConsentRow = Pick<
+  ConsentRow,
+  "brand_id" | "person_legal_name" | "checkbox_at" | "words" | "words_expire_at" | "ip" | "user_agent"
+>;
+
+export type ConsentPatch = Partial<
+  Pick<
+    ConsentRow,
+    | "words"
+    | "words_expire_at"
+    | "clip_path"
+    | "clip_checks"
+    | "admin_status"
+    | "admin_note"
+    | "heygen_consent_status"
+    | "heygen_consent_url"
+  >
+>;
+
+export type AvatarRow = {
+  id: string;
+  brand_id: string;
+  consent_id: string | null;
+  heygen_group_id: string | null;
+  heygen_look_id: string | null;
+  voice_id: string | null;
+  supported_engines: string[];
+  status: AvatarStatus;
+  error: string | null;
+  created_at: string;
+};
+
+export type AvatarPatch = Partial<
+  Pick<AvatarRow, "heygen_group_id" | "heygen_look_id" | "voice_id" | "supported_engines" | "status" | "error">
+>;
+
+export type OutboxRow = {
+  brand_id: string | null;
+  consent_id: string | null;
+  to_email: string;
+  kind: "consent_link" | "reshoot_tips";
+  subject: string;
+  body: string;
+};
+
+export type BrandContact = { id: string; name: string; ownerEmail: string | null };
+
+export interface ConsentStore {
+  getBrandContact(brandId: string): Promise<BrandContact | null>;
+  insertConsent(row: NewConsentRow): Promise<ConsentRow>;
+  getConsent(id: string): Promise<ConsentRow | null>;
+  /** With onlyIfPending, changes nothing (returns null) unless admin_status is still pending. */
+  updateConsent(id: string, patch: ConsentPatch, onlyIfPending?: boolean): Promise<ConsentRow | null>;
+  listConsents(): Promise<ConsentRow[]>;
+  getAvatarByConsent(consentId: string): Promise<AvatarRow | null>;
+  getAvatar(id: string): Promise<AvatarRow | null>;
+  /** One avatar per consent: returns the existing row if there is one. */
+  insertAvatar(row: Pick<AvatarRow, "brand_id" | "consent_id" | "status">): Promise<AvatarRow>;
+  updateAvatar(id: string, patch: AvatarPatch): Promise<AvatarRow | null>;
+  /** Mocked email: stored, never sent. */
+  insertOutbox(row: OutboxRow): Promise<void>;
+  hasOutbox(consentId: string, kind: OutboxRow["kind"]): Promise<boolean>;
+}
+
+/** The private consent-clips bucket. */
+export interface ClipStorage {
+  createUploadUrl(path: string): Promise<{ path: string; token: string }>;
+  info(path: string): Promise<{ size: number; contentType: string } | null>;
+  signedUrl(path: string, seconds: number): Promise<string>;
+  download(path: string): Promise<Uint8Array>;
+}

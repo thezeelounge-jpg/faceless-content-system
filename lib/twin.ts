@@ -1,0 +1,166 @@
+import "server-only";
+import path from "node:path";
+import type { AvatarRow, AvatarStatus, ClipStorage, ConsentStore } from "@/lib/consent-store-types";
+import type { HeygenClient } from "@/lib/heygen";
+import { PlainError } from "@/lib/plain-error";
+
+// Creating the digital twin after the admin approves the consent clip, and
+// waiting until it is ready. Plain functions, so they are tested with mock
+// HeyGen and an in-memory store; trigger/create-twin.ts and
+// trigger/poll-twin.ts only call these.
+//
+// avatars.status, step by step:
+//   training         row created on approval (lib/consent-flow.ts)
+//   consent_pending  twin created on HeyGen, waiting for the person's webcam consent
+//   training         consent accepted, HeyGen still training the look
+//   likeness_test    look ready: look id, voice id and engines saved (Phase 3 part B picks the engine)
+//   reshoot_needed   HeyGen could not train from this clip
+//   failed           HeyGen consent rejected, or the group failed
+
+export const TWIN_POLL = {
+  first_wait_s: 60,
+  max_wait_s: 1800,
+  /** About a day of checks at most (HeyGen's consent link lasts 24 hours). */
+  max_attempts: 60,
+};
+
+const STILL_WAITING =
+  "Still waiting for HeyGen after many checks. Check the consent email was completed, then press “Check twin again”.";
+
+type TwinDeps = { store: ConsentStore; heygen: HeygenClient };
+
+function plain(error: unknown): string {
+  return error instanceof PlainError ? error.message : "Something went wrong talking to HeyGen. See server logs.";
+}
+
+function consentEmail(brandName: string, url: string): { subject: string; body: string } {
+  return {
+    subject: "Please confirm your consent on HeyGen (within 24 hours)",
+    body: [
+      `Hi ${brandName},`,
+      "",
+      "Your clip is approved. HeyGen, the company that makes your digital twin, needs you to confirm your consent on webcam.",
+      "",
+      `Open this link and follow the steps: ${url}`,
+      "",
+      "The link works for 24 hours. After that, ask us for a new one.",
+    ].join("\n"),
+  };
+}
+
+/**
+ * Creates the twin on HeyGen for an APPROVED consent, starts HeyGen's consent
+ * flow and "emails" the link (mock outbox). Safe to run again: it skips the
+ * steps that are already done.
+ */
+export async function createTwin(consentId: string, deps: TwinDeps & { storage: ClipStorage }): Promise<AvatarRow> {
+  const consent = await deps.store.getConsent(consentId);
+  if (!consent) throw new PlainError("Consent not found.");
+  // CLAUDE.md: no twin before admin approval of the consent clip.
+  if (consent.admin_status !== "approved" || !consent.clip_path) {
+    throw new PlainError("No twin before the consent clip is approved.");
+  }
+  const brand = await deps.store.getBrandContact(consent.brand_id);
+  if (!brand) throw new PlainError("Client not found.");
+  let avatar = await deps.store.insertAvatar({ brand_id: consent.brand_id, consent_id: consent.id, status: "training" });
+
+  try {
+    if (!avatar.heygen_group_id) {
+      const bytes = await deps.storage.download(consent.clip_path);
+      const ext = path.extname(consent.clip_path).toLowerCase();
+      const assetId = await deps.heygen.uploadAsset({
+        bytes,
+        filename: `consent${ext}`,
+        contentType: ext === ".webm" ? "video/webm" : "video/mp4",
+      });
+      const twin = await deps.heygen.createDigitalTwin({
+        name: `${brand.name} twin`,
+        file: { type: "asset_id", asset_id: assetId },
+      });
+      avatar =
+        (await deps.store.updateAvatar(avatar.id, {
+          heygen_group_id: twin.groupId,
+          heygen_look_id: twin.lookId,
+          voice_id: twin.voiceId,
+          error: null,
+        })) ?? avatar;
+    }
+
+    if (!consent.heygen_consent_url) {
+      const started = await deps.heygen.startConsent(avatar.heygen_group_id!);
+      await deps.store.updateConsent(consent.id, {
+        heygen_consent_status: started.consentStatus,
+        heygen_consent_url: started.consentUrl,
+      });
+      consent.heygen_consent_url = started.consentUrl;
+    }
+
+    if (consent.heygen_consent_url && brand.ownerEmail && !(await deps.store.hasOutbox(consent.id, "consent_link"))) {
+      await deps.store.insertOutbox({
+        brand_id: brand.id,
+        consent_id: consent.id,
+        to_email: brand.ownerEmail,
+        kind: "consent_link",
+        ...consentEmail(brand.name, consent.heygen_consent_url),
+      });
+    }
+
+    return (await deps.store.updateAvatar(avatar.id, { status: "consent_pending", error: null })) ?? avatar;
+  } catch (error) {
+    await deps.store.updateAvatar(avatar.id, { error: plain(error) });
+    throw error;
+  }
+}
+
+export type PollResult = { done: boolean; status: AvatarStatus };
+
+/** One check of the twin on HeyGen. Saves what it learns. */
+export async function pollTwinOnce(avatarId: string, deps: TwinDeps): Promise<PollResult> {
+  const avatar = await deps.store.getAvatar(avatarId);
+  if (!avatar) throw new PlainError("Twin not found.");
+  if (!avatar.heygen_group_id) throw new PlainError("This twin has not been created on HeyGen yet.");
+
+  const group = await deps.heygen.getAvatarGroup(avatar.heygen_group_id);
+  if (avatar.consent_id && group.consentStatus) {
+    await deps.store.updateConsent(avatar.consent_id, { heygen_consent_status: group.consentStatus });
+  }
+  const finish = async (status: AvatarStatus, error: string | null, done: boolean): Promise<PollResult> => {
+    await deps.store.updateAvatar(avatar.id, { status, error });
+    return { done, status };
+  };
+
+  if (group.status === "failed" || group.consentStatus === "rejected") {
+    return finish("failed", "The person did not accept HeyGen's consent check. Start a new consent.", true);
+  }
+  const looks = await deps.heygen.listLooks(avatar.heygen_group_id);
+  const look = looks.find((l) => l.status === "completed") ?? looks[0];
+  if (look?.status === "failed") {
+    return finish("reshoot_needed", "HeyGen could not train the twin from this clip. Ask for a reshoot.", true);
+  }
+  if (group.consentStatus !== "accepted") return finish("consent_pending", null, false);
+  if (!look || look.status !== "completed") return finish("training", null, false);
+
+  await deps.store.updateAvatar(avatar.id, {
+    heygen_look_id: look.lookId,
+    voice_id: group.voiceId ?? look.voiceId,
+    supported_engines: look.supportedEngines,
+  });
+  return finish("likeness_test", null, true);
+}
+
+/** Checks until the twin is ready or failed, waiting longer each time (bounded). */
+export async function pollTwinUntilReady(
+  avatarId: string,
+  deps: TwinDeps & { wait: (seconds: number) => Promise<void>; maxAttempts?: number },
+): Promise<PollResult> {
+  const maxAttempts = deps.maxAttempts ?? TWIN_POLL.max_attempts;
+  for (let attempt = 1; ; attempt++) {
+    const result = await pollTwinOnce(avatarId, deps);
+    if (result.done) return result;
+    if (attempt >= maxAttempts) {
+      await deps.store.updateAvatar(avatarId, { error: STILL_WAITING });
+      return result;
+    }
+    await deps.wait(Math.min(TWIN_POLL.first_wait_s * 2 ** (attempt - 1), TWIN_POLL.max_wait_s));
+  }
+}
