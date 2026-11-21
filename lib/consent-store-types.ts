@@ -4,6 +4,7 @@ import type { ClipChecksResult } from "@/lib/clip-checks/evaluate";
 // Supabase (lib/consent-store.ts); tests use tests/helpers/consent-memory.ts.
 
 export type AdminStatus = "pending" | "approved" | "rejected";
+export type ClipCheckStatus = "pending" | "running" | "done" | "failed";
 export type AvatarStatus = "training" | "consent_pending" | "likeness_test" | "ready" | "reshoot_needed" | "failed";
 
 export type ConsentRow = {
@@ -15,6 +16,9 @@ export type ConsentRow = {
   words_expire_at: string;
   clip_path: string | null;
   clip_checks: ClipChecksResult | null;
+  /** Decision 2: where the background clip check is (null = never started). */
+  clip_check_status?: ClipCheckStatus | null;
+  clip_check_error?: string | null;
   admin_status: AdminStatus;
   admin_note: string | null;
   heygen_consent_status: string | null;
@@ -36,6 +40,8 @@ export type ConsentPatch = Partial<
     | "words_expire_at"
     | "clip_path"
     | "clip_checks"
+    | "clip_check_status"
+    | "clip_check_error"
     | "admin_status"
     | "admin_note"
     | "heygen_consent_status"

@@ -325,6 +325,24 @@ describe("avatars (Phase 3 twin creation)", () => {
     });
   });
 
+  it("decision 2: consents.clip_check_status takes only pending/running/done/failed", async () => {
+    await asRole("service_role", null, async () => {
+      const consent = await db.query<{ id: string; status: string | null }>(
+        `insert into public.consents (brand_id, person_legal_name, checkbox_at, words, words_expire_at)
+         values ('${BRAND_A}', 'Check Status', now(), '{a,b,c}', now() + interval '30 minutes') returning id, clip_check_status as status`,
+      );
+      const id = consent.rows[0].id;
+      expect(consent.rows[0].status).toBeNull();
+      for (const status of ["pending", "running", "done", "failed"]) {
+        await db.query("update public.consents set clip_check_status = $1, clip_check_error = 'x' where id = $2", [status, id]);
+      }
+      await expect(db.query("update public.consents set clip_check_status = 'maybe' where id = $1", [id])).rejects.toThrow(
+        /check constraint/,
+      );
+      await db.exec(`delete from public.consents where id = '${id}'`);
+    });
+  });
+
   it("SF2 claim: only the first 'about to create the twin' update wins", async () => {
     await asRole("service_role", null, async () => {
       const avatar = await db.query<{ id: string }>(

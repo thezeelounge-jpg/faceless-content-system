@@ -8,6 +8,7 @@ import { RecordingGuide } from "@/components/admin/recording-guide";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requireAdmin } from "@/lib/auth";
 import { getSupabasePublicConfig } from "@/lib/config";
+import { clipCheckStatusLine } from "@/lib/clip-check-status";
 import { clipPlaybackUrl } from "@/lib/consent-flow";
 import { createClipStorage, createConsentStore, listOutboxForConsent } from "@/lib/consent-store";
 import { wordsExpired } from "@/lib/consent-words";
@@ -117,6 +118,7 @@ async function ConsentDetail({ params }: Pick<PageProps<"/admin/consents/[id]">,
             <CardTitle>Automatic checks {checks ? (checks.passed ? "— all passed" : "— reshoot needed") : "— not run yet"}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            <p className="text-muted-foreground text-sm">Check status: {clipCheckStatusLine(consent)}</p>
             {checks && (
               <ul className="space-y-1 text-sm">
                 {checks.checks.map((c) => (
@@ -131,7 +133,7 @@ async function ConsentDetail({ params }: Pick<PageProps<"/admin/consents/[id]">,
               </ul>
             )}
             {pending && (
-              <ActionButton action={recheckClipAction.bind(null, consent.id)} label="Run checks" pendingLabel="Checking… (about a minute)" variant="outline" size="sm" />
+              <ActionButton action={recheckClipAction.bind(null, consent.id)} label="Run checks" pendingLabel="Starting the checks…" variant="outline" size="sm" />
             )}
           </CardContent>
         </Card>

@@ -137,13 +137,44 @@ describe("upload", () => {
     });
   });
 
-  it("confirm: saves the clip and runs the checks", async () => {
+  it("decision 2, no Trigger key: confirm runs the same check job right here, clearly labelled", async () => {
     const consent = await newConsent();
     const clipPath = `${BRAND_ID}/${consent.id}/77777777-7777-4777-8777-777777777777.mp4`;
     clips.files[clipPath] = { size: 1 * MB, contentType: "video/mp4", fixture: "consent-good.mp4" };
     const state = await actions.confirmUploadAction(consent.id, clipPath);
-    expect(state).toEqual({ status: "ok", message: "Clip saved. All checks passed." });
+    expect(state).toEqual({
+      status: "ok",
+      message: "Clip saved. Checks ran on this server (no background jobs set up): all passed.",
+    });
+    expect(await mem.store.getConsent(consent.id)).toMatchObject({ clip_check_status: "done" });
     expect((await mem.store.getConsent(consent.id))?.clip_checks?.passed).toBe(true);
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it("decision 2, with a Trigger key: confirm only starts check-clip (key = consent id + clip path)", async () => {
+    process.env.TRIGGER_SECRET_KEY = "tr_dev_dummy";
+    const consent = await newConsent();
+    const clipPath = `${BRAND_ID}/${consent.id}/77777777-7777-4777-8777-777777777777.mov`;
+    clips.files[clipPath] = { size: 1 * MB, contentType: "video/quicktime", fixture: "consent-good.mov" };
+    const state = await actions.confirmUploadAction(consent.id, clipPath);
+    expect(state).toEqual({ status: "ok", message: "Clip saved. The checks are running in the background. Refresh in a minute." });
+    expect(createKey).toHaveBeenCalledWith([consent.id, clipPath], { scope: "global" });
+    expect(trigger).toHaveBeenCalledWith(
+      "check-clip",
+      { consentId: consent.id, clipPath },
+      { idempotencyKey: `key:${consent.id},${clipPath}:{"scope":"global"}`, idempotencyKeyTTL: "10m" },
+    );
+    expect(await mem.store.getConsent(consent.id)).toMatchObject({ clip_check_status: "pending", clip_checks: null });
+  });
+
+  it("decision 2: Run checks with a Trigger key starts the task too; without a clip it is a plain error", async () => {
+    process.env.TRIGGER_SECRET_KEY = "tr_dev_dummy";
+    const consent = await newConsent();
+    expect(await actions.recheckClipAction(consent.id, idle)).toEqual({ status: "error", message: "Upload the clip first." });
+    const clipPath = `${BRAND_ID}/${consent.id}/77777777-7777-4777-8777-777777777777.mp4`;
+    await mem.store.updateConsent(consent.id, { clip_path: clipPath });
+    expect((await actions.recheckClipAction(consent.id, idle)).status).toBe("ok");
+    expect(trigger).toHaveBeenCalledWith("check-clip", { consentId: consent.id, clipPath }, expect.anything());
   });
 });
 

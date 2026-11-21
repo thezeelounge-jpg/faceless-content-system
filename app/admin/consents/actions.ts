@@ -10,11 +10,11 @@ import { requireAdmin } from "@/lib/auth";
 import { isMockHeygen, readEnv } from "@/lib/config";
 import {
   approveConsent,
-  checkConsentClip,
   confirmUpload,
   newWords,
   prepareUpload,
   rejectConsent,
+  runClipCheckJob,
   startConsent,
 } from "@/lib/consent-flow";
 import { createClipStorage, createConsentStore } from "@/lib/consent-store";
@@ -23,6 +23,7 @@ import { createSpendStore } from "@/lib/heygen-spend-store";
 import type { ActionState } from "@/lib/plain-error";
 import { PlainError } from "@/lib/plain-error";
 import { createTwin, pollTwinOnce, pollTwinUntilReady } from "@/lib/twin";
+import type { checkClipTask } from "@/trigger/check-clip";
 import type { createTwinTask } from "@/trigger/create-twin";
 
 // Admin → Consents and twins. Every action checks admin FIRST, then checks
@@ -103,11 +104,34 @@ export async function prepareUploadAction(
   }
 }
 
+/**
+ * Decision 2: the clip checks run in the check-clip Trigger task.
+ * - with TRIGGER_SECRET_KEY: start the task (key = consent id + clip path,
+ *   10-minute TTL so a double click starts one run, but "Run checks" later works);
+ * - without it (local dev): run the SAME lib function here and say so.
+ */
 async function runChecks(consentId: string): Promise<ActionState> {
-  const result = await checkConsentClip(consentId, { store: createConsentStore(), storage: createClipStorage() });
-  return result.passed
-    ? { status: "ok", message: "Clip saved. All checks passed." }
-    : { status: "error", message: "Clip saved, but some checks failed. See the tips below." };
+  const store = createConsentStore();
+  const consent = await store.getConsent(consentId);
+  if (!consent) return { status: "error", message: "Consent not found." };
+  const clipPath = consent.clip_path;
+  if (!clipPath) return { status: "error", message: "Upload the clip first." };
+  await store.updateConsent(consentId, { clip_check_status: "pending", clip_check_error: null }, true);
+
+  if (readEnv("TRIGGER_SECRET_KEY")) {
+    const idempotencyKey = await idempotencyKeys.create([consentId, clipPath], { scope: "global" });
+    await tasks.trigger<typeof checkClipTask>("check-clip", { consentId, clipPath }, { idempotencyKey, idempotencyKeyTTL: "10m" });
+    return { status: "ok", message: "Clip saved. The checks are running in the background. Refresh in a minute." };
+  }
+  const outcome = await runClipCheckJob(consentId, clipPath, { store, storage: createClipStorage() });
+  const here = "Checks ran on this server (no background jobs set up)";
+  if (outcome.status === "done") {
+    return outcome.passed
+      ? { status: "ok", message: `Clip saved. ${here}: all passed.` }
+      : { status: "error", message: `Clip saved. ${here}: some failed. See the tips below.` };
+  }
+  const saved = await store.getConsent(consentId);
+  return { status: "error", message: saved?.clip_check_error ?? "The clip changed meanwhile. Refresh the page." };
 }
 
 /** Step 2 of an upload: checks the stored file, saves it and runs the clip checks. */

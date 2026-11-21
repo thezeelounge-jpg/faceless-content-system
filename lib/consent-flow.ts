@@ -221,6 +221,40 @@ export async function checkConsentClip(
   return result;
 }
 
+const CHECK_STOPPED = "The clip check stopped unexpectedly. Press “Run checks” to try again.";
+
+export type ClipCheckOutcome = { status: "done"; passed: boolean } | { status: "failed" } | { status: "skipped" };
+
+/**
+ * Decision 2: one clip-check run, as the check-clip Trigger task (or the page,
+ * when no Trigger key exists) runs it. Saves clip_check_status on the consent:
+ * running → done | failed. Our own plain failures (bad .mov, clip changed)
+ * are saved and returned, not thrown, so the task does not retry pointlessly;
+ * anything unexpected is saved as a plain sentence and thrown, so it retries.
+ */
+export async function runClipCheckJob(
+  consentId: string,
+  clipPath: string,
+  deps: Parameters<typeof checkConsentClip>[1],
+): Promise<ClipCheckOutcome> {
+  const consent = await load(deps.store, consentId);
+  // A newer clip (or a decision) since this run was queued: its own run counts.
+  if (consent.clip_path !== clipPath || consent.admin_status !== "pending") return { status: "skipped" };
+  await deps.store.updateConsent(consentId, { clip_check_status: "running", clip_check_error: null }, true);
+  try {
+    const result = await checkConsentClip(consentId, deps);
+    await deps.store.updateConsent(consentId, { clip_check_status: "done", clip_check_error: null }, true);
+    return { status: "done", passed: result.passed };
+  } catch (error) {
+    const plain = error instanceof PlainError;
+    await deps.store
+      .updateConsent(consentId, { clip_check_status: "failed", clip_check_error: plain ? error.message : CHECK_STOPPED }, true)
+      .catch(() => null);
+    if (plain) return { status: "failed" };
+    throw error;
+  }
+}
+
 function decidedError(consent: ConsentRow): PlainError | null {
   if (consent.admin_status === "approved") return new PlainError("This consent is already approved.");
   if (consent.admin_status === "rejected") return new PlainError("This consent was rejected.");

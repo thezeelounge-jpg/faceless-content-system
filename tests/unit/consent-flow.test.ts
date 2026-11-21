@@ -9,6 +9,7 @@ import {
   newWords,
   prepareUpload,
   rejectConsent,
+  runClipCheckJob,
   startConsent,
   validateUpload,
 } from "@/lib/consent-flow";
@@ -295,6 +296,34 @@ describe.skipIf(!hasFfmpeg)("automatic clip checks are saved on the consent", ()
     expect(Object.keys(uploaded)).toEqual([]);
   });
 
+  it("decision 2 job: status running then done; results saved on the clip", async () => {
+    const { consent, storage } = await withClip("consent-good.mp4");
+    const seen: (string | null | undefined)[] = [];
+    const update = mem.store.updateConsent.bind(mem.store);
+    mem.store.updateConsent = async (id, patch, only) => {
+      if ("clip_check_status" in patch) seen.push(patch.clip_check_status);
+      return update(id, patch, only);
+    };
+    const clipPath = (await mem.store.getConsent(consent.id))!.clip_path!;
+    const outcome = await runClipCheckJob(consent.id, clipPath, { store: mem.store, storage, claude, fixtureName: "consent-good.mp4" });
+    expect(outcome).toEqual({ status: "done", passed: true });
+    expect(seen).toEqual(["running", "done"]);
+    expect(await mem.store.getConsent(consent.id)).toMatchObject({ clip_check_status: "done", clip_check_error: null });
+  });
+
+  it("decision 2 job: a plain failure (corrupt .mov) → status failed with the tip, not thrown (no pointless retry)", async () => {
+    const consent = await started();
+    const mov = `${BRAND_ID}/${consent.id}/44444444-4444-4444-8444-444444444444.mov`;
+    const { storage } = memoryClipStorage({ [mov]: { size: MB, contentType: "video/quicktime", fixture: "consent-corrupt.mov" } });
+    await mem.store.updateConsent(consent.id, { clip_path: mov });
+    const outcome = await runClipCheckJob(consent.id, mov, { store: mem.store, storage, claude });
+    expect(outcome).toEqual({ status: "failed" });
+    expect(await mem.store.getConsent(consent.id)).toMatchObject({
+      clip_check_status: "failed",
+      clip_check_error: "We couldn't read this .mov video. On iPhone: Settings → Camera → Formats → Most Compatible, then record again.",
+    });
+  });
+
   it("SF4: the result names the clip it measured", async () => {
     const { consent, storage } = await withClip("consent-good.mp4");
     const result = await checkConsentClip(consent.id, { store: mem.store, storage, claude, fixtureName: "consent-good.mp4" });
@@ -318,6 +347,31 @@ describe.skipIf(!hasFfmpeg)("automatic clip checks are saved on the consent", ()
     expect(saved?.clip_path).toBe(newer);
     expect(saved?.clip_checks).toBeNull();
     await expect(approveConsent(consent.id, "", { store: mem.store })).rejects.toThrow("The clip checks must pass");
+  });
+});
+
+describe("decision 2: the clip-check job (lib function the Trigger task calls)", () => {
+  const claude = { mock: true, logUsage: async () => {} };
+
+  it("a newer clip was uploaded since the job was queued: skipped, nothing touched", async () => {
+    const consent = await started();
+    await mem.store.updateConsent(consent.id, { clip_path: `${BRAND_ID}/${consent.id}/new.mp4` });
+    const { storage } = memoryClipStorage();
+    const outcome = await runClipCheckJob(consent.id, `${BRAND_ID}/${consent.id}/old.mp4`, { store: mem.store, storage, claude });
+    expect(outcome).toEqual({ status: "skipped" });
+    expect((await mem.store.getConsent(consent.id))?.clip_check_status).toBeUndefined();
+  });
+
+  it("an unexpected error: status failed with a plain sentence, then thrown so the task retries", async () => {
+    const consent = await started();
+    const clip = `${BRAND_ID}/${consent.id}/11111111-1111-4111-8111-111111111111.mp4`;
+    await mem.store.updateConsent(consent.id, { clip_path: clip });
+    const { storage } = memoryClipStorage(); // no file behind the path: download throws a raw Error
+    await expect(runClipCheckJob(consent.id, clip, { store: mem.store, storage, claude })).rejects.toThrow("no such object");
+    expect(await mem.store.getConsent(consent.id)).toMatchObject({
+      clip_check_status: "failed",
+      clip_check_error: "The clip check stopped unexpectedly. Press “Run checks” to try again.",
+    });
   });
 });
 

@@ -58,7 +58,7 @@ export function ConsentUpload({
         contentType: file.type.split(";")[0],
       });
       if (error) return setMessage({ status: "error", message: "The upload failed. Check your connection and try again." });
-      setMessage({ status: "idle", message: "Uploaded. Running the clip checks (about a minute)…" });
+      setMessage({ status: "idle", message: "Uploaded. Starting the clip checks…" });
       setMessage(await confirm(consentId, ticket.path));
     } catch {
       setMessage({ status: "error", message: "Something went wrong. Please try again." });
