@@ -53,10 +53,12 @@ function summarise(cause: unknown): CauseSummary {
   // Anthropic SDK errors carry the parsed body as error.error ({ type: "error", error: { type } }).
   const body = fields.error as { type?: unknown; error?: { type?: unknown } } | undefined;
   const type = body?.error?.type ?? body?.type ?? fields.type;
-  const summary: CauseSummary = { name: cause.name, message: redact(cause.message).slice(0, 300) };
+  // Every text field goes through redact(): name, type and code are usually
+  // fixed words, but nothing stops a library from putting a key in them.
+  const summary: CauseSummary = { name: redact(cause.name).slice(0, 100), message: redact(cause.message).slice(0, 300) };
   if (typeof fields.status === "number") summary.status = fields.status;
-  if (typeof type === "string") summary.type = type;
-  if (typeof fields.code === "string" || typeof fields.code === "number") summary.code = String(fields.code);
+  if (typeof type === "string") summary.type = redact(type).slice(0, 100);
+  if (typeof fields.code === "string" || typeof fields.code === "number") summary.code = redact(String(fields.code)).slice(0, 100);
   return summary;
 }
 

@@ -256,6 +256,64 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
   });
 });
 
+// Privilege guard over EVERY table in the public schema, read from pg_tables
+// (so a new table is covered automatically). Customers (authenticated) may only
+// SELECT; anon gets nothing. This catches a stray GRANT even if a default-deny
+// RLS policy would hide it (an UPDATE that silently changes 0 rows).
+describe("table privileges for anon and authenticated", () => {
+  // Allow-list: internal tables. Customers cannot even read these; only server
+  // code (service_role) uses them. Any other public table must be customer-readable.
+  const INTERNAL_TABLES = ["ai_usage", "app_settings", "provider_usage", "qa_reports", "webhook_events"];
+  const PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"] as const;
+
+  async function publicTables(): Promise<string[]> {
+    return names("select tablename as name from pg_tables where schemaname = 'public'");
+  }
+
+  async function granted(role: "anon" | "authenticated", table: string): Promise<string[]> {
+    const held: string[] = [];
+    for (const privilege of PRIVILEGES) {
+      const result = await db.query<{ ok: boolean }>("select has_table_privilege($1, $2, $3) as ok", [
+        role,
+        `public.${table}`,
+        privilege,
+      ]);
+      if (result.rows[0].ok) held.push(privilege);
+    }
+    return held;
+  }
+
+  it("finds the tables (customer-readable ones include scripts and brand_versions)", async () => {
+    const tables = await publicTables();
+    const readable = tables.filter((t) => !INTERNAL_TABLES.includes(t));
+    expect(readable).toContain("scripts");
+    expect(readable).toContain("brand_versions");
+    // Every allow-listed internal table really exists (no stale names).
+    expect(tables).toEqual(expect.arrayContaining(INTERNAL_TABLES));
+    expect(readable.length).toBeGreaterThanOrEqual(12);
+  });
+
+  it("authenticated has SELECT only on every customer table, nothing on internal ones", async () => {
+    const seen: Record<string, string[]> = {};
+    for (const table of await publicTables()) seen[table] = await granted("authenticated", table);
+    const expected = Object.fromEntries(
+      Object.keys(seen).map((t) => [t, INTERNAL_TABLES.includes(t) ? [] : ["SELECT"]]),
+    );
+    expect(seen).toEqual(expected);
+    expect(seen.scripts).toEqual(["SELECT"]);
+    expect(seen.brand_versions).toEqual(["SELECT"]);
+  });
+
+  it("anon has no SELECT, INSERT, UPDATE, DELETE or TRUNCATE on any table", async () => {
+    const seen: Record<string, string[]> = {};
+    for (const table of await publicTables()) seen[table] = await granted("anon", table);
+    const expected = Object.fromEntries(Object.keys(seen).map((t) => [t, []]));
+    expect(seen).toEqual(expected);
+    expect(seen.scripts).toEqual([]);
+    expect(seen.brand_versions).toEqual([]);
+  });
+});
+
 const PILLARS = JSON.stringify([
   { name: "One", description: "First pillar of four." },
   { name: "Two", description: "Second pillar of four." },

@@ -285,7 +285,10 @@ describe("Run checks", () => {
     const found = pending();
     const newer = { ...found.script, id: "script-10", version: 2 };
     getScriptForChecks.mockResolvedValue({ ...found, versions: [found.script, newer] });
-    expect(await checkScript("script-9", idle)).toEqual({ status: "error", message: "This script has already been checked." });
+    expect(await checkScript("script-9", idle)).toEqual({
+      status: "error",
+      message: "A newer version of this script exists, so refresh the page and check that one.",
+    });
     expect(runClaudeTask).not.toHaveBeenCalled();
   });
 
