@@ -180,6 +180,82 @@ describe("customers only see their own rows", () => {
   });
 });
 
+// One row per user in every customer-readable table, labelled "A" or "B".
+// Each test proves A sees only A's row, B only B's, and anon nothing.
+const OWNED_TABLES: { table: string; label: string }[] = [
+  { table: "consents", label: "person_legal_name" },
+  { table: "avatars", label: "heygen_group_id" },
+  { table: "pronunciations", label: "written" },
+  { table: "videos", label: "heygen_video_id" },
+  { table: "usage_ledger", label: "note" },
+  { table: "subscriptions", label: "external_id" },
+  { table: "manual_payments", label: "reference" },
+];
+
+describe("isolation for consents, twins, names, videos, usage and payments", () => {
+  beforeAll(async () => {
+    for (const [user, brand, tag] of [
+      [USER_A, BRAND_A, "A"],
+      [USER_B, BRAND_B, "B"],
+    ]) {
+      await db.exec(`
+        insert into public.consents (brand_id, person_legal_name, checkbox_at, words, words_expire_at)
+          values ('${brand}', 'Consent ${tag}', now(), '{one,two}', now() + interval '1 day');
+        insert into public.avatars (brand_id, heygen_group_id) values ('${brand}', 'Avatar ${tag}');
+        insert into public.pronunciations (brand_id, written, say_as) values ('${brand}', 'Name ${tag}', 'naym');
+        insert into public.videos (brand_id, heygen_video_id) values ('${brand}', 'Video ${tag}');
+        insert into public.usage_ledger (owner_id, period_start, delta, reason, note)
+          values ('${user}', now(), 1, 'reserve', 'Ledger ${tag}');
+        insert into public.subscriptions (owner_id, provider, external_id, plan, status)
+          values ('${user}', 'manual', 'Sub ${tag}', 'creator', 'active');
+        insert into public.manual_payments (owner_id, method, reference, amount, plan, period_start, period_end)
+          values ('${user}', 'bank', 'Payment ${tag}', 1000, 'creator', now(), now() + interval '30 days');
+      `);
+    }
+  });
+
+  for (const { table, label } of OWNED_TABLES) {
+    it(`${table}: user A sees only A's row, user B only B's`, async () => {
+      const sql = `select ${label} as name from public.${table}`;
+      await asRole("service_role", null, async () => {
+        expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["A", "B"]);
+      });
+      await asUser(USER_A, async () => {
+        expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["A"]);
+      });
+      await asUser(USER_B, async () => {
+        expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["B"]);
+      });
+    });
+
+    it(`${table}: logged-out visitors read nothing`, async () => {
+      await asRole("anon", null, async () => {
+        await expect(db.query(`select * from public.${table}`)).rejects.toThrow(/permission denied/);
+      });
+    });
+
+    it(`${table}: customers cannot write`, async () => {
+      await asUser(USER_A, async () => {
+        await expect(db.exec(`delete from public.${table}`)).rejects.toThrow(/permission denied/);
+        await expect(db.exec(`update public.${table} set ${label} = 'x'`)).rejects.toThrow(/permission denied/);
+      });
+    });
+  }
+
+  // Storage: PGlite has no real Supabase storage schema, so the test setup
+  // stubs only storage.buckets. Storage *policies* (on storage.objects) can't
+  // be tested here. Our migration adds no storage policies on purpose (server
+  // code with the secret key only), so we check the buckets are private.
+  it("storage buckets from our migration are private", async () => {
+    const buckets = await db.query<{ id: string; public: boolean }>("select id, public from storage.buckets order by id");
+    expect(buckets.rows).toEqual([
+      { id: "assets", public: false },
+      { id: "consent-clips", public: false },
+      { id: "videos", public: false },
+    ]);
+  });
+});
+
 const PILLARS = JSON.stringify([
   { name: "One", description: "First pillar of four." },
   { name: "Two", description: "Second pillar of four." },
@@ -235,6 +311,14 @@ describe("brand profile versions (save_brand_version)", () => {
     await asUser(USER_A, async () => {
       await expect(save(BRAND_A, "Sneaky")).rejects.toThrow(/permission denied/);
     });
+  });
+
+  it("logged-out visitors (anon) cannot call it", async () => {
+    await asRole("anon", null, async () => {
+      await expect(save(BRAND_A, "Sneaky")).rejects.toThrow(/permission denied/);
+    });
+    const brand = await db.query<{ profile_md: string }>(`select profile_md from public.brands where id = $1`, [BRAND_A]);
+    expect(brand.rows[0].profile_md).not.toBe("Sneaky");
   });
 
   it("customers read only their own versions", async () => {
