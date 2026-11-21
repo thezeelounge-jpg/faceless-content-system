@@ -3,6 +3,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { validateUpload } from "@/lib/consent-upload-rules";
 import type { ActionState } from "@/lib/plain-error";
 
 // Record in the browser (MediaRecorder) or pick a file, then:
@@ -44,8 +45,12 @@ export function ConsentUpload({
   async function upload(file: File) {
     setBusy(true);
     try {
+      const details = { name: file.name, type: file.type.split(";")[0], size: file.size };
+      // Decision 4: same type/size check as the server, before any upload starts.
+      const problem = validateUpload(details);
+      if (problem) return setMessage({ status: "error", message: problem });
       setMessage({ status: "idle", message: "Checking the file…" });
-      const ticket = await prepare(consentId, { name: file.name, type: file.type.split(";")[0], size: file.size });
+      const ticket = await prepare(consentId, details);
       if (!ticket.ok) return setMessage({ status: "error", message: ticket.message });
       setMessage({ status: "idle", message: "Uploading… (keep this page open)" });
       const storage = createClient(supabaseUrl, supabaseKey).storage.from(BUCKET);

@@ -35,6 +35,7 @@ const SUPABASE_STUBS = `
     id text primary key,
     name text not null,
     public boolean default false,
+    file_size_limit bigint,
     allowed_mime_types text[]
   );
 `;
@@ -253,6 +254,13 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
       { id: "consent-clips", public: false },
       { id: "videos", public: false },
     ]);
+  });
+
+  it("decision 4: consent-clips accepts files up to 50 MB (52428800 bytes)", async () => {
+    const bucket = await db.query<{ limit: string }>(
+      "select file_size_limit::text as limit from storage.buckets where id = 'consent-clips'",
+    );
+    expect(bucket.rows).toEqual([{ limit: "52428800" }]);
   });
 });
 

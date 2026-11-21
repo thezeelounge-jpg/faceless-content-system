@@ -8,6 +8,7 @@ import type { ClipChecksResult } from "@/lib/clip-checks/evaluate";
 import { runClipChecks } from "@/lib/clip-checks/run";
 import { generateConsentWords, uploadBlockedReason, wordsExpireAt, type RandomInt } from "@/lib/consent-words";
 import type { AvatarRow, ClipStorage, ConsentRow, ConsentStore } from "@/lib/consent-store-types";
+import { CONSENT_UPLOAD, validateUpload } from "@/lib/consent-upload-rules";
 import { PlainError } from "@/lib/plain-error";
 
 // The consent clip, step by step (admin now, customers in Phase 6):
@@ -16,22 +17,9 @@ import { PlainError } from "@/lib/plain-error";
 // Rule (CLAUDE.md): no twin before admin approval of the consent clip. The
 // avatar row is only created here, by approveConsent.
 
-export const CONSENT_UPLOAD = {
-  /** HeyGen's direct upload accepts videos up to 200 MB (docs "Video to Avatar"). */
-  max_bytes: 200 * 1024 * 1024,
-  min_bytes: 100 * 1024,
-  /** HeyGen accepts mp4 or webm (docs "Video to Avatar"). */
-  types: { "video/mp4": "mp4", "video/webm": "webm" } as Record<string, string>,
-  playback_seconds: 300,
-  /**
-   * SF1: confirmUpload re-checks the 30-minute words window, plus this grace
-   * for an upload that was already on its way when the words ran out.
-   * Needed because Supabase's signed upload token always lasts 2 hours:
-   * createSignedUploadUrl(path, { upsert }) takes no expiry option
-   * (@supabase/storage-js index.d.mts: "They are valid for 2 hours.").
-   */
-  confirm_grace_s: 120,
-};
+// Upload rules (types, 50 MB cap, grace) live in lib/consent-upload-rules.ts,
+// shared with the browser.
+export { CONSENT_UPLOAD, validateUpload } from "@/lib/consent-upload-rules";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -80,20 +68,6 @@ export async function newWords(consentId: string, deps: StoreDeps & { random?: R
   );
   if (!saved) throw new PlainError("This consent is already decided. Start a new consent instead.");
   return saved;
-}
-
-/** Server-side check of the file the browser says it will upload. Null when fine. */
-export function validateUpload(file: { name: string; type: string; size: number }): string | null {
-  if (!(file.type in CONSENT_UPLOAD.types)) {
-    return "Upload an MP4 or WebM video. On iPhone: Settings → Camera → Formats → Most Compatible.";
-  }
-  if (!Number.isFinite(file.size) || file.size < CONSENT_UPLOAD.min_bytes) {
-    return "The clip is too small to be a real recording. Record about 2 minutes.";
-  }
-  if (file.size > CONSENT_UPLOAD.max_bytes) {
-    return "The clip is too big (over 200 MB). Record about 2 minutes at 1080p.";
-  }
-  return null;
 }
 
 /** A one-time signed upload into the private bucket, at a path we choose. */

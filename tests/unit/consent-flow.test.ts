@@ -12,7 +12,11 @@ import {
   startConsent,
   validateUpload,
 } from "@/lib/consent-flow";
+import { validateUpload as browserValidateUpload } from "@/lib/consent-upload-rules";
 import { CONSENT_WORD_LIST } from "@/lib/consent-words";
+
+const BIG_TIP =
+  "The clip is too big (over 50 MB). To make it smaller: record at 1080p and 30 fps (not 4K or 60 fps), keep it to about 2 minutes, or on iPhone choose Settings → Camera → Formats → Most Compatible.";
 import { BRAND_ID, memoryClipStorage, memoryConsentStore } from "@/tests/helpers/consent-memory";
 
 const NOW = new Date("2026-11-22T10:00:00.000Z");
@@ -77,15 +81,35 @@ describe("start consent", () => {
 });
 
 describe("upload into the private bucket", () => {
+  it("decision 4: the cap is 50 MB, with a plain tip on making the file smaller", () => {
+    expect(CONSENT_UPLOAD.max_bytes).toBe(50 * MB);
+    expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 50 * MB })).toBeNull();
+    expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 50 * MB + 1 })).toBe(BIG_TIP);
+    expect(validateUpload({ name: "clip.webm", type: "video/webm", size: 80 * MB })).toBe(BIG_TIP);
+  });
+
+  it("decision 4: the browser uses the very same check before uploading", () => {
+    expect(browserValidateUpload).toBe(validateUpload);
+  });
+
+  it("decision 4: prepare and confirm both refuse a file over 50 MB", async () => {
+    const consent = await started();
+    const big = `${BRAND_ID}/${consent.id}/22222222-2222-4222-8222-222222222222.mp4`;
+    const { storage, uploadUrls } = memoryClipStorage({ [big]: { size: 60 * MB, contentType: "video/mp4" } });
+    await expect(
+      prepareUpload(consent.id, { name: "c.mp4", type: "video/mp4", size: 60 * MB }, { store: mem.store, storage, now: LATER }),
+    ).rejects.toThrow(BIG_TIP);
+    expect(uploadUrls).toEqual([]);
+    await expect(confirmUpload(consent.id, big, { store: mem.store, storage, now: LATER })).rejects.toThrow(BIG_TIP);
+  });
+
   it("validates type and size on the server", () => {
-    expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 80 * MB })).toBeNull();
+    expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 40 * MB })).toBeNull();
     expect(validateUpload({ name: "clip.webm", type: "video/webm", size: 30 * MB })).toBeNull();
     expect(validateUpload({ name: "clip.mov", type: "video/quicktime", size: 80 * MB })).toBe(
       "Upload an MP4 or WebM video. On iPhone: Settings → Camera → Formats → Most Compatible.",
     );
-    expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 201 * MB })).toBe(
-      "The clip is too big (over 200 MB). Record about 2 minutes at 1080p.",
-    );
+    expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 201 * MB })).toBe(BIG_TIP);
     expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 10_000 })).toBe(
       "The clip is too small to be a real recording. Record about 2 minutes.",
     );
@@ -125,7 +149,7 @@ describe("upload into the private bucket", () => {
       [huge]: { size: 500 * MB, contentType: "video/mp4" },
     });
     const deps = { store: mem.store, storage, now: LATER };
-    await expect(confirmUpload(consent.id, huge, deps)).rejects.toThrow("The clip is too big (over 200 MB).");
+    await expect(confirmUpload(consent.id, huge, deps)).rejects.toThrow(BIG_TIP);
     await expect(confirmUpload(consent.id, `${BRAND_ID}/other-consent/x.mp4`, deps)).rejects.toThrow(
       "That upload does not belong to this consent.",
     );
