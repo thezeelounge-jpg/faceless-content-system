@@ -1,15 +1,17 @@
 // Runs our real migration on an in-memory Postgres (PGlite) with small stand-ins
 // for Supabase's auth schema and roles, then proves the access rules work:
 // user A can never see user B's data, and customers can't write anything.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-const MIGRATION = readFileSync(
-  path.resolve(process.cwd(), "supabase/migrations/20261120000000_initial_schema.sql"),
-  "utf8",
-);
+// Every migration, in file-name order, exactly as `supabase db push` runs them.
+const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
+const MIGRATIONS = readdirSync(MIGRATIONS_DIR)
+  .filter((file) => file.endsWith(".sql"))
+  .sort()
+  .map((file) => readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
 
 // Minimal stand-ins for what Supabase provides in every project.
 const SUPABASE_STUBS = `
@@ -28,6 +30,13 @@ const SUPABASE_STUBS = `
   grant usage on schema public to anon, authenticated, service_role;
   grant usage on schema auth to anon, authenticated, service_role;
   grant execute on function auth.uid() to anon, authenticated, service_role;
+  create schema storage;
+  create table storage.buckets (
+    id text primary key,
+    name text not null,
+    public boolean default false,
+    allowed_mime_types text[]
+  );
 `;
 
 const USER_A = "00000000-0000-0000-0000-00000000000a";
@@ -58,7 +67,7 @@ async function names(sql: string): Promise<string[]> {
 beforeAll(async () => {
   db = await PGlite.create();
   await db.exec(SUPABASE_STUBS);
-  await db.exec(MIGRATION);
+  for (const migration of MIGRATIONS) await db.exec(migration);
 
   // Two sign-ups, each with a brand, a post, a script and an internal QA report.
   await db.exec(`
@@ -153,6 +162,73 @@ describe("customers only see their own rows", () => {
       expect(await names("select name from public.brands")).toEqual(["Brand A", "Brand B"]);
       const reports = await db.query("select * from public.qa_reports");
       expect(reports.rows).toHaveLength(2);
+    });
+  });
+});
+
+const PILLARS = JSON.stringify([
+  { name: "One", description: "First pillar of four." },
+  { name: "Two", description: "Second pillar of four." },
+  { name: "Three", description: "Third pillar of four." },
+  { name: "Four", description: "Fourth pillar of four." },
+]);
+
+describe("brand profile versions (save_brand_version)", () => {
+  const save = (brandId: string, profile: string, pillars = PILLARS, source = "generated") =>
+    db.query<{ version: number }>(`select public.save_brand_version($1, $2, $3::jsonb, $4) as version`, [
+      brandId,
+      profile,
+      pillars,
+      source,
+    ]);
+
+  it("saves version 1, then version 2 on the next edit, and updates the brand", async () => {
+    await asRole("service_role", null, async () => {
+      expect((await save(BRAND_A, "Profile v1")).rows[0].version).toBe(1);
+      expect((await save(BRAND_A, "Profile v2", PILLARS, "edited")).rows[0].version).toBe(2);
+      const brand = await db.query<{ current_version: number; profile_md: string; pillars: unknown[] }>(
+        `select current_version, profile_md, pillars from public.brands where id = $1`,
+        [BRAND_A],
+      );
+      expect(brand.rows[0]).toMatchObject({ current_version: 2, profile_md: "Profile v2" });
+      expect(brand.rows[0].pillars).toHaveLength(4);
+      const versions = await db.query<{ version: number; source: string; profile_md: string }>(
+        `select version, source, profile_md from public.brand_versions where brand_id = $1 order by version`,
+        [BRAND_A],
+      );
+      expect(versions.rows).toEqual([
+        { version: 1, source: "generated", profile_md: "Profile v1" },
+        { version: 2, source: "edited", profile_md: "Profile v2" },
+      ]);
+    });
+  });
+
+  it("rejects fewer than 4 or more than 6 pillars, an unknown source, or a missing brand", async () => {
+    await asRole("service_role", null, async () => {
+      const three = JSON.stringify(JSON.parse(PILLARS).slice(0, 3));
+      await expect(save(BRAND_A, "x", three)).rejects.toThrow(/4 to 6 pillars/);
+      await expect(save(BRAND_A, "x", PILLARS, "magic")).rejects.toThrow();
+      await expect(save("10000000-0000-0000-0000-0000000000ff", "x")).rejects.toThrow(/not found/);
+      const brand = await db.query<{ current_version: number }>(
+        `select current_version from public.brands where id = $1`,
+        [BRAND_A],
+      );
+      expect(brand.rows[0].current_version).toBe(2);
+    });
+  });
+
+  it("customers cannot call it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(save(BRAND_A, "Sneaky")).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("customers read only their own versions", async () => {
+    await asRole("service_role", null, () => save(BRAND_B, "Profile B"));
+    await asUser(USER_A, async () => {
+      const rows = await db.query<{ brand_id: string }>("select brand_id from public.brand_versions");
+      expect(rows.rows.length).toBe(2);
+      expect(rows.rows.every((row) => row.brand_id === BRAND_A)).toBe(true);
     });
   });
 });

@@ -29,6 +29,24 @@ export type BrandRow = {
   created_at: string;
 };
 
+export type BrandVersionRow = {
+  id: string;
+  version: number;
+  source: "generated" | "edited";
+  created_at: string;
+};
+
+export async function listBrandVersions(brandId: string): Promise<BrandVersionRow[]> {
+  const { data, error } = await createAdminClient()
+    .from("brand_versions")
+    .select("id, version, source, created_at")
+    .eq("brand_id", brandId)
+    .order("version", { ascending: false })
+    .limit(20);
+  if (error) throw new Error(`Could not load profile history: ${error.message}`);
+  return (data ?? []) as BrandVersionRow[];
+}
+
 export type BrandListItem = Pick<BrandRow, "id" | "name" | "niche" | "is_managed" | "current_version" | "created_at">;
 
 export async function listBrands(): Promise<BrandListItem[]> {

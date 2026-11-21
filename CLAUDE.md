@@ -72,9 +72,9 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 - If unsure about an API, read its docs first.
 
 ## Status (update at the end of every session)
-- Phase:
-- Done:
-- In progress:
-- Next:
-- Known issues:
-- QA thresholds last calibrated:
+- Phase: 2 (the brain), branch `phase-2-brain`. Part A (items 0-3) done.
+- Done: MOCK_CLAUDE switch; onboarding form (`components/onboarding/brand-form.tsx`, schema `lib/brand-input.ts`) + Admin → Clients → New client; `lib/claude.ts` (only entry point `runClaudeTask`, mock answers in `lib/claude-mocks.ts`, prices in `lib/ai-prices.ts`, prompts in `/prompts`); brand profile + versions (`save_brand_version` rpc, `lib/brand-versions.ts`, brand page).
+- In progress: nothing.
+- Next: Part B: item 4 monthly planner (`lib/posting-times.ts`), 5 script writer (`lib/plans.ts`), 6 Gate 1, 7 Gate 2, 8 golden set.
+- Known issues: `.env.example` still needs `MOCK_CLAUDE=true` added by the operator (agent can't edit env files). Claude prices are estimates. Server-side fallbacks use the beta API.
+- QA thresholds last calibrated: never.

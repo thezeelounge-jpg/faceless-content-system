@@ -2,8 +2,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AdminPage } from "@/components/admin/admin-page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ProfileEditForm, WriteProfileButton } from "@/components/admin/brand-profile-forms";
+import { pillarSchema } from "@/lib/ai-schemas";
 import { AUTOPILOT_LEVELS, COUNTRIES, LANGUAGES, NICHE_PRESETS, WEEKDAYS } from "@/lib/brand-input";
-import { getBrand } from "@/lib/brands";
+import { getBrand, listBrandVersions } from "@/lib/brands";
+import { generateBrandProfile, saveProfileEdit } from "./actions";
 
 export default function BrandPage({ params }: PageProps<"/admin/clients/[id]">) {
   return (
@@ -26,9 +29,77 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
   const label = <T extends { value: string | number; label: string }>(list: readonly T[], value: unknown) =>
     list.find((item) => item.value === value)?.label ?? String(value ?? "—");
 
+  const parsedPillars = pillarSchema.array().safeParse(brand.pillars);
+  const pillars = parsedPillars.success ? parsedPillars.data : [];
+  const versions = await listBrandVersions(brand.id);
+  const hasProfile = brand.current_version > 0 && Boolean(brand.profile_md);
+
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold">{brand.name}</h2>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Brand profile {hasProfile ? `· version ${brand.current_version}` : ""}</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {hasProfile ? (
+            <>
+              <div className="bg-muted/40 rounded-lg p-3 text-sm break-words whitespace-pre-wrap">{brand.profile_md}</div>
+              <div>
+                <h3 className="text-sm font-medium">Pillars</h3>
+                <ul className="mt-1 list-disc space-y-1 pl-5 text-sm">
+                  {pillars.map((pillar) => (
+                    <li key={pillar.name}>
+                      <span className="font-medium">{pillar.name}:</span> {pillar.description}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </>
+          ) : (
+            <p className="text-muted-foreground text-sm">No profile yet. Claude writes one from the answers below.</p>
+          )}
+          <WriteProfileButton action={generateBrandProfile.bind(null, brand.id)} hasProfile={hasProfile} />
+        </CardContent>
+      </Card>
+
+      {hasProfile && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Edit profile</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ProfileEditForm
+              key={brand.current_version}
+              action={saveProfileEdit.bind(null, brand.id)}
+              profileMd={brand.profile_md ?? ""}
+              pillars={pillars}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {versions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Profile history</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ul className="divide-border divide-y text-sm">
+              {versions.map((v) => (
+                <li key={v.id} className="flex justify-between py-1.5">
+                  <span>
+                    Version {v.version} · {v.source === "generated" ? "written by Claude" : "edited"}
+                  </span>
+                  <span className="text-muted-foreground">{new Date(v.created_at).toISOString().slice(0, 10)}</span>
+                </li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Onboarding answers</CardTitle>
