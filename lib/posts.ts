@@ -149,6 +149,7 @@ export async function savePostProblem(postId: string, reason: string): Promise<v
 }
 
 export async function getPost(postId: string): Promise<PostRow | null> {
+  if (!isUuid(postId)) return null;
   const { data, error } = await createAdminClient()
     .from("posts")
     .select("id, brand_id, scheduled_for, pillar, title, hook, format, status")
