@@ -1,0 +1,1 @@
+{"event_type":"avatar_video.fail","event_data":{"video_id":"video_mock_90000000-0000-4000-8000-000000000001","msg":"Avatar render failed: face not detected","callback_id":"90000000-0000-4000-8000-000000000001"}}

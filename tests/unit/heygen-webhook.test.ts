@@ -1,0 +1,190 @@
+import { createHmac } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MOCK_FIXTURE_VIDEO } from "@/lib/heygen";
+import { verifyHeygenSignature } from "@/lib/heygen-webhook";
+import { createPostRender, renderVideo } from "@/lib/render";
+import { BRAND_ID } from "@/tests/helpers/consent-memory";
+import { memorySpendStore } from "@/tests/helpers/spend-memory";
+import { POST_ID, memoryVideoFiles, memoryVideoStore } from "@/tests/helpers/video-memory";
+
+// Item 8: POST /api/webhooks/heygen. Signed fixture payloads live in
+// tests/fixtures/heygen/webhooks/ (.sig = hex HMAC-SHA256 of the exact file
+// bytes with the TEST-ONLY secret below; scripts/sign-webhook-fixtures.mjs).
+// HeyGen stays mocked: the "download" is the fixture video, never a fetch.
+
+const TEST_SECRET = "test-webhook-secret-not-real";
+const DIR = "tests/fixtures/heygen/webhooks";
+const fixture = (name: string) => ({
+  body: readFileSync(`${DIR}/${name}.json`, "utf8"),
+  sig: readFileSync(`${DIR}/${name}.sig`, "utf8").trim(),
+});
+
+let mem: ReturnType<typeof memoryVideoStore>;
+let files: ReturnType<typeof memoryVideoFiles>;
+const trigger = vi.fn();
+const createKey = vi.fn(async (key: string) => `key:${key}`);
+
+vi.mock("@/lib/video-store", () => ({ createVideoStore: () => mem.store, createVideoFiles: () => files.storage }));
+vi.mock("@trigger.dev/sdk", () => ({
+  tasks: { trigger: (...args: unknown[]) => trigger(...args) },
+  idempotencyKeys: { create: (key: string) => createKey(key) },
+}));
+
+const { POST } = await import("@/app/api/webhooks/heygen/route");
+
+const savedEnv = { ...process.env };
+let fetchSpy: ReturnType<typeof vi.spyOn>;
+beforeEach(async () => {
+  mem = memoryVideoStore();
+  files = memoryVideoFiles();
+  trigger.mockReset().mockResolvedValue({ id: "run_1" });
+  createKey.mockClear();
+  delete process.env.MOCK_HEYGEN;
+  delete process.env.TRIGGER_SECRET_KEY;
+  process.env.HEYGEN_WEBHOOK_SECRET = TEST_SECRET;
+  fetchSpy = vi.spyOn(globalThis, "fetch");
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  // The video the fixtures talk about: first video in the store, rendering on (mock) HeyGen.
+  await mem.seedReadyTwin();
+  mem.seedApprovedPost();
+  const video = await createPostRender(POST_ID, { videos: mem.store });
+  const { createHeygenClient } = await import("@/lib/heygen");
+  await renderVideo(video.id, { videos: mem.store, heygen: createHeygenClient({ apiKey: "dummy" }), spend: memorySpendStore().store });
+});
+afterEach(() => {
+  process.env = { ...savedEnv };
+  vi.restoreAllMocks();
+});
+
+const post = (body: string, signature: string | null) =>
+  POST(
+    new Request("https://app.example.com/api/webhooks/heygen", {
+      method: "POST",
+      headers: signature === null ? { "content-type": "application/json" } : { "content-type": "application/json", signature },
+      body,
+    }),
+  );
+
+describe("signature (hex HMAC-SHA256 of the raw body)", () => {
+  it("accepts the fixture signatures and rejects anything else, without throwing", () => {
+    const { body, sig } = fixture("success");
+    expect(sig).toBe(createHmac("sha256", TEST_SECRET).update(body).digest("hex"));
+    expect(verifyHeygenSignature(body, sig, TEST_SECRET)).toBe(true);
+    expect(verifyHeygenSignature(body, sig.toUpperCase(), TEST_SECRET)).toBe(true);
+    expect(verifyHeygenSignature(body, sig, "another-secret")).toBe(false);
+    expect(verifyHeygenSignature(body + " ", sig, TEST_SECRET)).toBe(false);
+    expect(verifyHeygenSignature(body, sig.slice(0, 10), TEST_SECRET)).toBe(false); // length differs
+    expect(verifyHeygenSignature(body, "zz".repeat(32), TEST_SECRET)).toBe(false); // not hex
+    expect(verifyHeygenSignature(body, null, TEST_SECRET)).toBe(false);
+    expect(verifyHeygenSignature(body, "", TEST_SECRET)).toBe(false);
+  });
+});
+
+describe("POST /api/webhooks/heygen", () => {
+  it("success: 200, one stored event, MP4 downloaded at once into the private bucket, video rendered", async () => {
+    const { body, sig } = fixture("success");
+    const response = await post(body, sig);
+    expect(response.status).toBe(200);
+    expect(mem.events).toHaveLength(1);
+    expect(mem.events[0]).toMatchObject({
+      source: "heygen",
+      event_key: "heygen:avatar_video.success:video_mock_90000000-0000-4000-8000-000000000001",
+    });
+    expect(mem.events[0].processed_at).not.toBeNull();
+    const video = mem.videos[0];
+    expect(video).toMatchObject({ status: "rendered", raw_path: `raw/${BRAND_ID}/${video.id}.mp4`, duration_s: 16 });
+    expect(files.files[video.raw_path!].bytes).toEqual(new Uint8Array(readFileSync(MOCK_FIXTURE_VIDEO)));
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("the same success sent twice: one processed event, one stored row, one download", async () => {
+    const { body, sig } = fixture("success");
+    expect((await post(body, sig)).status).toBe(200);
+    const second = await post(body, sig);
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({ ok: true, message: "Already handled." });
+    expect(mem.events).toHaveLength(1);
+    expect(files.uploads).toHaveLength(1);
+  });
+
+  it("fail: the reason is saved (plain) on the video and the post goes to the team queue", async () => {
+    const { body, sig } = fixture("fail");
+    expect((await post(body, sig)).status).toBe(200);
+    expect(mem.videos[0]).toMatchObject({ status: "failed", error: "HeyGen could not make the video: Avatar render failed: face not detected" });
+    expect(mem.posts[0].status).toBe("team_review");
+    expect(files.uploads).toHaveLength(0);
+  });
+
+  it("bad signature: 401 and nothing stored or changed", async () => {
+    const { body } = fixture("success");
+    const forged = createHmac("sha256", "wrong-secret").update(body).digest("hex");
+    expect((await post(body, forged)).status).toBe(401);
+    expect((await post(body, null)).status).toBe(401);
+    expect(mem.events).toHaveLength(0);
+    expect(mem.videos[0].status).toBe("rendering");
+  });
+
+  it("tampered body (signature of the original): 401 and nothing stored", async () => {
+    const { body, sig } = fixture("success");
+    const tampered = body.replace("avatar_video.success", "avatar_video.fail");
+    expect((await post(tampered, sig)).status).toBe(401);
+    expect(mem.events).toHaveLength(0);
+    expect(mem.videos[0].status).toBe("rendering");
+  });
+
+  it("missing HEYGEN_WEBHOOK_SECRET: 503 with a plain message, never 200, nothing stored", async () => {
+    delete process.env.HEYGEN_WEBHOOK_SECRET;
+    const { body, sig } = fixture("success");
+    const response = await post(body, sig);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ok: false, message: "HeyGen webhooks are not set up yet." });
+    expect(mem.events).toHaveLength(0);
+  });
+
+  it("signed but not JSON, or an unknown event: no crash, nothing processed", async () => {
+    const notJson = "hello";
+    expect((await post(notJson, createHmac("sha256", TEST_SECRET).update(notJson).digest("hex"))).status).toBe(400);
+    const other = JSON.stringify({ event_type: "video_translate.success", event_data: { video_id: "x" } });
+    const response = await post(other, createHmac("sha256", TEST_SECRET).update(other).digest("hex"));
+    expect(response.status).toBe(200);
+    expect(mem.events).toHaveLength(0);
+    expect(mem.videos[0].status).toBe("rendering");
+  });
+
+  it("an event for a video we don't know: 200 (so HeyGen stops), stored once, nothing changed", async () => {
+    const other = JSON.stringify({ event_type: "avatar_video.success", event_data: { video_id: "hg_unknown", callback_id: null } });
+    const response = await post(other, createHmac("sha256", TEST_SECRET).update(other).digest("hex"));
+    expect(response.status).toBe(200);
+    expect(mem.events).toHaveLength(1);
+    expect(mem.videos[0].status).toBe("rendering");
+  });
+
+  it("processing fails (e.g. Storage down): 500, the event stays unprocessed, and HeyGen's retry processes it", async () => {
+    const { body, sig } = fixture("success");
+    const upload = files.storage.upload;
+    files.storage.upload = vi.fn(async () => {
+      throw new Error("storage down");
+    });
+    expect((await post(body, sig)).status).toBe(500);
+    expect(mem.events[0].processed_at).toBeNull();
+    files.storage.upload = upload;
+    expect((await post(body, sig)).status).toBe(200);
+    expect(mem.videos[0].status).toBe("rendered");
+    expect(mem.events).toHaveLength(1);
+    expect(mem.events[0].processed_at).not.toBeNull();
+  });
+
+  it("with TRIGGER_SECRET_KEY: success hands the download to the poll-render task (key = event) and answers fast", async () => {
+    process.env.TRIGGER_SECRET_KEY = "tr_dev_dummy";
+    const { body, sig } = fixture("success");
+    expect((await post(body, sig)).status).toBe(200);
+    expect(trigger).toHaveBeenCalledWith(
+      "poll-render",
+      { videoId: mem.videos[0].id },
+      { idempotencyKey: "key:webhook-heygen:avatar_video.success:video_mock_90000000-0000-4000-8000-000000000001" },
+    );
+    expect(files.uploads).toHaveLength(0);
+    expect(mem.events[0].processed_at).not.toBeNull();
+  });
+});

@@ -10,6 +10,8 @@ Sample files used in mock mode (`MOCK_HEYGEN=true`, `MOCK_STT=true`, `MOCK_CLAUD
 | `consent-corrupt.mov` | Phase 3 part B | 8 KB of text named .mov. Conversion fails, so the "Most Compatible" tip shows. |
 | `consent-*.vision.json` | Phase 3 | Mock Claude face-check answers for the clip with the same name (bad = two faces in some frames). |
 | `heygen/*.json` | Phase 3 | Mock HeyGen API answers, shaped like the v3 docs (see docs/HEYGEN-NOTES.md). |
+| `heygen/create-video.json`, `heygen/webhook-endpoint.json` | Phase 3 part B step 2 | Mock answers for `POST /v3/videos` (the mock id becomes `video_mock_<our video id>`) and `POST /v3/webhooks/endpoints` (a fake secret, not real). |
+| `heygen/webhooks/*.json` + `.sig` | Phase 3 part B step 2 | Signed HeyGen webhook payloads (success, fail) for the video `90000000-…0001`. `.sig` = hex HMAC-SHA256 of the exact file bytes with the TEST-ONLY secret `test-webhook-secret-not-real`. Re-sign after editing: `node scripts/sign-webhook-fixtures.mjs`. |
 | `sample-heygen.mp4` / `.srt` | Phase 3 part B | A short real HeyGen render. The owner adds it after the first approved real render. |
 | `sample-transcript.json` | Phase 4 | Speech-to-text output for the sample video, with word timings. |
 
