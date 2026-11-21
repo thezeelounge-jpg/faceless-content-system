@@ -27,4 +27,13 @@ FFMPEG=${FFMPEG:-ffmpeg}
   -c:a aac -b:a 24k -ac 1 -shortest -movflags +faststart \
   "$OUT/consent-bad.mp4"
 
-ls -l "$OUT"/consent-*.mp4
+# GOOD as .mov (decision 5: iPhone-style QuickTime file, converted to mp4 by
+# the clip task). Same streams as consent-good.mp4, only the container
+# changes, so it stays under 200 KB and uses the same vision sidecar.
+"$FFMPEG" -hide_banner -loglevel error -y -i "$OUT/consent-good.mp4" -c copy -f mov "$OUT/consent-good.mov"
+
+# CORRUPT .mov: plain text with a .mov name. ffmpeg cannot read it, so the
+# clip task must give the "switch to Most Compatible" tip.
+yes "this is not a video" | head -c 8192 > "$OUT/consent-corrupt.mov" || true
+
+ls -l "$OUT"/consent-*.mp4 "$OUT"/consent-*.mov

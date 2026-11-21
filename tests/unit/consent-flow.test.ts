@@ -103,11 +103,25 @@ describe("upload into the private bucket", () => {
     await expect(confirmUpload(consent.id, big, { store: mem.store, storage, now: LATER })).rejects.toThrow(BIG_TIP);
   });
 
+  it("decision 5: .mov (video/quicktime) is allowed at upload and confirm", async () => {
+    expect(validateUpload({ name: "IMG_0001.MOV", type: "video/quicktime", size: 40 * MB })).toBeNull();
+    const consent = await started();
+    const mov = `${BRAND_ID}/${consent.id}/11111111-1111-4111-8111-111111111111.mov`;
+    const { storage } = memoryClipStorage({ [mov]: { size: 40 * MB, contentType: "video/quicktime" } });
+    const ticket = await prepareUpload(consent.id, { name: "IMG_0001.MOV", type: "video/quicktime", size: 40 * MB }, {
+      store: mem.store,
+      storage,
+      now: LATER,
+    });
+    expect(ticket.path).toMatch(/\.mov$/);
+    expect((await confirmUpload(consent.id, mov, { store: mem.store, storage, now: LATER })).clip_path).toBe(mov);
+  });
+
   it("validates type and size on the server", () => {
     expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 40 * MB })).toBeNull();
     expect(validateUpload({ name: "clip.webm", type: "video/webm", size: 30 * MB })).toBeNull();
-    expect(validateUpload({ name: "clip.mov", type: "video/quicktime", size: 80 * MB })).toBe(
-      "Upload an MP4 or WebM video. On iPhone: Settings → Camera → Formats → Most Compatible.",
+    expect(validateUpload({ name: "clip.avi", type: "video/x-msvideo", size: 20 * MB })).toBe(
+      "Upload an MP4, WebM or MOV video. On iPhone: Settings → Camera → Formats → Most Compatible.",
     );
     expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 201 * MB })).toBe(BIG_TIP);
     expect(validateUpload({ name: "clip.mp4", type: "video/mp4", size: 10_000 })).toBe(
@@ -240,6 +254,45 @@ describe.skipIf(!hasFfmpeg)("automatic clip checks are saved on the consent", ()
     });
     expect(mem.outbox[0].body).toContain("Only you should be in the clip.");
     expect(mem.outbox[0].body).toContain("Face a window in daylight");
+  });
+
+  it("decision 5: a .mov is converted to mp4, checked as the mp4, and the mp4 becomes the clip", async () => {
+    const consent = await started();
+    const mov = `${BRAND_ID}/${consent.id}/44444444-4444-4444-8444-444444444444.mov`;
+    const { storage, files, uploaded, removed } = memoryClipStorage({
+      [mov]: { size: 1 * MB, contentType: "video/quicktime", fixture: "consent-good.mov" },
+    });
+    await mem.store.updateConsent(consent.id, { clip_path: mov });
+    const result = await checkConsentClip(consent.id, { store: mem.store, storage, claude, fixtureName: "consent-good.mov" });
+
+    const saved = await mem.store.getConsent(consent.id);
+    expect(saved?.clip_path).toMatch(new RegExp(`^${BRAND_ID}/${consent.id}/[0-9a-f-]{36}\\.mp4$`));
+    expect(result.passed).toBe(true);
+    expect(result.clip_path).toBe(saved?.clip_path);
+    expect(saved?.clip_checks?.clip_path).toBe(saved?.clip_path);
+    expect(files[saved!.clip_path!].contentType).toBe("video/mp4");
+    expect([...uploaded[saved!.clip_path!].subarray(4, 8)].map((b) => String.fromCharCode(b)).join("")).toBe("ftyp");
+    expect(removed).toEqual([mov]);
+    // Approval now works on the converted clip.
+    await expect(approveConsent(consent.id, "", { store: mem.store })).resolves.toBeTruthy();
+  });
+
+  it("decision 5: a corrupt .mov keeps the 'Most Compatible' tip and nothing changes", async () => {
+    const consent = await started();
+    const mov = `${BRAND_ID}/${consent.id}/44444444-4444-4444-8444-444444444444.mov`;
+    const { storage, uploaded } = memoryClipStorage({
+      [mov]: { size: 1 * MB, contentType: "video/quicktime", fixture: "consent-corrupt.mov" },
+    });
+    await mem.store.updateConsent(consent.id, { clip_path: mov });
+    await expect(
+      checkConsentClip(consent.id, { store: mem.store, storage, claude, fixtureName: "consent-corrupt.mov" }),
+    ).rejects.toThrow(
+      "We couldn't read this .mov video. On iPhone: Settings → Camera → Formats → Most Compatible, then record again.",
+    );
+    const saved = await mem.store.getConsent(consent.id);
+    expect(saved?.clip_path).toBe(mov);
+    expect(saved?.clip_checks).toBeNull();
+    expect(Object.keys(uploaded)).toEqual([]);
   });
 
   it("SF4: the result names the clip it measured", async () => {

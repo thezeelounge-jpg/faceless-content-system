@@ -6,6 +6,8 @@ Sample files used in mock mode (`MOCK_HEYGEN=true`, `MOCK_STT=true`, `MOCK_CLAUD
 |---|---|---|
 | `consent-good.mp4` | Phase 3 | 16 s, 1080x1920, 30 fps, bright flat colour + steady test tone. Passes every clip check. Also the mock "video" `lib/heygen.ts` hands out. |
 | `consent-bad.mp4` | Phase 3 | 8 s, 720x1280, 24 fps, dark, 5 s of silence. Fails length, sharpness, smoothness, silence and light. |
+| `consent-good.mov` | Phase 3 part B | `consent-good.mp4` re-wrapped as QuickTime (.mov), about 93 KB. The clip check converts it to mp4 (decision 5); it uses the `consent-good` vision sidecar. |
+| `consent-corrupt.mov` | Phase 3 part B | 8 KB of text named .mov. Conversion fails, so the "Most Compatible" tip shows. |
 | `consent-*.vision.json` | Phase 3 | Mock Claude face-check answers for the clip with the same name (bad = two faces in some frames). |
 | `heygen/*.json` | Phase 3 | Mock HeyGen API answers, shaped like the v3 docs (see docs/HEYGEN-NOTES.md). |
 | `sample-heygen.mp4` / `.srt` | Phase 3 part B | A short real HeyGen render. The owner adds it after the first approved real render. |

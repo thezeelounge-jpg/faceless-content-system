@@ -1,6 +1,6 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ClaudeDeps } from "@/lib/claude";
@@ -8,7 +8,8 @@ import type { ClipChecksResult } from "@/lib/clip-checks/evaluate";
 import { runClipChecks } from "@/lib/clip-checks/run";
 import { generateConsentWords, uploadBlockedReason, wordsExpireAt, type RandomInt } from "@/lib/consent-words";
 import type { AvatarRow, ClipStorage, ConsentRow, ConsentStore } from "@/lib/consent-store-types";
-import { CONSENT_UPLOAD, validateUpload } from "@/lib/consent-upload-rules";
+import { convertToMp4 } from "@/lib/clip-checks/media";
+import { CONSENT_UPLOAD, UPLOAD_TIPS, validateUpload } from "@/lib/consent-upload-rules";
 import { PlainError } from "@/lib/plain-error";
 
 // The consent clip, step by step (admin now, customers in Phase 6):
@@ -94,7 +95,7 @@ export async function confirmUpload(
   const consent = await load(deps.store, consentId);
   const prefix = `${consent.brand_id}/${consent.id}/`;
   const name = objectPath.slice(prefix.length);
-  if (!objectPath.startsWith(prefix) || !/^[0-9a-f-]{36}\.(mp4|webm)$/i.test(name)) {
+  if (!objectPath.startsWith(prefix) || !/^[0-9a-f-]{36}\.(mp4|webm|mov)$/i.test(name)) {
     throw new PlainError("That upload does not belong to this consent.");
   }
   const decided = decidedError(consent);
@@ -133,6 +134,25 @@ function reshootEmail(brandName: string, tips: string[]): { subject: string; bod
   };
 }
 
+const CLIP_CHANGED = "A new clip was uploaded while this one was being checked. Check the new clip.";
+
+/** Stores the converted mp4 next to the .mov, makes it the clip, then deletes the .mov. Returns the new path. */
+async function replaceWithMp4(
+  consent: ConsentRow,
+  movPath: string,
+  mp4File: string,
+  deps: { store: ConsentStore; storage: ClipStorage },
+): Promise<string> {
+  const mp4Path = `${consent.brand_id}/${consent.id}/${randomUUID()}.mp4`;
+  await deps.storage.upload(mp4Path, new Uint8Array(await readFile(mp4File)), "video/mp4");
+  if (!(await deps.store.swapClipPath(consent.id, movPath, mp4Path))) {
+    await deps.storage.remove(mp4Path).catch(() => null);
+    throw new PlainError(CLIP_CHANGED);
+  }
+  await deps.storage.remove(movPath).catch(() => null);
+  return mp4Path;
+}
+
 /**
  * Runs the automatic checks on the uploaded clip and saves them to
  * consents.clip_checks. A failed clip "emails" reshoot tips (mock outbox only).
@@ -147,16 +167,30 @@ export async function checkConsentClip(
   },
 ): Promise<ClipChecksResult> {
   const consent = await load(deps.store, consentId);
-  const clipPath = consent.clip_path;
+  let clipPath = consent.clip_path;
   if (!clipPath) throw new PlainError("Upload the clip first.");
   const brand = await deps.store.getBrandContact(consent.brand_id);
   if (!brand) throw new PlainError("Client not found.");
 
-  const ext = path.extname(clipPath) || ".mp4";
-  const file = path.join(os.tmpdir(), `consent-${randomUUID()}${ext}`);
+  const ext = path.extname(clipPath).toLowerCase() || ".mp4";
+  let file = path.join(os.tmpdir(), `consent-${randomUUID()}${ext}`);
+  const temps = [file];
   let result: ClipChecksResult;
   try {
     await writeFile(file, await deps.storage.download(clipPath));
+    if (ext === ".mov") {
+      // Decision 5: HeyGen takes mp4/webm, so a .mov becomes an mp4 first; the
+      // mp4 is what we check, store and (later) send to HeyGen.
+      const mp4 = path.join(os.tmpdir(), `consent-${randomUUID()}.mp4`);
+      temps.push(mp4);
+      try {
+        await convertToMp4(file, mp4);
+      } catch {
+        throw new PlainError(UPLOAD_TIPS.bad_mov);
+      }
+      clipPath = await replaceWithMp4(consent, clipPath, mp4, deps);
+      file = mp4;
+    }
     const measured = await runClipChecks(file, {
       brand: {
         id: brand.id, name: brand.name, niche: null, audience: null, offers: null, tone: null, sound_answers: {},
@@ -168,12 +202,12 @@ export async function checkConsentClip(
     });
     result = { ...measured, clip_path: clipPath };
   } finally {
-    await rm(file, { force: true });
+    await Promise.all(temps.map((t) => rm(t, { force: true })));
   }
 
   // SF4: save only onto the clip we measured (a re-upload meanwhile wins).
   if (!(await deps.store.saveClipChecks(consentId, clipPath, result))) {
-    throw new PlainError("A new clip was uploaded while this one was being checked. Check the new clip.");
+    throw new PlainError(CLIP_CHANGED);
   }
   if (!result.passed && brand.ownerEmail) {
     await deps.store.insertOutbox({

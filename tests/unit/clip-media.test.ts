@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  convertToMp4Args,
   brightnessArgs,
   frameArgs,
   frameTimes,
@@ -124,5 +125,21 @@ describe.skipIf(!hasFfmpeg)("real ffprobe and ffmpeg on the fixtures", () => {
     const frames = await sampleFrames(GOOD, 16, 6);
     expect(frames).toHaveLength(6);
     for (const frame of frames) expect([...frame.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+  });
+});
+
+describe("decision 5: .mov → mp4 conversion command (no shell, each value its own argument)", () => {
+  it("re-encodes to H.264 + AAC with faststart into our temp output", () => {
+    expect(convertToMp4Args("/tmp/in.mov", "/tmp/out.mp4")).toEqual([
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-i", "/tmp/in.mov",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
+      "/tmp/out.mp4",
+    ]);
+  });
+
+  it("refuses relative paths (so a name can never look like an option)", () => {
+    expect(() => convertToMp4Args("-i.mov", "/tmp/out.mp4")).toThrow("Clip path must be an absolute file path.");
+    expect(() => convertToMp4Args("/tmp/in.mov", "out.mp4")).toThrow("Clip path must be an absolute file path.");
   });
 });

@@ -49,6 +49,12 @@ export function memoryConsentStore() {
       row.clip_checks = structuredClone(checks);
       return structuredClone(row);
     },
+    async swapClipPath(consentId, from, to) {
+      const row = consents.find((c) => c.id === consentId);
+      if (!row || row.clip_path !== from || row.admin_status !== "pending") return null;
+      Object.assign(row, { clip_path: to, clip_checks: null });
+      return structuredClone(row);
+    },
     async listConsents() {
       return structuredClone(consents);
     },
@@ -103,7 +109,18 @@ export function memoryConsentStore() {
 export function memoryClipStorage(files: Record<string, { size: number; contentType: string; fixture?: string }> = {}) {
   const uploadUrls: string[] = [];
   const signed: { path: string; seconds: number }[] = [];
+  /** Bytes our server code uploaded (e.g. a .mov converted to mp4). */
+  const uploaded: Record<string, Uint8Array> = {};
+  const removed: string[] = [];
   const storage: ClipStorage = {
+    async upload(objectPath, bytes, contentType) {
+      uploaded[objectPath] = bytes;
+      files[objectPath] = { size: bytes.byteLength, contentType };
+    },
+    async remove(objectPath) {
+      removed.push(objectPath);
+      delete files[objectPath];
+    },
     async createUploadUrl(objectPath) {
       uploadUrls.push(objectPath);
       return { path: objectPath, token: `token-for-${objectPath}` };
@@ -117,10 +134,11 @@ export function memoryClipStorage(files: Record<string, { size: number; contentT
       return `https://storage.example.invalid/signed/${objectPath}?expires=${seconds}`;
     },
     async download(objectPath) {
+      if (uploaded[objectPath]) return uploaded[objectPath];
       const fixture = files[objectPath]?.fixture;
       if (!fixture) throw new Error(`no such object: ${objectPath}`);
       return new Uint8Array(readFileSync(path.resolve("tests/fixtures", fixture)));
     },
   };
-  return { storage, files, uploadUrls, signed };
+  return { storage, files, uploadUrls, signed, uploaded, removed };
 }

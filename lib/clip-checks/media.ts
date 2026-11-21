@@ -28,6 +28,20 @@ export function probeArgs(file: string): string[] {
 
 const passArgs = (file: string) => ["-nostdin", "-hide_banner", "-nostats", "-i", checkPath(file)];
 
+/**
+ * Decision 5: a .mov (iPhone QuickTime, often HEVC) re-encoded to an mp4 that
+ * HeyGen accepts: H.264 (yuv420p, so 10-bit HDR phones still play), AAC,
+ * moov atom first (+faststart). -y only overwrites our own temp output.
+ */
+export function convertToMp4Args(input: string, output: string): string[] {
+  return [
+    "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+    "-i", checkPath(input),
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart",
+    checkPath(output),
+  ];
+}
+
 /** Integrated loudness (EBU R128), printed as a summary on stderr. */
 export function loudnessArgs(file: string): string[] {
   return [...passArgs(file), "-vn", "-af", "ebur128=peak=none", "-f", "null", "-"];
@@ -178,6 +192,11 @@ export async function measureClip(file: string): Promise<ClipMeasurements> {
     longestSilenceS: silence ? parseSilences(silence.stderr, probe.durationS) : probe.durationS,
     brightness: parseBrightness(brightness.stdout.toString("utf8") + brightness.stderr),
   };
+}
+
+/** Converts a clip to mp4 (decision 5). Throws "ffmpeg failed: …" when the file can't be read. */
+export async function convertToMp4(input: string, output: string): Promise<void> {
+  await run(ffmpegBin(), convertToMp4Args(input, output));
 }
 
 /** `count` JPEG frames spread over the clip. */

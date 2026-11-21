@@ -114,10 +114,10 @@ export function ConsentUpload({
           </Button>
         )}
         <label className="inline-flex cursor-pointer items-center rounded border px-3 py-2 text-sm">
-          Upload a file (MP4 or WebM)
+          Upload a file (MP4, WebM or MOV, up to 50 MB)
           <input
             type="file"
-            accept="video/mp4,video/webm"
+            accept="video/mp4,video/webm,video/quicktime,.mov"
             className="sr-only"
             disabled={busy || recording}
             onChange={(event) => {

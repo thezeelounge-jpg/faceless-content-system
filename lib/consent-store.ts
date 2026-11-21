@@ -51,6 +51,18 @@ export function createConsentStore(): ConsentStore {
       if (error) fail("save clip checks", error);
       return (data as ConsentRow | null) ?? null;
     },
+    async swapClipPath(id, from, to) {
+      const { data, error } = await db
+        .from("consents")
+        .update({ clip_path: to, clip_checks: null })
+        .eq("id", id)
+        .eq("clip_path", from)
+        .eq("admin_status", "pending")
+        .select()
+        .maybeSingle();
+      if (error) fail("swap clip", error);
+      return (data as ConsentRow | null) ?? null;
+    },
     async listConsents() {
       const { data, error } = await db.from("consents").select().order("created_at", { ascending: false }).limit(200);
       if (error) fail("list consents", error);
@@ -145,6 +157,14 @@ export function createClipStorage(): ClipStorage {
       const { data, error } = await bucket.download(path);
       if (error || !data) fail("download clip", error);
       return new Uint8Array(await data.arrayBuffer());
+    },
+    async upload(path, bytes, contentType) {
+      const { error } = await bucket.upload(path, bytes, { contentType, upsert: false });
+      if (error) fail("upload converted clip", error);
+    },
+    async remove(path) {
+      const { error } = await bucket.remove([path]);
+      if (error) fail("remove clip", error);
     },
   };
 }

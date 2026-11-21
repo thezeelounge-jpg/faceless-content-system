@@ -87,6 +87,11 @@ export interface ConsentStore {
    * still has this clip_path. Returns null (nothing saved) otherwise.
    */
   saveClipChecks(id: string, clipPath: string, checks: ClipChecksResult): Promise<ConsentRow | null>;
+  /**
+   * Decision 5: replaces clip_path `from` with `to` (and clears clip_checks),
+   * only while the consent is pending and still has `from`. Null otherwise.
+   */
+  swapClipPath(id: string, from: string, to: string): Promise<ConsentRow | null>;
   listConsents(): Promise<ConsentRow[]>;
   getAvatarByConsent(consentId: string): Promise<AvatarRow | null>;
   getAvatar(id: string): Promise<AvatarRow | null>;
@@ -110,4 +115,7 @@ export interface ClipStorage {
   info(path: string): Promise<{ size: number; contentType: string } | null>;
   signedUrl(path: string, seconds: number): Promise<string>;
   download(path: string): Promise<Uint8Array>;
+  /** Server-side upload (e.g. the mp4 converted from a .mov). Never overwrites. */
+  upload(path: string, bytes: Uint8Array, contentType: string): Promise<void>;
+  remove(path: string): Promise<void>;
 }

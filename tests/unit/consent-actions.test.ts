@@ -127,9 +127,9 @@ describe("upload", () => {
     const consent = await newConsent();
     const ok = await actions.prepareUploadAction(consent.id, { name: "c.mp4", type: "video/mp4", size: 50 * MB });
     expect(ok).toMatchObject({ ok: true, token: expect.stringContaining("token-for-") });
-    expect(await actions.prepareUploadAction(consent.id, { name: "c.mov", type: "video/quicktime", size: 50 * MB })).toEqual({
+    expect(await actions.prepareUploadAction(consent.id, { name: "c.avi", type: "video/x-msvideo", size: 20 * MB })).toEqual({
       ok: false,
-      message: "Upload an MP4 or WebM video. On iPhone: Settings → Camera → Formats → Most Compatible.",
+      message: "Upload an MP4, WebM or MOV video. On iPhone: Settings → Camera → Formats → Most Compatible.",
     });
     expect(await actions.prepareUploadAction(consent.id, { name: 1, type: "video/mp4", size: "big" } as never)).toEqual({
       ok: false,
