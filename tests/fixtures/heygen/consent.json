@@ -1,0 +1,9 @@
+{
+  "data": {
+    "avatar_group": {
+      "id": "group_mock_0001",
+      "consent_status": "pending",
+      "url": "https://consent.example.invalid/mock/group_mock_0001"
+    }
+  }
+}

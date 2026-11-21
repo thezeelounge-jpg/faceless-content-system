@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "id": "look_mock_0001",
+      "name": "Mock twin",
+      "avatar_type": "digital_twin",
+      "group_id": "group_mock_0001",
+      "status": "completed",
+      "supported_api_engines": ["avatar_iv", "avatar_v"],
+      "default_voice_id": "voice_mock_0001"
+    }
+  ],
+  "has_more": false,
+  "next_token": null
+}

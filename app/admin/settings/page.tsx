@@ -32,7 +32,21 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card className="md:col-span-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>HeyGen connection</CardTitle>
+            <CardDescription>
+              Checks the HeyGen key (GET /v3/users/me, free). In mock mode it shows the sample user and calls nothing.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <a className="text-sm underline" href="/api/admin/heygen-check" target="_blank" rel="noreferrer">
+              Check HeyGen
+            </a>
+          </CardContent>
+        </Card>
+
+        <Card>
           <CardHeader>
             <CardTitle>Setup status</CardTitle>
             <CardDescription>Which settings are filled in. Values are never shown.</CardDescription>

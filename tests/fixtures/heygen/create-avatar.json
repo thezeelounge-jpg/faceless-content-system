@@ -1,0 +1,22 @@
+{
+  "data": {
+    "avatar_item": {
+      "id": "look_mock_0001",
+      "name": "Mock twin",
+      "avatar_type": "digital_twin",
+      "group_id": "group_mock_0001",
+      "preview_image_url": null,
+      "supported_api_engines": [],
+      "default_voice_id": "voice_mock_0001",
+      "status": "processing"
+    },
+    "avatar_group": {
+      "id": "group_mock_0001",
+      "name": "Mock twin",
+      "looks_count": 1,
+      "default_voice_id": "voice_mock_0001",
+      "status": "pending_consent",
+      "consent_status": "pending"
+    }
+  }
+}
