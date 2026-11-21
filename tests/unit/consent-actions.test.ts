@@ -193,6 +193,71 @@ describe("upload", () => {
   });
 });
 
+describe("decision 7: input checks and plain errors on every consent action", () => {
+  it("prepare: expired words → the plain 'New words' sentence; no upload token", async () => {
+    const consent = await newConsent();
+    await mem.store.updateConsent(consent.id, { words_expire_at: new Date(Date.now() - 60_000).toISOString() });
+    expect(await actions.prepareUploadAction(consent.id, { name: "c.mp4", type: "video/mp4", size: 20 * MB })).toEqual({
+      ok: false,
+      message: "The 3 words have expired. Press “New words”, then record again saying the new words.",
+    });
+    expect(clips.uploadUrls).toEqual([]);
+  });
+
+  it("prepare: a file over 50 MB is refused with the shrink tip", async () => {
+    const consent = await newConsent();
+    const ticket = await actions.prepareUploadAction(consent.id, { name: "c.mp4", type: "video/mp4", size: 51 * MB });
+    expect(ticket).toMatchObject({ ok: false, message: expect.stringContaining("The clip is too big (over 50 MB).") });
+  });
+
+  it("confirm: a non-string or over-long path is refused before anything is loaded", async () => {
+    const get = vi.spyOn(mem.store, "getConsent");
+    const bad = { status: "error", message: "That upload can't be used." };
+    expect(await actions.confirmUploadAction("c0000000-0000-4000-8000-000000000001", 42 as never)).toEqual(bad);
+    expect(await actions.confirmUploadAction("c0000000-0000-4000-8000-000000000001", "x".repeat(301))).toEqual(bad);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("confirm: an unknown consent id is 'Consent not found.'", async () => {
+    expect(await actions.confirmUploadAction("not-a-uuid", "a/b/c.mp4")).toEqual({ status: "error", message: "Consent not found." });
+  });
+
+  it("approve / reject: unknown consent → plain; reject without a note → plain", async () => {
+    expect(await actions.approveConsentAction("c0000000-0000-4000-8000-0000000000ff", idle, form({ note: "" }))).toEqual({
+      status: "error",
+      message: "Consent not found.",
+    });
+    const consent = await checkedConsent();
+    expect(await actions.rejectConsentAction(consent.id, idle, form({ note: "   " }))).toEqual({
+      status: "error",
+      message: "Write a short note saying why.",
+    });
+  });
+
+  it("an unexpected store error: generic sentence for the admin, details only in the server log (redacted)", async () => {
+    const consent = await newConsent();
+    vi.spyOn(mem.store, "getConsent").mockRejectedValue(new Error("db exploded sb_secret_abcdefghijklmnop"));
+    const state = await actions.recheckClipAction(consent.id, idle);
+    expect(state).toEqual({ status: "error", message: "Something went wrong. Please try again in a minute." });
+    const logged = JSON.stringify(vi.mocked(console.error).mock.calls);
+    expect(logged).toContain("[admin] clip checks failed");
+    expect(logged).not.toContain("sb_secret_abcdefghijklmnop");
+  });
+
+  it("approve, no Trigger key, spend cap reached: approved, but the plain cap sentence is shown and HeyGen is not asked", async () => {
+    spend.seed("create_twin", new Date().toISOString(), 2);
+    const consent = await checkedConsent();
+    const state = await actions.approveConsentAction(consent.id, idle, form({ note: "" }));
+    expect(state).toEqual({
+      status: "error",
+      message:
+        "Today's HeyGen limit for new twins is reached (2 a day). Nothing was sent to HeyGen. Try again tomorrow, or raise heygen_daily_caps in Settings.",
+    });
+    expect((await mem.store.getConsent(consent.id))?.admin_status).toBe("approved");
+    expect(mem.avatars[0]).toMatchObject({ heygen_group_id: null, create_started_at: null });
+  });
+});
+
 describe("approve starts the twin", () => {
   it("with TRIGGER_SECRET_KEY: starts create-twin with idempotency key = consent id (global)", async () => {
     process.env.TRIGGER_SECRET_KEY = "tr_dev_dummy";
