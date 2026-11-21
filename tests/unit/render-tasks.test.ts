@@ -10,7 +10,19 @@ vi.mock("@/lib/heygen-spend-store", () => ({ createSpendStore: vi.fn() }));
 const { renderVideoTask, renderPayload, renderQueue } = await import("@/trigger/render-video");
 const { pollRenderTask, pollRenderPayload } = await import("@/trigger/poll-render");
 
+vi.mock("@/lib/consent-store", () => ({ createConsentStore: vi.fn() }));
+const { likenessTestTask, likenessPayload } = await import("@/trigger/likeness-test");
+
 const ID = "90000000-0000-4000-8000-000000000001";
+
+describe("likeness-test task", () => {
+  it("has a stable id; payload = twin UUID + optional boolean confirmSpend", () => {
+    expect(likenessTestTask.id).toBe("likeness-test");
+    expect(likenessPayload.parse({ avatarId: ID, confirmSpend: true })).toEqual({ avatarId: ID, confirmSpend: true });
+    expect(() => likenessPayload.parse({ avatarId: ID, confirmSpend: "yes" })).toThrow();
+    expect(() => likenessPayload.parse({ avatarId: "x" })).toThrow();
+  });
+});
 
 describe("render tasks", () => {
   it("have stable ids", () => {

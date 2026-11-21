@@ -179,6 +179,14 @@ async function ConsentDetail({ params }: Pick<PageProps<"/admin/consents/[id]">,
                 <ActionButton action={checkTwinAction.bind(null, avatar.id)} label="Check twin again" pendingLabel="Checking…" variant="outline" size="sm" />
               )}
             </div>
+            {avatar && ["likeness_test", "ready", "reshoot_needed"].includes(avatar.status) && (
+              <p>
+                <Link href={`/admin/consents/${consent.id}/likeness`} className="font-medium underline">
+                  Likeness test →
+                </Link>{" "}
+                {avatar.chosen_engine ? `(chosen engine: ${avatar.chosen_engine})` : ""}
+              </p>
+            )}
           </CardContent>
         </Card>
       )}
