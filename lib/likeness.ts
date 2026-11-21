@@ -72,7 +72,12 @@ export async function prepareLikenessTest(
   const existing = await deps.videos.listLikenessVideos(avatar.id);
   const rows: VideoRow[] = [];
   for (const engine of engines) {
-    const found = existing.find((v) => v.engine === engine && v.status !== "failed" && v.status !== "skipped");
+    // SF6: never a second paid render for the same engine and twin. A row is reused unless it is
+    // skipped, or failed WITHOUT ever reaching HeyGen (no claim, no HeyGen id). A failed row that
+    // still holds a claim or an id is reused, so renderVideo answers "already_started" or refuses
+    // with "check the HeyGen dashboard" instead of POSTing again.
+    const reachedHeygen = (v: VideoRow) => v.render_started_at !== null || v.heygen_video_id !== null;
+    const found = existing.find((v) => v.engine === engine && v.status !== "skipped" && (v.status !== "failed" || reachedHeygen(v)));
     rows.push(
       found ??
         (await deps.videos.insertVideo({

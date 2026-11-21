@@ -167,6 +167,79 @@ describe("runLikenessTest", () => {
   });
 });
 
+describe("SF6: a re-run never POSTs twice for the same engine and twin", () => {
+  /** MOCK_HEYGEN=false with a FAKE fetch answering in order; counts every call. */
+  function liveFake(answers: (() => Response)[]) {
+    const fake = vi.fn(async () => {
+      const next = answers.shift();
+      if (!next) throw new Error("no more fake answers");
+      return next();
+    });
+    process.env.MOCK_HEYGEN = "false";
+    return { fake, client: createHeygenClient({ apiKey: "test-key-not-real", fetch: fake as unknown as typeof fetch }) };
+  }
+  const created = (id: string) => () => new Response(JSON.stringify({ data: { video_id: id } }), { status: 200 });
+  const timeout = () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  };
+
+  it("re-run while a timed-out render is still unknown: same rows, zero POSTs", async () => {
+    const avatar = await twinForTest();
+    const first = liveFake([timeout, created("hg_iv")]);
+    await runLikenessTest(avatar.id, deps({ heygen: first.client, confirmSpend: true }));
+    expect(first.fake).toHaveBeenCalledTimes(2);
+
+    const again = liveFake([created("hg_second_paid"), created("hg_third_paid")]);
+    const { results } = await runLikenessTest(avatar.id, deps({ heygen: again.client, confirmSpend: true }));
+    expect(results).toEqual([{ status: "unknown" }, { status: "already_started", heygenVideoId: "hg_iv" }]);
+    expect(again.fake).not.toHaveBeenCalled();
+    expect(mem.videos).toHaveLength(2);
+  });
+
+  it("re-run after the timed-out render was failed by the poll window (claim still held): zero new rows for that engine, zero POSTs, 'check HeyGen'", async () => {
+    const avatar = await twinForTest();
+    const first = liveFake([timeout, created("hg_iv")]);
+    await runLikenessTest(avatar.id, deps({ heygen: first.client, confirmSpend: true }));
+    const lost = mem.videos.find((v) => v.engine === "avatar_v")!;
+    const later = () => new Date(Date.parse(lost.render_started_at!) + 31 * 60_000);
+    await pollRenderOnce(lost.id, { videos: mem.store, heygen: first.client, files: files.storage, now: later });
+    expect(mem.videos.find((v) => v.id === lost.id)).toMatchObject({ status: "failed", heygen_video_id: null });
+
+    const again = liveFake([created("hg_second_paid"), created("hg_third_paid")]);
+    await expect(runLikenessTest(avatar.id, deps({ heygen: again.client, confirmSpend: true }))).rejects.toThrow(
+      "Check the HeyGen dashboard before rendering again.",
+    );
+    expect(mem.videos.filter((v) => v.engine === "avatar_v")).toHaveLength(1);
+    expect(mem.videos).toHaveLength(2);
+    expect(again.fake).not.toHaveBeenCalled();
+  });
+
+  it("re-run after HeyGen itself failed a render (row holds a HeyGen id): reused, zero new rows, zero POSTs", async () => {
+    const avatar = await twinForTest();
+    await runLikenessTest(avatar.id, deps());
+    const failed = mem.videos[0];
+    await mem.store.updateVideo(failed.id, { status: "failed", error: "HeyGen could not make the video (no reason given)." });
+
+    const again = liveFake([created("hg_second_paid")]);
+    const { videos } = await runLikenessTest(avatar.id, deps({ heygen: again.client, confirmSpend: true }));
+    expect(videos.map((v) => v.id)).toContain(failed.id);
+    expect(mem.videos).toHaveLength(2);
+    expect(again.fake).not.toHaveBeenCalled();
+  });
+
+  it("a failed row that never reached HeyGen (no claim, no id, e.g. a 400 refusal) may get a fresh row", async () => {
+    const avatar = await twinForTest();
+    const first = liveFake([() => new Response(JSON.stringify({ error: { code: "invalid_parameter" } }), { status: 400 })]);
+    await expect(runLikenessTest(avatar.id, deps({ heygen: first.client, confirmSpend: true }))).rejects.toThrow("HeyGen refused");
+    expect(mem.videos[0]).toMatchObject({ status: "failed", render_started_at: null, heygen_video_id: null });
+
+    const again = liveFake([created("hg_v"), created("hg_iv")]);
+    const { results } = await runLikenessTest(avatar.id, deps({ heygen: again.client, confirmSpend: true }));
+    expect(results.map((r) => r.status)).toEqual(["started", "started"]);
+    expect(mem.videos.filter((v) => v.engine === "avatar_v")).toHaveLength(2);
+  });
+});
+
 describe("the page data and the two decisions", () => {
   it("listLikenessTest: 5-minute signed URLs from the private bucket, only for rendered videos", async () => {
     const avatar = await twinForTest();
