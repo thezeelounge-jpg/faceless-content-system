@@ -183,11 +183,17 @@ describe("customers only see their own rows", () => {
 
 // One row per user in every customer-readable table, labelled "A" or "B".
 // Each test proves A sees only A's row, B only B's, and anon nothing.
-const OWNED_TABLES: { table: string; label: string }[] = [
+// `read` (optional): what a customer may select to tell the rows apart, when
+// the label column itself is server only (videos, SF2).
+const OWNED_TABLES: { table: string; label: string; read?: string }[] = [
   { table: "consents", label: "person_legal_name" },
   { table: "avatars", label: "heygen_group_id" },
   { table: "pronunciations", label: "written" },
-  { table: "videos", label: "heygen_video_id" },
+  {
+    table: "videos",
+    label: "heygen_video_id",
+    read: `case brand_id when '${BRAND_A}' then 'Video A' when '${BRAND_B}' then 'Video B' end`,
+  },
   { table: "usage_ledger", label: "note" },
   { table: "subscriptions", label: "external_id" },
   { table: "manual_payments", label: "reference" },
@@ -215,9 +221,9 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
     }
   });
 
-  for (const { table, label } of OWNED_TABLES) {
+  for (const { table, label, read } of OWNED_TABLES) {
     it(`${table}: user A sees only A's row, user B only B's`, async () => {
-      const sql = `select ${label} as name from public.${table}`;
+      const sql = `select ${read ?? label} as name from public.${table}`;
       await asRole("service_role", null, async () => {
         expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["A", "B"]);
       });
@@ -497,6 +503,86 @@ describe("renders: videos.kind, the render claim and the 10-at-once cap", () => 
   });
 });
 
+// SF2 (p3-fix2): customers may read only the plain columns of their own
+// videos; everything internal (HeyGen ids, engine, errors, storage keys,
+// claims, transcript, plan bookkeeping) stays server only. Likeness-test rows
+// are admin-only, so customers don't see those rows at all.
+describe("SF2: customers read only the safe columns of their own post videos", () => {
+  const CUSTOMER_COLUMNS = ["id", "brand_id", "script_id", "status", "duration_s", "ai_label", "created_at"];
+  const INTERNAL_COLUMNS = [
+    "avatar_id",
+    "engine",
+    "attempt",
+    "heygen_video_id",
+    "raw_path",
+    "transcript",
+    "final_path",
+    "counts_toward_plan",
+    "watermark",
+    "error",
+    "kind",
+    "spoken_words",
+    "render_started_at",
+    "rendered_at",
+  ];
+  const canSelect = async (role: string, column: string) =>
+    (
+      await db.query<{ ok: boolean }>("select has_column_privilege($1, 'public.videos', $2, 'SELECT') as ok", [
+        role,
+        column,
+      ])
+    ).rows[0].ok;
+
+  it("every videos column is classified (a new column must be decided on purpose)", async () => {
+    const columns = await names(
+      "select column_name as name from information_schema.columns where table_schema = 'public' and table_name = 'videos'",
+    );
+    expect(columns).toEqual([...CUSTOMER_COLUMNS, ...INTERNAL_COLUMNS].sort());
+  });
+
+  it("authenticated can SELECT each customer column", async () => {
+    for (const column of CUSTOMER_COLUMNS) expect([column, await canSelect("authenticated", column)]).toEqual([column, true]);
+  });
+
+  it("authenticated can NOT select any internal column", async () => {
+    for (const column of INTERNAL_COLUMNS) expect([column, await canSelect("authenticated", column)]).toEqual([column, false]);
+  });
+
+  it("anon can select no column; service_role every column", async () => {
+    for (const column of [...CUSTOMER_COLUMNS, ...INTERNAL_COLUMNS]) {
+      expect([column, await canSelect("anon", column)]).toEqual([column, false]);
+      expect([column, await canSelect("service_role", column)]).toEqual([column, true]);
+    }
+  });
+
+  it("a customer query on safe columns works; internal columns and select * are refused", async () => {
+    await asUser(USER_A, async () => {
+      const rows = await db.query<{ brand_id: string }>(`select ${CUSTOMER_COLUMNS.join(", ")} from public.videos`);
+      expect(rows.rows.length).toBeGreaterThan(0);
+      expect(rows.rows.every((row) => row.brand_id === BRAND_A)).toBe(true);
+      await expect(db.query("select * from public.videos")).rejects.toThrow(/permission denied/);
+      for (const column of ["heygen_video_id", "engine", "error", "raw_path", "render_started_at"]) {
+        await expect(db.query(`select ${column} from public.videos`)).rejects.toThrow(/permission denied/);
+      }
+    });
+  });
+
+  it("customers don't see likeness-test rows at all (admin only)", async () => {
+    const id = await asRole("service_role", null, async () =>
+      (
+        await db.query<{ id: string }>(
+          `insert into public.videos (brand_id, kind) values ('${BRAND_A}', 'likeness_test') returning id`,
+        )
+      ).rows[0].id,
+    );
+    await asUser(USER_A, async () => {
+      const rows = await db.query("select id from public.videos where id = $1", [id]);
+      expect(rows.rows).toEqual([]);
+    });
+    await asRole("service_role", null, () => db.query("delete from public.videos where id = $1", [id]));
+  });
+});
+
 describe("webhook_events (HeyGen webhooks)", () => {
   it("one row per event_key: a repeat is ignored by on conflict do nothing", async () => {
     await asRole("service_role", null, async () => {
@@ -563,15 +649,41 @@ describe("table privileges for anon and authenticated", () => {
     expect(readable.length).toBeGreaterThanOrEqual(12);
   });
 
+  // SF2: tables where customers get SELECT on some COLUMNS only, never the
+  // whole table (column lists are tested in the SF2 block above).
+  const COLUMN_GRANT_TABLES = ["videos"];
+
   it("authenticated has SELECT only on every customer table, nothing on internal ones", async () => {
     const seen: Record<string, string[]> = {};
     for (const table of await publicTables()) seen[table] = await granted("authenticated", table);
     const expected = Object.fromEntries(
-      Object.keys(seen).map((t) => [t, INTERNAL_TABLES.includes(t) ? [] : ["SELECT"]]),
+      Object.keys(seen).map((t) => [
+        t,
+        INTERNAL_TABLES.includes(t) || COLUMN_GRANT_TABLES.includes(t) ? [] : ["SELECT"],
+      ]),
     );
     expect(seen).toEqual(expected);
     expect(seen.scripts).toEqual(["SELECT"]);
     expect(seen.brand_versions).toEqual(["SELECT"]);
+    expect(seen.videos).toEqual([]);
+  });
+
+  it("column-grant tables: authenticated may SELECT some columns but never INSERT/UPDATE any", async () => {
+    for (const table of COLUMN_GRANT_TABLES) {
+      const any = async (privilege: string) =>
+        (
+          await db.query<{ ok: boolean }>("select has_any_column_privilege('authenticated', $1, $2) as ok", [
+            `public.${table}`,
+            privilege,
+          ])
+        ).rows[0].ok;
+      expect({ table, select: await any("SELECT"), insert: await any("INSERT"), update: await any("UPDATE") }).toEqual({
+        table,
+        select: true,
+        insert: false,
+        update: false,
+      });
+    }
   });
 
   it("anon has no SELECT, INSERT, UPDATE, DELETE or TRUNCATE on any table", async () => {
