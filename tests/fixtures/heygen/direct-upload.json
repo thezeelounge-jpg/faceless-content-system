@@ -1,0 +1,7 @@
+{
+  "data": {
+    "asset_id": "asset_mock_0001",
+    "upload_url": "https://upload.example.invalid/asset_mock_0001",
+    "upload_headers": { "Content-Type": "video/mp4" }
+  }
+}

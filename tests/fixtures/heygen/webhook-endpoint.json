@@ -1,0 +1,3 @@
+{
+  "data": { "endpoint_id": "endpoint_mock_0001", "url": "https://example.invalid/api/webhooks/heygen", "events": ["avatar_video.success", "avatar_video.fail"], "secret": "mock-webhook-secret-not-real" }
+}

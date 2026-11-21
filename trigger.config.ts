@@ -1,3 +1,4 @@
+import { ffmpeg } from "@trigger.dev/build/extensions/core";
 import { defineConfig } from "@trigger.dev/sdk";
 
 // Background jobs (renders, edits, QA, schedules) run on Trigger.dev.
@@ -16,5 +17,17 @@ export default defineConfig({
       factor: 2,
       randomize: true,
     },
+  },
+  build: {
+    // ffmpeg + ffprobe for the clip checks (and Phase 4 edits). The extension
+    // sets FFMPEG_PATH and FFPROBE_PATH, which lib/clip-checks/media.ts reads.
+    // (@trigger.dev/build/extensions/core: "Add ffmpeg to the build, and
+    // automatically set the FFMPEG_PATH and FFPROBE_PATH environment variables.")
+    extensions: [ffmpeg()],
+    // Our lib/ files start with `import "server-only"`, which throws unless the
+    // "react-server" condition is on (server-only/package.json maps it to an
+    // empty file). BuildConfig.conditions: "Add custom conditions to the esbuild
+    // build" (@trigger.dev/core v3/config.d.ts). Check the first deploy log.
+    conditions: ["react-server"],
   },
 });

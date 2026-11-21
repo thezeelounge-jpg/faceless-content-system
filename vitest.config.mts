@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 
@@ -13,6 +13,10 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // Opt-in tests against real staging: only `npm run test:staging` (vitest.staging.config.mts).
+    exclude: [...configDefaults.exclude, "tests/staging/**"],
+    // SF5: every test runs with globalThis.fetch replaced by a thrower.
+    setupFiles: ["tests/setup/no-network.ts"],
     testTimeout: 30_000,
   },
 });

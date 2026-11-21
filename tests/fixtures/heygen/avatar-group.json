@@ -1,0 +1,9 @@
+{
+  "data": {
+    "id": "group_mock_0001",
+    "name": "Mock twin",
+    "default_voice_id": "voice_mock_0001",
+    "consent_status": "accepted",
+    "status": "completed"
+  }
+}

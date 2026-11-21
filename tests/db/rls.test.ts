@@ -35,6 +35,7 @@ const SUPABASE_STUBS = `
     id text primary key,
     name text not null,
     public boolean default false,
+    file_size_limit bigint,
     allowed_mime_types text[]
   );
 `;
@@ -105,7 +106,7 @@ describe("database setup", () => {
 
   it("seeds the safety settings", async () => {
     const result = await db.query<{ key: string }>("select key from public.app_settings order by key");
-    expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "ramadan", "renders_paused"]);
+    expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "heygen_daily_caps", "ramadan", "renders_paused"]);
   });
 
   it("stores tiny Claude costs exactly (ai_usage.cost_usd has 6 decimals)", async () => {
@@ -182,11 +183,17 @@ describe("customers only see their own rows", () => {
 
 // One row per user in every customer-readable table, labelled "A" or "B".
 // Each test proves A sees only A's row, B only B's, and anon nothing.
-const OWNED_TABLES: { table: string; label: string }[] = [
+// `read` (optional): what a customer may select to tell the rows apart, when
+// the label column itself is server only (videos, SF2).
+const OWNED_TABLES: { table: string; label: string; read?: string }[] = [
   { table: "consents", label: "person_legal_name" },
   { table: "avatars", label: "heygen_group_id" },
   { table: "pronunciations", label: "written" },
-  { table: "videos", label: "heygen_video_id" },
+  {
+    table: "videos",
+    label: "heygen_video_id",
+    read: `case brand_id when '${BRAND_A}' then 'Video A' when '${BRAND_B}' then 'Video B' end`,
+  },
   { table: "usage_ledger", label: "note" },
   { table: "subscriptions", label: "external_id" },
   { table: "manual_payments", label: "reference" },
@@ -214,9 +221,9 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
     }
   });
 
-  for (const { table, label } of OWNED_TABLES) {
+  for (const { table, label, read } of OWNED_TABLES) {
     it(`${table}: user A sees only A's row, user B only B's`, async () => {
-      const sql = `select ${label} as name from public.${table}`;
+      const sql = `select ${read ?? label} as name from public.${table}`;
       await asRole("service_role", null, async () => {
         expect((await names(sql)).map((n) => n.split(" ")[1])).toEqual(["A", "B"]);
       });
@@ -253,6 +260,632 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
       { id: "consent-clips", public: false },
       { id: "videos", public: false },
     ]);
+  });
+
+  it("decision 4: consent-clips accepts files up to 50 MB (52428800 bytes)", async () => {
+    const bucket = await db.query<{ limit: string }>(
+      "select file_size_limit::text as limit from storage.buckets where id = 'consent-clips'",
+    );
+    expect(bucket.rows).toEqual([{ limit: "52428800" }]);
+  });
+});
+
+// Phase 3: emails are never sent yet. The consent link and reshoot tips are
+// written to email_outbox (server only), so nothing reaches a real inbox.
+describe("email_outbox (mocked emails, Phase 3)", () => {
+  it("server code can store a mocked email; status is always 'mocked'", async () => {
+    await asRole("service_role", null, async () => {
+      const saved = await db.query<{ status: string; kind: string }>(
+        `insert into public.email_outbox (brand_id, to_email, kind, subject, body)
+         values ('${BRAND_A}', 'a@example.com', 'consent_link', 'Confirm', 'Link') returning status, kind`,
+      );
+      expect(saved.rows).toEqual([{ status: "mocked", kind: "consent_link" }]);
+      await expect(
+        db.exec(`insert into public.email_outbox (to_email, kind, subject, body, status)
+                 values ('a@example.com', 'consent_link', 's', 'b', 'sent')`),
+      ).rejects.toThrow(/check constraint/);
+      await expect(
+        db.exec(`insert into public.email_outbox (to_email, kind, subject, body)
+                 values ('a@example.com', 'newsletter', 's', 'b')`),
+      ).rejects.toThrow(/check constraint/);
+    });
+  });
+
+  it("customers and logged-out visitors cannot read or write it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(db.query("select * from public.email_outbox")).rejects.toThrow(/permission denied/);
+      await expect(
+        db.exec(`insert into public.email_outbox (to_email, kind, subject, body) values ('x@y.z', 'consent_link', 's', 'b')`),
+      ).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(db.query("select * from public.email_outbox")).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("RLS is on for email_outbox", async () => {
+    const result = await db.query<{ on: boolean }>(
+      "select relrowsecurity as on from pg_class where oid = 'public.email_outbox'::regclass",
+    );
+    expect(result.rows).toEqual([{ on: true }]);
+  });
+});
+
+describe("avatars (Phase 3 twin creation)", () => {
+  it("one twin per consent: a second avatar for the same consent is refused", async () => {
+    await asRole("service_role", null, async () => {
+      const consent = await db.query<{ id: string }>(
+        `insert into public.consents (brand_id, person_legal_name, checkbox_at, words, words_expire_at)
+         values ('${BRAND_A}', 'Twin Test', now(), '{a,b,c}', now() + interval '30 minutes') returning id`,
+      );
+      const id = consent.rows[0].id;
+      await db.exec(`insert into public.avatars (brand_id, consent_id) values ('${BRAND_A}', '${id}')`);
+      await expect(
+        db.exec(`insert into public.avatars (brand_id, consent_id) values ('${BRAND_A}', '${id}')`),
+      ).rejects.toThrow(/duplicate key/);
+      const saved = await db.query<{ error: string | null }>(
+        `update public.avatars set error = 'HeyGen said no' where consent_id = '${id}' returning error`,
+      );
+      expect(saved.rows).toEqual([{ error: "HeyGen said no" }]);
+      await db.exec(`delete from public.avatars where consent_id = '${id}'; delete from public.consents where id = '${id}';`);
+    });
+  });
+
+  it("decision 6: brands.contact_email holds an email or nothing; customers still cannot write it", async () => {
+    await asRole("service_role", null, async () => {
+      await db.query("update public.brands set contact_email = 'client@clinic.example' where id = $1", [BRAND_A]);
+      await expect(db.query("update public.brands set contact_email = 'nope' where id = $1", [BRAND_A])).rejects.toThrow(
+        /check constraint/,
+      );
+      await db.query("update public.brands set contact_email = null where id = $1", [BRAND_A]);
+    });
+    await asUser(USER_A, async () => {
+      await expect(
+        db.query("update public.brands set contact_email = 'x@y.example' where id = $1", [BRAND_A]),
+      ).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("decision 2: consents.clip_check_status takes only pending/running/done/failed", async () => {
+    await asRole("service_role", null, async () => {
+      const consent = await db.query<{ id: string; status: string | null }>(
+        `insert into public.consents (brand_id, person_legal_name, checkbox_at, words, words_expire_at)
+         values ('${BRAND_A}', 'Check Status', now(), '{a,b,c}', now() + interval '30 minutes') returning id, clip_check_status as status`,
+      );
+      const id = consent.rows[0].id;
+      expect(consent.rows[0].status).toBeNull();
+      for (const status of ["pending", "running", "done", "failed"]) {
+        await db.query("update public.consents set clip_check_status = $1, clip_check_error = 'x' where id = $2", [status, id]);
+      }
+      await expect(db.query("update public.consents set clip_check_status = 'maybe' where id = $1", [id])).rejects.toThrow(
+        /check constraint/,
+      );
+      await db.exec(`delete from public.consents where id = '${id}'`);
+    });
+  });
+
+  it("SF2 claim: only the first 'about to create the twin' update wins", async () => {
+    await asRole("service_role", null, async () => {
+      const avatar = await db.query<{ id: string }>(
+        `insert into public.avatars (brand_id) values ('${BRAND_A}') returning id`,
+      );
+      const id = avatar.rows[0].id;
+      const claim = `update public.avatars set create_started_at = now()
+                     where id = $1 and heygen_group_id is null and create_started_at is null returning id`;
+      expect((await db.query(claim, [id])).rows).toHaveLength(1);
+      expect((await db.query(claim, [id])).rows).toHaveLength(0);
+      await db.exec(`delete from public.avatars where id = '${id}'`);
+    });
+  });
+});
+
+// Phase 3 part B: the HeyGen spend guard (lib/heygen-spend.ts) reserves a
+// provider_usage row before every paid HeyGen call, capped per day.
+describe("HeyGen spend guard (provider_usage + reserve_heygen_spend)", () => {
+  const reserve = (kind: string, since: string, cap: number, note: string | null = "mock") =>
+    db.query<{ id: string | null }>(
+      "select public.reserve_heygen_spend($1, $2::timestamptz, $3, null, null, $4) as id",
+      [kind, since, cap, note],
+    );
+
+  it("the default caps row exists: render 3, create_twin 2", async () => {
+    const caps = await db.query<{ value: unknown }>("select value from public.app_settings where key = 'heygen_daily_caps'");
+    expect(caps.rows).toEqual([{ value: { render: 3, create_twin: 2 } }]);
+  });
+
+  it("reserves until the cap, then returns null; older rows don't count", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec(`insert into public.provider_usage (provider, kind, status, created_at)
+                     values ('heygen', 'create_twin', 'succeeded', now() - interval '2 days')`);
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const first = (await reserve("create_twin", since, 2, null)).rows[0].id;
+      const second = (await reserve("create_twin", since, 2, null)).rows[0].id;
+      const third = (await reserve("create_twin", since, 2, null)).rows[0].id;
+      expect(first).toMatch(/^[0-9a-f-]{36}$/);
+      expect(second).toMatch(/^[0-9a-f-]{36}$/);
+      expect(third).toBeNull();
+      // Renders have their own count.
+      expect((await reserve("render", since, 1, null)).rows[0].id).not.toBeNull();
+      const row = await db.query(
+        "select provider, kind, status, cost_usd::float as cost, note, mock from public.provider_usage where id = $1",
+        [first],
+      );
+      expect(row.rows).toEqual([{ provider: "heygen", kind: "create_twin", status: "reserved", cost: 0, note: null, mock: false }]);
+      await expect(reserve("other", since, 5)).rejects.toThrow(/unknown spend kind/);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  // Decision (a) (p3-fix2): mock rows are recorded but never count toward the cap.
+  it("decision (a): 5 mock reserves over a cap of 2 all succeed and are recorded (mock = true, cost 0)", async () => {
+    await asRole("service_role", null, async () => {
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const ids: (string | null)[] = [];
+      for (let i = 0; i < 5; i++) ids.push((await reserve("render", since, 2, "mock")).rows[0].id);
+      expect(ids.every((id) => typeof id === "string")).toBe(true);
+      const rows = await db.query<{ mock: boolean; cost: number; note: string }>(
+        "select mock, cost_usd::float as cost, note from public.provider_usage where kind = 'render'",
+      );
+      expect(rows.rows).toEqual(Array(5).fill({ mock: true, cost: 0, note: "mock" }));
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("decision (a): real reserves are still capped after many mock rows; the mock mark survives a note change", async () => {
+    await asRole("service_role", null, async () => {
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const mockId = (await reserve("render", since, 2, "mock")).rows[0].id;
+      await reserve("render", since, 2, "mock");
+      // withHeygenSpend overwrites the note when a call fails; the row must stay mock.
+      await db.query("update public.provider_usage set status = 'failed', note = 'HeyGen had a problem' where id = $1", [mockId]);
+      expect((await reserve("render", since, 2, null)).rows[0].id).not.toBeNull();
+      expect((await reserve("render", since, 2, null)).rows[0].id).not.toBeNull();
+      expect((await reserve("render", since, 2, null)).rows[0].id).toBeNull();
+      const counts = await db.query<{ mock: boolean; n: number }>(
+        "select mock, count(*)::int as n from public.provider_usage group by mock order by mock",
+      );
+      expect(counts.rows).toEqual([
+        { mock: false, n: 2 },
+        { mock: true, n: 2 },
+      ]);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("decision (a): race safety unchanged: 10 real reserves at once against cap 3 (with mock rows present) → exactly 3", async () => {
+    await asRole("service_role", null, async () => {
+      const since = new Date(Date.now() - 60_000).toISOString();
+      for (let i = 0; i < 4; i++) await reserve("render", since, 3, "mock");
+      const results = await Promise.all(Array.from({ length: 10 }, () => reserve("render", since, 3, null)));
+      expect(results.filter((r) => r.rows[0].id !== null)).toHaveLength(3);
+      const real = await db.query<{ n: number }>("select count(*)::int as n from public.provider_usage where not mock");
+      expect(real.rows).toEqual([{ n: 3 }]);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  // SF4 (p3-fix2): the cap alert is a mocked email_outbox row, once per dedupe_key.
+  it("SF4: a spend_cap_alert row is accepted once per dedupe_key; a repeat is ignored", async () => {
+    await asRole("service_role", null, async () => {
+      const values = `values ('owner@example.com', 'spend_cap_alert', 'Limit', 'Paused', 'spend_cap:render:2026-11-22:owner@example.com')`;
+      const columns = "insert into public.email_outbox (to_email, kind, subject, body, dedupe_key)";
+      expect((await db.query(`${columns} ${values} returning id`)).rows).toHaveLength(1);
+      await expect(db.query(`${columns} ${values}`)).rejects.toThrow(/duplicate key/);
+      // What lib/heygen-spend-store.ts does: a repeat is silently ignored.
+      expect((await db.query(`${columns} ${values} on conflict (dedupe_key) do nothing returning id`)).rows).toHaveLength(0);
+      // Other emails don't need a dedupe_key (null never collides).
+      await db.exec(`insert into public.email_outbox (to_email, kind, subject, body) values ('a@example.com', 'consent_link', 's', 'b');
+                     insert into public.email_outbox (to_email, kind, subject, body) values ('a@example.com', 'consent_link', 's', 'b');`);
+      await db.exec("delete from public.email_outbox");
+    });
+  });
+
+  it("kind and status only take the listed values", async () => {
+    await asRole("service_role", null, async () => {
+      await expect(db.exec(`insert into public.provider_usage (provider, kind) values ('heygen', 'lunch')`)).rejects.toThrow(
+        /check constraint/,
+      );
+      await expect(
+        db.exec(`insert into public.provider_usage (provider, kind, status) values ('heygen', 'render', 'maybe')`),
+      ).rejects.toThrow(/check constraint/);
+    });
+  });
+
+  it("customers and logged-out visitors can't call reserve_heygen_spend or read provider_usage", async () => {
+    const since = new Date().toISOString();
+    await asUser(USER_A, async () => {
+      await expect(reserve("render", since, 99)).rejects.toThrow(/permission denied/);
+      await expect(db.query("select * from public.provider_usage")).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(reserve("render", since, 99)).rejects.toThrow(/permission denied/);
+    });
+  });
+});
+
+// Phase 3 part B step 2: renders (lib/render.ts), likeness tests, webhooks.
+describe("renders: videos.kind, the render claim and the 10-at-once cap", () => {
+  const claim = (id: string, max: number) =>
+    db.query<{ result: string }>("select public.claim_render_slot($1, $2) as result", [id, max]);
+  const newVideo = async (kind = "post") =>
+    (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, kind) values ('${BRAND_A}', $1) returning id`,
+        [kind],
+      )
+    ).rows[0].id;
+
+  it("kind is post or likeness_test; 'rendered' is a status; likeness tests never count toward the plan", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await newVideo("likeness_test");
+      await db.query("update public.videos set status = 'rendered', spoken_words = 36, rendered_at = now() where id = $1", [id]);
+      await expect(db.query("update public.videos set counts_toward_plan = true where id = $1", [id])).rejects.toThrow(
+        /check constraint/,
+      );
+      await expect(newVideo("trial")).rejects.toThrow(/check constraint/);
+      await expect(db.query("update public.videos set spoken_words = -1 where id = $1", [id])).rejects.toThrow(/check constraint/);
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+
+  it("claim_render_slot: first claim wins, a second is 'taken', a missing video is 'missing'", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await newVideo();
+      expect((await claim(id, 10)).rows[0].result).toBe("claimed");
+      const row = await db.query<{ status: string; started: boolean }>(
+        "select status, render_started_at is not null as started from public.videos where id = $1",
+        [id],
+      );
+      expect(row.rows).toEqual([{ status: "rendering", started: true }]);
+      expect((await claim(id, 10)).rows[0].result).toBe("taken");
+      expect((await claim("90000000-0000-4000-8000-000000000999", 10)).rows[0].result).toBe("missing");
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+
+  it("claim_render_slot: with max videos already rendering, the next one is 'busy' and stays queued", async () => {
+    await asRole("service_role", null, async () => {
+      const first = await newVideo();
+      const second = await newVideo();
+      expect((await claim(first, 1)).rows[0].result).toBe("claimed");
+      expect((await claim(second, 1)).rows[0].result).toBe("busy");
+      const row = await db.query<{ status: string; started: boolean }>(
+        "select status, render_started_at is not null as started from public.videos where id = $1",
+        [second],
+      );
+      expect(row.rows).toEqual([{ status: "queued", started: false }]);
+      await db.query("update public.videos set status = 'rendered' where id = $1", [first]);
+      expect((await claim(second, 1)).rows[0].result).toBe("claimed");
+      await db.query("delete from public.videos where id in ($1, $2)", [first, second]);
+    });
+  });
+
+  it("customers and logged-out visitors can't call claim_render_slot", async () => {
+    await asUser(USER_A, async () => {
+      await expect(claim("90000000-0000-4000-8000-000000000999", 10)).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(claim("90000000-0000-4000-8000-000000000999", 10)).rejects.toThrow(/permission denied/);
+    });
+  });
+});
+
+// SF2 (p3-fix2): customers may read only the plain columns of their own
+// videos; everything internal (HeyGen ids, engine, errors, storage keys,
+// claims, transcript, plan bookkeeping) stays server only. Likeness-test rows
+// are admin-only, so customers don't see those rows at all.
+describe("SF2: customers read only the safe columns of their own post videos", () => {
+  const CUSTOMER_COLUMNS = ["id", "brand_id", "script_id", "status", "duration_s", "ai_label", "created_at"];
+  const INTERNAL_COLUMNS = [
+    "avatar_id",
+    "engine",
+    "attempt",
+    "heygen_video_id",
+    "raw_path",
+    "transcript",
+    "final_path",
+    "counts_toward_plan",
+    "watermark",
+    "error",
+    "kind",
+    "spoken_words",
+    "render_started_at",
+    "rendered_at",
+  ];
+  const canSelect = async (role: string, column: string) =>
+    (
+      await db.query<{ ok: boolean }>("select has_column_privilege($1, 'public.videos', $2, 'SELECT') as ok", [
+        role,
+        column,
+      ])
+    ).rows[0].ok;
+
+  it("every videos column is classified (a new column must be decided on purpose)", async () => {
+    const columns = await names(
+      "select column_name as name from information_schema.columns where table_schema = 'public' and table_name = 'videos'",
+    );
+    expect(columns).toEqual([...CUSTOMER_COLUMNS, ...INTERNAL_COLUMNS].sort());
+  });
+
+  it("authenticated can SELECT each customer column", async () => {
+    for (const column of CUSTOMER_COLUMNS) expect([column, await canSelect("authenticated", column)]).toEqual([column, true]);
+  });
+
+  it("authenticated can NOT select any internal column", async () => {
+    for (const column of INTERNAL_COLUMNS) expect([column, await canSelect("authenticated", column)]).toEqual([column, false]);
+  });
+
+  it("anon can select no column; service_role every column", async () => {
+    for (const column of [...CUSTOMER_COLUMNS, ...INTERNAL_COLUMNS]) {
+      expect([column, await canSelect("anon", column)]).toEqual([column, false]);
+      expect([column, await canSelect("service_role", column)]).toEqual([column, true]);
+    }
+  });
+
+  it("a customer query on safe columns works; internal columns and select * are refused", async () => {
+    await asUser(USER_A, async () => {
+      const rows = await db.query<{ brand_id: string }>(`select ${CUSTOMER_COLUMNS.join(", ")} from public.videos`);
+      expect(rows.rows.length).toBeGreaterThan(0);
+      expect(rows.rows.every((row) => row.brand_id === BRAND_A)).toBe(true);
+      await expect(db.query("select * from public.videos")).rejects.toThrow(/permission denied/);
+      for (const column of ["heygen_video_id", "engine", "error", "raw_path", "render_started_at"]) {
+        await expect(db.query(`select ${column} from public.videos`)).rejects.toThrow(/permission denied/);
+      }
+    });
+  });
+
+  it("customers don't see likeness-test rows at all (admin only)", async () => {
+    const id = await asRole("service_role", null, async () =>
+      (
+        await db.query<{ id: string }>(
+          `insert into public.videos (brand_id, kind) values ('${BRAND_A}', 'likeness_test') returning id`,
+        )
+      ).rows[0].id,
+    );
+    await asUser(USER_A, async () => {
+      const rows = await db.query("select id from public.videos where id = $1", [id]);
+      expect(rows.rows).toEqual([]);
+    });
+    await asRole("service_role", null, () => db.query("delete from public.videos where id = $1", [id]));
+  });
+});
+
+// Decision (b) (p3-fix2): admin "Clear stuck claim" (lib/claims.ts).
+describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in one step", () => {
+  const clear = (target: string, id: string) =>
+    db.query<{ result: string }>("select public.clear_stuck_claim($1, $2, 'admin@example.com') as result", [target, id]);
+  const audits = (column: "video_id" | "avatar_id", id: string) =>
+    db.query<{ kind: string; status: string; cost: number; mock: boolean; note: string }>(
+      `select kind, status, cost_usd::float as cost, mock, note from public.provider_usage where ${column} = $1`,
+      [id],
+    );
+  const stuckVideo = async (kind: string, heygenId: string | null = null) =>
+    (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, kind, status, render_started_at, heygen_video_id)
+         values ('${BRAND_A}', $1, 'rendering', now(), $2) returning id`,
+        [kind, heygenId],
+      )
+    ).rows[0].id;
+
+  it("a post render claim: cleared (failed, plain error), audited as claim_cleared, cost 0, not mock", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await stuckVideo("post");
+      expect((await clear("video", id)).rows[0].result).toBe("render");
+      const row = await db.query("select status, render_started_at, error from public.videos where id = $1", [id]);
+      expect(row.rows).toEqual([
+        { status: "failed", render_started_at: null, error: "Claim cleared by an admin after checking HeyGen. Start it again when ready." },
+      ]);
+      expect((await audits("video_id", id)).rows).toEqual([
+        { kind: "claim_cleared", status: "succeeded", cost: 0, mock: false, note: "render claim cleared by admin@example.com after checking HeyGen" },
+      ]);
+      await db.query("delete from public.provider_usage where video_id = $1", [id]);
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+
+  it("a likeness-test row holding a claim: cleared and audited as likeness_test", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await stuckVideo("likeness_test");
+      await db.query("update public.videos set status = 'failed' where id = $1", [id]);
+      expect((await clear("video", id)).rows[0].result).toBe("likeness_test");
+      expect((await audits("video_id", id)).rows.map((r) => r.note)).toEqual([
+        "likeness_test claim cleared by admin@example.com after checking HeyGen",
+      ]);
+      await db.query("delete from public.provider_usage where video_id = $1", [id]);
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+
+  it("never clears a video that has a HeyGen id, or one with no claim: 'none', nothing written", async () => {
+    await asRole("service_role", null, async () => {
+      const withId = await stuckVideo("post", "hg_cleared_test");
+      const noClaim = (await db.query<{ id: string }>(`insert into public.videos (brand_id) values ('${BRAND_A}') returning id`)).rows[0].id;
+      expect((await clear("video", withId)).rows[0].result).toBe("none");
+      expect((await clear("video", noClaim)).rows[0].result).toBe("none");
+      const kept = await db.query<{ started: boolean }>("select render_started_at is not null as started from public.videos where id = $1", [withId]);
+      expect(kept.rows).toEqual([{ started: true }]);
+      expect((await db.query("select * from public.provider_usage where kind = 'claim_cleared'")).rows).toEqual([]);
+      await db.query("delete from public.videos where id in ($1, $2)", [withId, noClaim]);
+    });
+  });
+
+  it("a twin claim: create_started_at and error cleared, audited with the avatar id", async () => {
+    await asRole("service_role", null, async () => {
+      const id = (
+        await db.query<{ id: string }>(
+          `insert into public.avatars (brand_id, create_started_at, error) values ('${BRAND_A}', now(), 'A twin may already exist') returning id`,
+        )
+      ).rows[0].id;
+      expect((await clear("twin", id)).rows[0].result).toBe("twin");
+      const row = await db.query("select create_started_at, error from public.avatars where id = $1", [id]);
+      expect(row.rows).toEqual([{ create_started_at: null, error: null }]);
+      expect((await audits("avatar_id", id)).rows.map((r) => r.note)).toEqual(["twin claim cleared by admin@example.com after checking HeyGen"]);
+      // A twin with a group id is never touched.
+      await db.query("update public.avatars set create_started_at = now(), heygen_group_id = 'g_1' where id = $1", [id]);
+      expect((await clear("twin", id)).rows[0].result).toBe("none");
+      await db.query("delete from public.provider_usage where avatar_id = $1", [id]);
+      await db.query("delete from public.avatars where id = $1", [id]);
+    });
+  });
+
+  it("an unknown target is an error; claim_cleared rows never count toward the render cap", async () => {
+    await asRole("service_role", null, async () => {
+      await expect(clear("post", "90000000-0000-4000-8000-000000000999")).rejects.toThrow(/unknown claim target/);
+      await db.exec(`insert into public.provider_usage (provider, kind, status) values ('heygen', 'claim_cleared', 'succeeded')`);
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const id = await db.query<{ id: string | null }>("select public.reserve_heygen_spend('render', $1::timestamptz, 1, null, null, null) as id", [since]);
+      expect(id.rows[0].id).not.toBeNull();
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("customers and logged-out visitors can't call it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(clear("video", "90000000-0000-4000-8000-000000000999")).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(clear("twin", "90000000-0000-4000-8000-000000000999")).rejects.toThrow(/permission denied/);
+    });
+  });
+});
+
+describe("webhook_events (HeyGen webhooks)", () => {
+  it("one row per event_key: a repeat is ignored by on conflict do nothing", async () => {
+    await asRole("service_role", null, async () => {
+      const insert = () =>
+        db.query<{ id: string }>(
+          `insert into public.webhook_events (source, event_key, payload) values ('heygen', 'heygen:avatar_video.success:v1', '{}')
+           on conflict (event_key) do nothing returning id`,
+        );
+      expect((await insert()).rows).toHaveLength(1);
+      expect((await insert()).rows).toHaveLength(0);
+      const count = await db.query<{ n: number }>("select count(*)::int as n from public.webhook_events");
+      expect(count.rows).toEqual([{ n: 1 }]);
+      await db.exec("delete from public.webhook_events");
+    });
+  });
+
+  it("customers and logged-out visitors cannot read or write it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(db.query("select * from public.webhook_events")).rejects.toThrow(/permission denied/);
+      await expect(
+        db.exec(`insert into public.webhook_events (source, event_key, payload) values ('heygen', 'x', '{}')`),
+      ).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(db.query("select * from public.webhook_events")).rejects.toThrow(/permission denied/);
+    });
+  });
+});
+
+// Privilege guard over EVERY table in the public schema, read from pg_tables
+// (so a new table is covered automatically). Customers (authenticated) may only
+// SELECT; anon gets nothing. This catches a stray GRANT even if a default-deny
+// RLS policy would hide it (an UPDATE that silently changes 0 rows).
+describe("table privileges for anon and authenticated", () => {
+  // Allow-list: internal tables. Customers cannot even read these; only server
+  // code (service_role) uses them. Any other public table must be customer-readable.
+  const INTERNAL_TABLES = ["ai_usage", "app_settings", "email_outbox", "provider_usage", "qa_reports", "webhook_events"];
+  const PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"] as const;
+
+  async function publicTables(): Promise<string[]> {
+    return names("select tablename as name from pg_tables where schemaname = 'public'");
+  }
+
+  async function granted(role: "anon" | "authenticated", table: string): Promise<string[]> {
+    const held: string[] = [];
+    for (const privilege of PRIVILEGES) {
+      const result = await db.query<{ ok: boolean }>("select has_table_privilege($1, $2, $3) as ok", [
+        role,
+        `public.${table}`,
+        privilege,
+      ]);
+      if (result.rows[0].ok) held.push(privilege);
+    }
+    return held;
+  }
+
+  it("finds the tables (customer-readable ones include scripts and brand_versions)", async () => {
+    const tables = await publicTables();
+    const readable = tables.filter((t) => !INTERNAL_TABLES.includes(t));
+    expect(readable).toContain("scripts");
+    expect(readable).toContain("brand_versions");
+    // Every allow-listed internal table really exists (no stale names).
+    expect(tables).toEqual(expect.arrayContaining(INTERNAL_TABLES));
+    expect(readable.length).toBeGreaterThanOrEqual(12);
+  });
+
+  // SF2: tables where customers get SELECT on some COLUMNS only, never the
+  // whole table (column lists are tested in the SF2 block above).
+  const COLUMN_GRANT_TABLES = ["videos"];
+
+  it("authenticated has SELECT only on every customer table, nothing on internal ones", async () => {
+    const seen: Record<string, string[]> = {};
+    for (const table of await publicTables()) seen[table] = await granted("authenticated", table);
+    const expected = Object.fromEntries(
+      Object.keys(seen).map((t) => [
+        t,
+        INTERNAL_TABLES.includes(t) || COLUMN_GRANT_TABLES.includes(t) ? [] : ["SELECT"],
+      ]),
+    );
+    expect(seen).toEqual(expected);
+    expect(seen.scripts).toEqual(["SELECT"]);
+    expect(seen.brand_versions).toEqual(["SELECT"]);
+    expect(seen.videos).toEqual([]);
+  });
+
+  it("column-grant tables: authenticated may SELECT some columns but never INSERT/UPDATE any", async () => {
+    for (const table of COLUMN_GRANT_TABLES) {
+      const any = async (privilege: string) =>
+        (
+          await db.query<{ ok: boolean }>("select has_any_column_privilege('authenticated', $1, $2) as ok", [
+            `public.${table}`,
+            privilege,
+          ])
+        ).rows[0].ok;
+      expect({ table, select: await any("SELECT"), insert: await any("INSERT"), update: await any("UPDATE") }).toEqual({
+        table,
+        select: true,
+        insert: false,
+        update: false,
+      });
+    }
+  });
+
+  it("anon has no SELECT, INSERT, UPDATE, DELETE or TRUNCATE on any table", async () => {
+    const seen: Record<string, string[]> = {};
+    for (const table of await publicTables()) seen[table] = await granted("anon", table);
+    const expected = Object.fromEntries(Object.keys(seen).map((t) => [t, []]));
+    expect(seen).toEqual(expected);
+    expect(seen.scripts).toEqual([]);
+    expect(seen.brand_versions).toEqual([]);
+  });
+
+  // Every function in public (read from pg_proc, so a new one is covered
+  // automatically). Only owns_brand (used inside RLS policies) may be run by
+  // customers; anon may run none. Server-only functions stay service_role only.
+  it("anon and authenticated cannot EXECUTE server-only functions (claim_render_slot, reserve_heygen_spend, ...)", async () => {
+    const fns = await db.query<{ sig: string; name: string }>(
+      `select p.oid::regprocedure::text as sig, p.proname as name
+       from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'public' and p.prokind = 'f'`,
+    );
+    const names = fns.rows.map((f) => f.name).sort();
+    expect(names).toEqual(
+      expect.arrayContaining(["claim_render_slot", "clear_stuck_claim", "reserve_heygen_spend", "save_brand_version"]),
+    );
+    const seen: Record<string, { anon: boolean; authenticated: boolean; service_role: boolean }> = {};
+    for (const { sig, name } of fns.rows) {
+      if (name === "handle_new_user") continue; // trigger function, revoked separately
+      const can = async (role: string) =>
+        (await db.query<{ ok: boolean }>("select has_function_privilege($1, $2, 'EXECUTE') as ok", [role, sig])).rows[0].ok;
+      seen[name] = { anon: await can("anon"), authenticated: await can("authenticated"), service_role: await can("service_role") };
+    }
+    const expected = Object.fromEntries(
+      Object.keys(seen).map((name) => [name, { anon: false, authenticated: name === "owns_brand", service_role: true }]),
+    );
+    expect(seen).toEqual(expected);
   });
 });
 

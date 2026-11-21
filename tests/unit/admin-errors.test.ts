@@ -60,6 +60,21 @@ describe("admin error messages", () => {
     expect(text).not.toMatch(/x-api-key|requestBody/i);
   });
 
+  it("redacts a key-like string placed in a cause's name, type or code", () => {
+    const sneaky = Object.assign(new Error("plain message"), {
+      name: `Err ${FAKE_KEY}`,
+      status: 500,
+      code: `code ${FAKE_KEY}`,
+      error: { type: "error", error: { type: `type ${FAKE_KEY}` } },
+    });
+    const text = logged(() => logAdminError("[admin] x failed", {}, new Error("outer", { cause: sneaky })));
+    expect(text).toMatch(/"status":500/);
+    expect(text).not.toContain("FAKEFAKE");
+    expect(text).toContain("Err [redacted]");
+    expect(text).toContain("code [redacted]");
+    expect(text).toContain("type [redacted]");
+  });
+
   it("follows nested causes, but stops after a few (no endless loops)", () => {
     const inner = Object.assign(new Error("socket hang up"), { name: "APIConnectionError" });
     const middle = new Error("retry failed", { cause: inner });

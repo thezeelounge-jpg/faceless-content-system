@@ -20,6 +20,9 @@ import { timezoneFor } from "@/lib/posting-times";
 import { listPosts } from "@/lib/posts";
 import { canRunChecks, latestScript } from "@/lib/qa/can-run-checks";
 import { checkScript, generateBrandProfile, planNextFourWeeks, saveProfileEdit, writeScript } from "./actions";
+import { makeVideoAction } from "./render-actions";
+import { ActionForm } from "@/components/admin/action-form";
+import { isMockHeygen } from "@/lib/config";
 
 export default function BrandPage({ params }: PageProps<"/admin/clients/[id]">) {
   return (
@@ -56,6 +59,10 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
       <p className="text-sm">
         <Link href={`/admin/clients/${brand.id}/names`} className="underline">
           How to say names →
+        </Link>{" "}
+        ·{" "}
+        <Link href={`/admin/clients/${brand.id}/consent`} className="underline">
+          Consent clip and twin →
         </Link>
       </p>
 
@@ -148,6 +155,19 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
                         action={writeScript.bind(null, post.id)}
                         label="Write script"
                         pendingLabel="Writing… (then checking, a few minutes)"
+                        variant="outline"
+                        size="sm"
+                      />
+                    );
+                  }
+                  if (post.status === "approved") {
+                    // lib/render.ts checks the rest (script passed, ready twin, chosen engine).
+                    return (
+                      <ActionForm
+                        action={makeVideoAction.bind(null, post.id)}
+                        label="Make video"
+                        pendingLabel="Starting the video…"
+                        confirmSpend={!isMockHeygen()}
                         variant="outline"
                         size="sm"
                       />

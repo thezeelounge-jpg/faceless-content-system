@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:bundle": "vitest run tests/security/bundle.test.ts",
+    "test:staging": "vitest run --config vitest.staging.config.mts",
     "eval:scripts": "vitest run --config vitest.eval.config.mts",
+    "fixtures": "bash scripts/make-fixtures.sh",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy",
     "db:push": "supabase db push"

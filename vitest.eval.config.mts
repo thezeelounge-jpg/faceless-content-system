@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parseEnv } from "node:util";
 import { defineConfig } from "vitest/config";
+import { evalNetworkAllowed } from "./tests/setup/network-guard";
 
 const root = fileURLToPath(new URL(".", import.meta.url));
 
@@ -30,6 +31,10 @@ export default defineConfig({
     environment: "node",
     include: ["tests/golden/**/*.eval.ts"],
     env,
+    // SF1: the same no-network guard as `npm test`, unless BOTH live switches
+    // are on (MOCK_CLAUDE exactly "false" AND EVAL_ALLOW_NETWORK=1); tested in
+    // tests/unit/no-network.test.ts. A live run is still an owner decision.
+    setupFiles: evalNetworkAllowed(env) ? [] : ["tests/setup/no-network.ts"],
     testTimeout: 30 * 60_000,
   },
 });

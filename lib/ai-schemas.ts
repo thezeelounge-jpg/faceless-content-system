@@ -99,6 +99,28 @@ export const pronunciationOutput = z.object({
   suggestions: z.array(z.object({ written: z.string().min(1), say_as: z.string().min(1) })),
 });
 
+/** Consent clip face check: frames from the clip are sent as images. */
+export const clipFaceInput = z.object({
+  clip_name: z.string().min(1).max(300),
+  frame_count: z.number().int().min(1).max(10),
+});
+
+export const clipFaceOutput = z.object({
+  /** One entry per frame, in the order sent. */
+  frames: z
+    .array(
+      z.object({
+        /** How many human faces are visible in the frame. */
+        faces: z.number().int().min(0).max(20),
+        /** The main face is sharp, well lit, facing the camera and not covered. */
+        face_clear: z.boolean(),
+      }),
+    )
+    .min(1)
+    .max(10),
+});
+
+export type ClipFaceOutput = z.infer<typeof clipFaceOutput>;
 export type BrandProfileOutput = z.infer<typeof brandProfileOutput>;
 export type PlanOutput = z.infer<typeof planOutput>;
 export type ScriptOutput = z.infer<typeof scriptOutput>;

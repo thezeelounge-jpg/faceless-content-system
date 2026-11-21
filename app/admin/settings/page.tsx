@@ -1,4 +1,5 @@
 import { AdminPage } from "@/components/admin/admin-page";
+import { StuckClaims } from "@/components/admin/stuck-claims";
 import { EnvStatusList, MockModeList } from "@/components/env-status";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { adminSection } from "@/lib/admin-sections";
@@ -32,7 +33,34 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card className="md:col-span-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>HeyGen connection</CardTitle>
+            <CardDescription>
+              Checks the HeyGen key (GET /v3/users/me, free). In mock mode it shows the sample user and calls nothing.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <a className="text-sm underline" href="/api/admin/heygen-check" target="_blank" rel="noreferrer">
+              Check HeyGen
+            </a>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Stuck HeyGen claims</CardTitle>
+            <CardDescription>
+              Renders, likeness tests or twins whose HeyGen answer was lost. Look in the HeyGen dashboard first: only clear one if
+              nothing was made there, or you may pay twice.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <StuckClaims />
+          </CardContent>
+        </Card>
+
+        <Card>
           <CardHeader>
             <CardTitle>Setup status</CardTitle>
             <CardDescription>Which settings are filled in. Values are never shown.</CardDescription>

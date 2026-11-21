@@ -131,6 +131,7 @@ export async function writeScript(postId: string, _prev: ActionState): Promise<A
 const WRITE_FAILED = "Couldn't write the script. Press “Write script” to try again.";
 const CHECKS_UNFINISHED_AFTER_WRITE = "Script written, but the checks didn't finish. Press “Run checks” to try again.";
 const CHECKS_UNFINISHED = "The checks didn't finish. Press “Run checks” to try again.";
+const STALE_VERSION = "A newer version of this script exists, so refresh the page and check that one.";
 
 /** Saves the problem on the post; if even that fails, only log it (the admin still gets the plain message). */
 async function saveProblem(postId: string, reason: string): Promise<void> {
@@ -149,8 +150,9 @@ export async function checkScript(scriptId: string, _prev: ActionState): Promise
     const found = await getScriptForChecks(scriptId);
     if (!found) return { status: "error", message: "Script not found." };
     const { script, post, versions } = found;
-    const runnable = latestScript(versions)?.id === script.id && canRunChecks(versions, post);
-    if (!runnable) return { status: "error", message: "This script has already been checked." };
+    // A stale tab may submit an older version: point the admin at the newer one.
+    if (latestScript(versions)?.id !== script.id) return { status: "error", message: STALE_VERSION };
+    if (!canRunChecks(versions, post)) return { status: "error", message: "This script has already been checked." };
     postId = post.id;
     const brand = await getBrand(post.brand_id);
     if (!brand) return NOT_FOUND;

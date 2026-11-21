@@ -24,6 +24,13 @@ export function isMockClaude(): boolean {
   return process.env.MOCK_CLAUDE?.trim() !== "false";
 }
 
+/**
+ * Money safety: the most guarded HeyGen calls per Asia/Karachi day, used when
+ * app_settings has no `heygen_daily_caps` row (lib/heygen-spend.ts). The
+ * migration inserts the same numbers; the admin can change them there.
+ */
+export const HEYGEN_DAILY_CAP_DEFAULTS = { render: 3, create_twin: 2 } as const;
+
 export function isGoogleLoginEnabled(): boolean {
   return process.env.NEXT_PUBLIC_GOOGLE_LOGIN?.trim() === "true";
 }

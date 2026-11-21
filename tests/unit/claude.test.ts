@@ -56,6 +56,7 @@ const INPUTS: { [K in ClaudeTaskName]: unknown } = {
   script_qa: { script: SCRIPT, max_seconds: 45 },
   script_rewrite: { script: SCRIPT, issues: [{ code: "hook", detail: "Hook is too long" }], max_seconds: 45, words_per_second: 2.4 },
   pronunciation_suggest: { words: ["Ayesha", "Gulberg"] },
+  clip_face_check: { clip_name: "consent-good.mp4", frame_count: 6 },
 };
 
 function fakeMessage(overrides: Record<string, unknown> = {}) {

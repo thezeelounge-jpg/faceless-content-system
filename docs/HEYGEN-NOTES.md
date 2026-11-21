@@ -1,24 +1,125 @@
-# HeyGen notes (read before Phase 3)
+# HeyGen notes (read before touching lib/heygen.ts)
 
-## Pronunciation: Brand Glossary (QA-SPEC Gate 2, step 5)
+Checked 22 Nov 2026 (Phase 3 part A), read only, through Context7's copy of developers.heygen.com (library `/websites/developers_heygen`). No request was made to any HeyGen host. **Re-check against https://developers.heygen.com/llms.txt before the first real call.** Anything marked UNCONFIRMED in `lib/heygen.ts` must be checked on that first call (staging, with the owner's OK).
 
-Checked 22 Nov 2026, read only, through Context7's copy of developers.heygen.com. A direct fetch of llms.txt was blocked, so **re-check against https://developers.heygen.com/llms.txt before coding**. No HeyGen code was written in Phase 2.
+All calls: base `https://api.heygen.com`, header `X-Api-Key`, API v3 only. Code: `lib/heygen.ts` only.
 
-Pages read:
-- https://developers.heygen.com/docs/brand-glossary
-- https://developers.heygen.com/docs/brand-glossary/apply
-- https://developers.heygen.com/docs/brand-glossary/manage
-- https://developers.heygen.com/docs/brand-glossary/pronunciations
-- https://developers.heygen.com/docs/voices/heygen-voice-speech
+## Endpoints used in Phase 3 part A
 
-What exists (v3):
-- **Brand Glossary**: `GET` and `POST /v3/brand-glossaries`, `PATCH /v3/brand-glossaries/{brand_glossary_id}`. The docs say to find the workspace glossary or create one, which suggests one per workspace. Body fields: `name`, `terms`, `do_not_translate_terms`, `forced_translations`. PATCH replaces each list in full.
-- Each term has `term`, `pronunciation` (a respelling such as "hey-jen"), an optional `ipa` and an optional `pronunciation_language` (`{scope: "specific", code: "fr"}`). `ipa` only works if HeyGen enables it per account; otherwise it returns `400 invalid_parameter`. Repeating a term for the same language returns `409`.
-- Pass `brand_glossary_id` (32-character hex) at the top level of `POST /v3/videos`. An unknown id fails with `400` before rendering, so no credits are spent. It only applies when the speech comes from a script, not from uploaded audio.
-- Text to Speech limits: a term can be up to 128 characters; matching is whole-word and ignores case; up to 100 pronunciations per request.
-- Inline `<pron ipa="/.../">word</pron>` and `<break time="0.5s"/>` are documented for the Text to Speech endpoint only. "Other SSML is not supported." It is **not confirmed** that they work inside video scripts.
+| What | Call | Key fields | Source |
+|---|---|---|---|
+| Check the key | `GET /v3/users/me` | `billing_type` and a matching billing field (`wallet`, `subscription` or `usage_based`); scope `account:read`. Other fields (username, balance) **UNCONFIRMED** | API Key — https://developers.heygen.com/docs/api-key ; API Key Permission Scopes — https://developers.heygen.com/docs/api-key-permissions |
+| Upload the clip (large files) | `POST /v3/assets/direct-uploads` (`filename`, `content_type`, `size_bytes`, `checksum_sha256`) → `upload_url`, `upload_headers`, `asset_id`; PUT the bytes to `upload_url`; `POST /v3/assets/{asset_id}/complete` (`{checksum_sha256}`, idempotent) | videos up to 200 MB | Direct Upload to S3 — https://developers.heygen.com/docs/direct-upload |
+| Upload (small files) | `POST /v3/assets` multipart `file`, up to 50 MB (not used) | `asset_id` | Upload Assets — https://developers.heygen.com/docs/upload-assets |
+| Create the twin | `POST /v3/avatars` with `type: "digital_twin"`, `name`, `file` (`{type:"url",url}` capped at 32 MB, `{type:"asset_id",asset_id}`, or base64 up to 16 MB); optional `avatar_group_id` (omit = new group) | `data.avatar_item` (`id` = look id, `group_id`, `status` "processing", `supported_api_engines`, `default_voice_id`), `data.avatar_group` (`id`, `status` e.g. `pending_consent`, `consent_status`, `default_voice_id`) | Video to Avatar — https://developers.heygen.com/docs/avatar-from-video ; Create Avatar — https://developers.heygen.com/docs/create-avatar |
+| Start consent | `POST /v3/avatars/{group_id}/consent` (optional `reroute_url`; `consent_video` is Enterprise only) | `avatar_group.consent_status` (`pending` / `accepted` / `rejected`) and the consent page `url` (Level 1 webcam, valid 24 hours). Exact position of `url` in the answer **UNCONFIRMED**. No webhook for consent: poll the group | Avatar Consent — https://developers.heygen.com/docs/avatar-consent |
+| Group status | `GET /v3/avatars/{group_id}` | `status` (`pending_consent` / `completed` / `failed`), `consent_status`, `default_voice_id` | Avatar Groups — https://developers.heygen.com/docs/avatars |
+| Looks | `GET /v3/avatars/looks?group_id=…`, `GET /v3/avatars/looks/{look_id}` | look `id` (= `avatar_id` for renders), `status` (`processing` / `completed` / `failed`), **`supported_api_engines`** (`heygen-avatar-6`, `heygen-avatar-6-turbo`, `avatar_iii`, `avatar_iv`, `avatar_v`), `default_voice_id`. Asking for an engine the look doesn't list → `invalid_parameter` | Avatar Looks — https://developers.heygen.com/docs/avatar-looks |
+| Video status | `GET /v3/videos/{video_id}` | `status` (only `completed` and `failed` documented), `video_url` (signed, expires), `duration`, `failure_code`, `failure_message` | Video Agent — https://developers.heygen.com/docs/video-agent ; Avatar 6 — https://developers.heygen.com/docs/models/avatar-6 |
 
-Plan for Phase 3 (per QA-SPEC: "use it as well as the respelling"):
-- Keep our respelled `spoken_text` as the main fix; it works with any voice.
-- Also sync each brand's **approved** `pronunciations` rows into a HeyGen glossary and pass `brand_glossary_id` on renders. Because there may be only one glossary per workspace, check whether we need one glossary per brand before building this.
-- **Open question:** the doc examples send the text as `script`, while CLAUDE.md says "send `spoken_text`, never `display_text`". The rule means *our* spoken_text goes into whatever field v3 uses for the voice text. Confirm the exact field name in the v3 `POST /v3/videos` docs.
+Voice: the twin's voice is cloned automatically; use the group's `default_voice_id` (falls back to the look's). Source: Video to Avatar.
+
+Training clip limits (used in `lib/qa/config.ts` CLIP_CHECKS and `lib/consent-flow.ts`): **15 to 600 seconds** (about 2 minutes recommended), long edge 640 to 4096 px (1080p recommended; we require 1080 on the short side), **mp4 or webm**, one person facing the camera the whole time, up to 200 MB with direct upload. Frame rate: **not in the docs** (we ask for 30 fps, minimum 25). Source: Video to Avatar.
+
+Errors and limits: error envelope with `code`, `message`, `param`, `doc_url`, `request_id` (no full JSON example found; we read `error.code`). `429 rate_limit_exceeded` comes with `Retry-After` (not always, e.g. voice-provider limits), plus `X-RateLimit-*`. Concurrency: 10 videos on Pay-As-You-Go. Sources: Error Codes — https://developers.heygen.com/docs/error-codes ; Usage Limits — https://developers.heygen.com/docs/usage-limits
+
+## (b) Sandbox or test mode
+
+**None found.** No `test` flag or sandbox for v3 video or avatar endpoints. The only "free failure" noted: an unknown `brand_glossary_id` fails with 400 before rendering (no credits spent). So our only protection is `MOCK_HEYGEN` (mock unless exactly `false`). Sources: Brand Glossary apply — https://developers.heygen.com/docs/brand-glossary/apply ; HeyGen Voice Speech — https://developers.heygen.com/docs/voices/heygen-voice-speech
+
+## (c) The text field on `POST /v3/videos`
+
+**`script`** ("The script text to be spoken", up to 5,000 characters). `spoken_text` and `display_text` are our own column names; HeyGen never sees them. Phase 3 part B sends **our `scripts.spoken_text` into `script`** (never `display_text`). Other fields: `type: "avatar"`, `avatar_id` (look id), `voice_id`, `engine: {type}` (omitting it uses Avatar IV), `resolution` (`1080p`/`2k`), `aspect_ratio` (`9:16` for us; there is no `dimension` field), `callback_url`, `callback_id`, `brand_glossary_id`, `title`. Response: `data.video_id`. The callback is attempted once, so polling stays as backup. Sources: Avatar 6 — https://developers.heygen.com/docs/models/avatar-6 ; Usage Limits ; HeyGen Video — https://developers.heygen.com/docs/models/heygen-video ; Webhooks — https://developers.heygen.com/docs/webhooks ; Webhook Events — https://developers.heygen.com/docs/webhook-events
+
+Docs disagree (check on first real call): default resolution (Avatar 6 page says 1080p, Usage Limits says 720p for `avatar`, so always send `1080p`); whether `voice_id` is required; PATCH group body `default_voice_id` vs `voice_id`; failed-look error key `error.code` vs `error.type`.
+
+## (e) Phase 3 part B, step 1 findings (22 Nov 2026)
+
+Context7 was **not available** in this session and outside requests are not allowed, so nothing new was read from developers.heygen.com. Everything below is either from the notes above or from local code. **Re-check against https://developers.heygen.com/llms.txt before the first real call.**
+
+- **Idempotency key on `POST /v3/avatars` / `POST /v3/assets`: not documented** in anything we have read (the part A pages above mention none; `POST /v3/assets/{id}/complete` is the only call described as idempotent). We did **not** invent a header. Instead we keep **our own DB claim** (SF2): `avatars.create_started_at` is set atomically (`update … where heygen_group_id is null and create_started_at is null`) right before the paid POST. A retry that finds the claim without a saved `heygen_group_id` refuses and saves a plain error on the avatar ("A twin may already exist on HeyGen … Check the HeyGen dashboard"). The claim is freed only when HeyGen clearly made nothing (401/403/404/400/final 429, or our spend guard refused). A timeout, 5xx or an unexpected 2xx answer keeps the claim. Code: `lib/twin.ts`, migration `20261122040000_phase3b_twin_claim.sql`. If HeyGen documents an idempotency key later, send it too (key = consent id).
+- **Voice field: `default_voice_id` vs `voice_id`** (decision 3). Docs use `default_voice_id` (group and look); the PATCH group body note above says `voice_id` in places. `lib/heygen.ts` reads both on create-twin, group and look answers; when both are present and differ, the documented `default_voice_id` wins. Log any new shape here.
+- **Resolution** (decision 3): no endpoint used so far (assets, avatars, consent, looks) takes a resolution field. Renders (step 2) must always send `resolution: "1080p"` (`HEYGEN_VIDEO_RESOLUTION`), because the docs disagree on the default (Avatar 6: 1080p; Usage Limits: 720p for `avatar`).
+- **Still UNCONFIRMED** (check on the first real call): `users/me` fields other than `billing_type`; where the consent `url` sits in the consent answer; whether `voice_id` really appears on any v3 answer.
+- **Retry-After ceiling** (SF6): `HEYGEN_RETRY_AFTER_MAX_S = 900` s (15 min) for task code, `HEYGEN_PAGE_MAX_WAIT_S = 30` s for pages, Server Actions and routes (`heygen({ forPage: true })`). We never shorten HeyGen's wait. If Retry-After is above the caller's limit, we fail at once with "HeyGen is busy. Try again in N minutes." The ceiling exists because Trigger.dev tasks have a `maxDuration` and serverless functions are killed sooner, so a longer sleep would be cut off mid-wait. Retry-After is read as seconds only (an HTTP-date falls back to 2 s, 4 s backoff).
+- **Spend guard**: every HeyGen call that can cost money goes through `lib/heygen-spend.ts` (`withHeygenSpend`) before the POST: create twin now, `POST /v3/videos` in step 2. It refuses when `app_settings.renders_paused` is on, or when today's (Asia/Karachi) count of that kind reached `app_settings.heygen_daily_caps` (default `{"render": 3, "create_twin": 2}`, also in `lib/config.ts`). Each guarded call is a `provider_usage` row (`kind`, `avatar_id`, `status` reserved → succeeded/failed, `note`; mock rows have cost 0 and note `mock`). Every real row counts toward the cap, failed ones too; mock rows don't (since p3-fix2, see (h)). The check-and-insert is one Postgres function (`reserve_heygen_spend`, advisory lock per kind, service_role only). Free calls (users/me, group, looks, video status, asset upload) are not guarded.
+
+## (f) Phase 3 part B, step 2 findings (22 Nov 2026, session p3-b2)
+
+Context7 **was available** this session (library `/websites/developers_heygen`). Read only; no request to any HeyGen host. Page URLs are under https://developers.heygen.com/docs/.
+
+**Re-check of the two step-1 questions**
+- (a) **Idempotency key**: `POST /v3/videos` and `POST /v3/avatars` document **none**. An `Idempotency-Key` header (replayed 24 h, `409 request_in_progress`) is documented only for `/v3/models/videos`, look packs, `POST /v3/avatars/{group_id}/consent` and voices (`/models/heygen-video`, `/avatar-look-packs`, `/avatar-consent`, `/error-codes`). So we keep our own claims: `avatars.create_started_at` (twin) and `videos.render_started_at` (render, set atomically by `claim_render_slot` with the 10-at-once cap). Possible later improvement: send `Idempotency-Key` on the consent POST.
+- (b) **Voice field**: looks and groups use **`default_voice_id`** (`/create-avatar`, `/avatar-looks`). `voice_id` on a look or group was **not found**; `lib/heygen.ts` still reads both (harmless). `voice_id` is the field name on `POST /v3/videos` (optional on `/avatar-from-video`: "omit to use the character's default voice"; we always send it). Engines list: **`supported_api_engines`** (our column `avatars.supported_engines` holds it).
+
+**`POST /v3/videos`** (`/models/avatar-6`, `/avatar-from-video`, `/avatar-looks`, `/models/heygen-video`): `type: "avatar"`, `avatar_id` (look id), `script` (our `spoken_text`), `voice_id`, **`engine: { type }`** (an object; values per look: `heygen-avatar-6`, `heygen-avatar-6-turbo`, `avatar_iii`, `avatar_iv`, `avatar_v`; omitted = Avatar IV), `resolution` (`1080p` | `2k`; 720p and 4k not supported), `aspect_ratio` (`9:16` for us), `callback_id` (≤ 256 chars; "send callback_id alone to deliver to the webhook endpoints registered for your workspace"), `callback_url`, `title`. A callback is attempted **once**, so polling stays as the backup. Response id: `data.video_id` on `/models/avatar-6`, but `/avatar-looks` shows `id` and `/video-agent` a bare `video_id` — **UNCONFIRMED**, `lib/heygen.ts` reads all three.
+
+**`GET /v3/videos/{id}`** (`/video-agent`, `/models/avatar-6`): `data.status`, `data.video_url` (signed, expires: "poll again for a fresh one"), `data.duration`, `data.thumbnail_url`, `data.failure_code`, `data.failure_message`. Only `completed` and `failed` are documented; we treat anything else as "still working". Duration **unit UNCONFIRMED** (we assume seconds, as on `/v3/models/videos`).
+
+**Webhooks** (`/webhooks`, `/webhook-events`): create with `POST /v3/webhooks/endpoints` `{ url (https), events }` → `endpoint_id`, `secret` ("will not be shown again"; whether under `data` is **UNCONFIRMED**, both read). Events `avatar_video.success` / `avatar_video.fail`. Envelope `{ event_type, event_data }`; success `event_data`: `video_id`, `url`, `gif_download_url`, `video_page_url`, `video_share_page_url`, `folder_id`, `callback_id`. **No duration in the payload** (we call `GET /v3/videos/{id}`). Fail fields **UNCONFIRMED** (we read `msg`, else a plain default). Signature: header **`signature`** = hex HMAC-SHA256 of the raw body with the secret; no timestamp documented. Answer 2xx within **10 s**; retries with backoff for up to 24 h; the same event may arrive twice → dedupe on `event_type` + `video_id` (the docs' advice; our `webhook_events.event_key = heygen:<type>:<video_id>`).
+
+**Limits** (`/usage-limits`, `/error-codes`): 10 concurrent renders on Pay-As-You-Go (20 Enterprise); over → `429 rate_limit_exceeded` with `Retry-After` (seconds) except voice-provider limits (no header → backoff).
+
+**Engines and realism**: no realism ranking found. `LIKENESS.realistic_engines` in `lib/qa/config.ts` (`heygen-avatar-6`, `avatar_v`, `avatar_iv`; no turbo, no avatar_iii) is **our choice** — the owner can change it. Sandbox: still none.
+
+**How our code uses this** (`lib/render.ts`, `lib/likeness.ts`, `lib/heygen-webhook.ts`): every render needs MOCK_HEYGEN exactly `false` AND the admin's "I agree to spend" box, goes through `withHeygenSpend` (both pause switches, daily cap, `provider_usage` row), then `claim_render_slot`, then the POST. A saved `heygen_video_id` is never POSTed again; a claim without an id refuses ("check the HeyGen dashboard"). The raw MP4 goes to the private `videos` bucket at `raw/<brand>/<video>.mp4`.
+
+**UNCONFIRMED list (check on the first real call, staging, with the owner's OK)**: create-video response id position; `GET /v3/videos` duration unit and in-progress status names; webhook endpoint answer nesting; `avatar_video.fail` fields; `users/me` fields other than `billing_type`; consent `url` position; whether `voice_id` ever appears on a look/group.
+
+## (g) Fix pass p3-fix1 (22 Nov 2026): video download hosts, safe downloader, lost POST answers
+
+Context7 (`/websites/developers_heygen`), read only; no request to any HeyGen host.
+
+**Video file hosts in the docs** (all the docs show):
+| Host | Where | What |
+|---|---|---|
+| `resource2.heygen.ai` | Avatar 6 model page, completed-video example: `"video_url": "https://resource2.heygen.ai/videos/.../VIDEO.mp4"` — https://developers.heygen.com/docs/models/avatar-6 (also the "Completed video response" example next to `GET /v3/models/videos/{id}`) | rendered MP4 |
+| `files.heygen.ai` | Avatar Looks list example: `preview_image_url` / `preview_video_url` — https://developers.heygen.com/docs/avatar-looks | look previews only, **not** renders, so **not** allowed |
+
+`GET /v3/videos/{id}` (`/video-agent`, `/models/avatar-6`) documents `video_url` ("signed ... poll again for a fresh one") but shows **no example host**. The `avatar_video.success` webhook `url` ("pre-signed download URL", `/webhook-events`) has **no JSON example**. No CDN list, no domains to allowlist, no CloudFront/S3 host for downloads anywhere in the docs.
+
+**Allowlist** (`HEYGEN_DOWNLOAD_HOSTS` in `lib/heygen.ts`): `resource2.heygen.ai` only, exact match. **UNCONFIRMED** for our `/v3/videos` and webhook path. It fails closed: a video on any other host gets the plain "The video link from HeyGen is not usable." and nothing is fetched. On the first real render, look at the host of the real `video_url` (do not paste the full signed URL anywhere) and add it here with its source.
+
+**Downloader rules** (`lib/safe-download.ts`, used only by `downloadVideo`; limits in `RENDER` in `lib/qa/config.ts`), checked on every hop:
+1. https only; no `user:pass@`; no port other than 443; no literal IP host.
+2. Host on the allowlist (exact host, or an explicit `.suffix` entry on a dot boundary; none used today).
+3. DNS (`node:dns` lookup, all addresses; tests inject a fake): refuse if ANY address is private (10/8, 172.16/12, 192.168/16), loopback (127/8, ::1), link-local (169.254/16, fe80::/10), CGNAT (100.64/10), ULA (fc00::/7), unspecified (0.0.0.0/8, ::), multicast/reserved, IPv4-mapped/NAT64/6to4 forms of these, or metadata (169.254.169.254, fd00:ec2::254, 100.100.100.200). IPv6 outside 2000::/3 is refused.
+4. `redirect: "manual"`, at most `download_max_redirects` = 3 hops.
+5. 2xx with a `video/*` content type; `download_max_bytes` = 200 MB checked on Content-Length and while streaming (stream cancelled); `download_timeout_s` = 300 s for the whole download, body included.
+6. Timeouts, network errors and 5xx retry (3 tries, backoff); refusals don't. Errors never contain the URL. Our API key is never sent.
+Known limit: fetch resolves DNS again itself (rebinding window); pinning the address would need the `undici` package (not added). The exact-host allowlist is the main guard.
+
+**Lost POST answers (SF3/SF5)**: a timeout or 5xx on `POST /v3/videos` leaves the video `rendering` with its claim and no HeyGen id (the "unknown" state, `RENDER_UNKNOWN` on the row); it is never POSTed again. The webhook matches it by `callback_id`, saves HeyGen's id and completes it; the poll completes it once the id is known. After `RENDER.poll_max_s` (30 min) from `render_started_at` with no word, it fails to the team queue. Likeness re-runs (SF6) reuse any row that reached HeyGen.
+
+**UNCONFIRMED (add to the list above)**: the real host of `video_url` / webhook `url`; whether HeyGen download URLs redirect; the content type HeyGen sends for the MP4 (we require `video/*`).
+
+## (h) Fix pass p3-fix2 (22 Nov 2026): spend cap alerts, mock rows, stuck claims
+
+No new HeyGen endpoint, field or host is used in this pass, so nothing new was looked up and nothing was sent to any HeyGen host. The UNCONFIRMED lists in (f) and (g) still stand and must be checked on the first real call.
+
+- **HeyGen spend lives in `provider_usage` only** (never `usage_ledger`, which is plan slots).
+- **Mock rows don't count** (decision (a)): `provider_usage.mock` (set by `reserve_heygen_spend` when the note is `mock`; a failed call overwrites `note` but never `mock`). Every call is checked against today's REAL rows only. Mock rows are still written (cost 0).
+- **Cap hit** (SF4): the call is refused as before, `app_settings.renders_paused` becomes `true` (all HeyGen work stops), and each admin in `ADMIN_EMAILS` gets one mocked `email_outbox` row (`kind` `spend_cap_alert`), at most once per kind per Karachi day (`dedupe_key` `spend_cap:<kind>:<day>:<email>`, unique). To restart: check today's `provider_usage`, then set `renders_paused` back to `false` (no admin toggle yet).
+- **Clear stuck claim** (decision (b)): Admin → Settings → "Stuck HeyGen claims" (also on the likeness page and the consent/twin page). Lists videos (posts and likeness tests) with `render_started_at` but no `heygen_video_id`, and twins with `create_started_at` but no `heygen_group_id`. **First look in the HeyGen dashboard**: if HeyGen made the video or twin, do NOT clear (you would pay twice). The button needs the "I checked the HeyGen dashboard" box; `clear_stuck_claim` clears only a claim without a HeyGen id and writes a `provider_usage` row (`kind` `claim_cleared`, cost 0, admin email in `note`, never counted toward a cap) in the same transaction. A cleared video becomes `failed`; start it again with "Make video" or "Render missing ones".
+
+## How to run once (owner): register the HeyGen webhook
+
+> **Tested only at go-live.** This command has never been run (the Builder may not run it, and tests never reach HeyGen). The first real run happens at go-live, on staging, with Zee's OK via Sunny; Rowan watches it and fixes this page if a step differs.
+
+Do this **once**, after the app has a public https address (Vercel preview or production) and after Zee says yes. It is free, but it changes the live HeyGen account. The script refuses unless `MOCK_HEYGEN` is exactly `false` **and** you add `--yes-create-webhook`. It never saves the secret.
+
+1. In PowerShell, go to the app folder: `cd <path>\creator-tool\app`.
+2. Turn mock off **for this window only**: `$env:MOCK_HEYGEN="false"`.
+3. Run (one line; replace the address):
+   `npx tsx --conditions=react-server --env-file=.env.local scripts/heygen-create-webhook.ts --yes-create-webhook --url=https://YOUR-APP.vercel.app/api/webhooks/heygen`
+   (`npx` may ask to download `tsx` once; say yes. `--env-file` reads your key from `.env.local`; the `MOCK_HEYGEN` you set in step 2 wins.)
+4. The script prints `HEYGEN_WEBHOOK_SECRET` **once**. Copy it, open `.env.local` in Notepad, and add the line `HEYGEN_WEBHOOK_SECRET=<the value>` yourself. Add the same value in Vercel and Trigger.dev (Environment Variables). Never paste it into chat.
+5. Close the PowerShell window (this also turns mock back on).
+
+Not yet tried for real: Rowan should check step 3 on staging the first time (the `tsx` flags are from the tsx/Node docs, not tested here). Locally webhooks can't reach `localhost`; the polling backup finishes videos there.
+
+## (d) Brand Glossary scope: one per workspace
+
+"Each workspace has one glossary, and it holds rules for any number of languages." Creating a second one returns `409 conflict`. So **one glossary per brand is not possible** in one workspace. Plan: one shared workspace glossary; we sync every brand's **approved** `pronunciations` into it (terms are whole-word, case-insensitive; watch for two brands needing different respellings of the same word, in which case keep the respelled `spoken_text` as the only fix for that word). Sources: Brand Glossary — https://developers.heygen.com/docs/brand-glossary ; Manage a Glossary — https://developers.heygen.com/docs/brand-glossary/manage
+
+Glossary details (from Phase 2): `GET`/`POST /v3/brand-glossaries`, `PATCH /v3/brand-glossaries/{id}` (replaces each list in full); terms have `term`, `pronunciation`, optional `ipa` (needs per-account enablement) and `pronunciation_language`; pass `brand_glossary_id` (32-character hex) at the top level of `POST /v3/videos`; applies only to script-driven speech. Inline `<pron>` / `<break>` are documented for Text to Speech only. Sources: https://developers.heygen.com/docs/brand-glossary/pronunciations , https://developers.heygen.com/docs/voices/heygen-voice-speech
