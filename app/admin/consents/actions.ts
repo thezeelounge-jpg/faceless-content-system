@@ -19,6 +19,7 @@ import {
 } from "@/lib/consent-flow";
 import { createClipStorage, createConsentStore } from "@/lib/consent-store";
 import { heygen } from "@/lib/heygen";
+import { createSpendStore } from "@/lib/heygen-spend-store";
 import type { ActionState } from "@/lib/plain-error";
 import { PlainError } from "@/lib/plain-error";
 import { createTwin, pollTwinOnce, pollTwinUntilReady } from "@/lib/twin";
@@ -158,7 +159,7 @@ async function startTwin(consentId: string): Promise<ActionState> {
     };
   }
   const client = heygen({ forPage: true });
-  const avatar = await createTwin(consentId, { store, storage: createClipStorage(), heygen: client });
+  const avatar = await createTwin(consentId, { store, storage: createClipStorage(), heygen: client, spend: createSpendStore() });
   await pollTwinUntilReady(avatar.id, { store, heygen: client, wait: async () => {}, maxAttempts: 1 });
   return { status: "ok", message: "Approved. Mock twin created (no HeyGen call, nothing spent)." };
 }

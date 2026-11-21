@@ -2,14 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHeygenClient, HeygenError, type HeygenClient } from "@/lib/heygen";
 import { TWIN_POLL, createTwin, pollTwinOnce, pollTwinUntilReady } from "@/lib/twin";
 import { BRAND_ID, memoryClipStorage, memoryConsentStore } from "@/tests/helpers/consent-memory";
+import { memorySpendStore } from "@/tests/helpers/spend-memory";
 
 const MB = 1024 * 1024;
 let mem: ReturnType<typeof memoryConsentStore>;
 let clips: ReturnType<typeof memoryClipStorage>;
+let spend: ReturnType<typeof memorySpendStore>;
 
 beforeEach(() => {
   mem = memoryConsentStore();
   clips = memoryClipStorage();
+  spend = memorySpendStore({ caps: { create_twin: 100 } });
   vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network is not allowed in tests"));
 });
 afterEach(() => vi.restoreAllMocks());
@@ -55,7 +58,7 @@ describe("no twin before admin approval", () => {
     it(`a ${status} consent: createTwin refuses and HeyGen is never called`, async () => {
       const consent = await consentWith(status);
       const { client, calls } = counted(mockHeygen());
-      await expect(createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client })).rejects.toThrow(
+      await expect(createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store })).rejects.toThrow(
         "No twin before the consent clip is approved.",
       );
       expect(calls).toEqual([]);
@@ -67,7 +70,7 @@ describe("no twin before admin approval", () => {
     const consent = await consentWith("pending");
     await mem.store.insertAvatar({ brand_id: BRAND_ID, consent_id: consent.id, status: "training" });
     const { client, calls } = counted(mockHeygen());
-    await expect(createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client })).rejects.toThrow(
+    await expect(createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store })).rejects.toThrow(
       "No twin before the consent clip is approved.",
     );
     expect(calls).toEqual([]);
@@ -78,7 +81,7 @@ describe("createTwin (mock HeyGen)", () => {
   it("uploads the clip, creates the twin, starts consent and 'emails' the link to the mock outbox", async () => {
     const consent = await consentWith("approved");
     const { client, calls } = counted(mockHeygen());
-    const avatar = await createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client });
+    const avatar = await createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store });
 
     expect(calls).toEqual(["uploadAsset", "createDigitalTwin", "startConsent"]);
     expect(avatar).toMatchObject({
@@ -107,7 +110,7 @@ describe("createTwin (mock HeyGen)", () => {
   it("running twice (a retry) makes no second twin and no second email", async () => {
     const consent = await consentWith("approved");
     const { client, calls } = counted(mockHeygen());
-    const deps = { store: mem.store, storage: clips.storage, heygen: client };
+    const deps = { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store };
     await createTwin(consent.id, deps);
     await createTwin(consent.id, deps);
     expect(calls.filter((c) => c === "createDigitalTwin")).toHaveLength(1);
@@ -119,7 +122,7 @@ describe("createTwin (mock HeyGen)", () => {
   it("SF2: twin created on HeyGen but saving its id fails → the retry does NOT create a second twin", async () => {
     const consent = await consentWith("approved");
     const { client, calls } = counted(mockHeygen());
-    const deps = { store: mem.store, storage: clips.storage, heygen: client };
+    const deps = { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store };
     const realUpdate = mem.store.updateAvatar.bind(mem.store);
     let failOnce = true;
     mem.store.updateAvatar = async (id, patch) => {
@@ -151,7 +154,7 @@ describe("createTwin (mock HeyGen)", () => {
         return base.createDigitalTwin(input);
       },
     } as HeygenClient);
-    const deps = { store: mem.store, storage: clips.storage, heygen: client };
+    const deps = { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store };
     await expect(createTwin(consent.id, deps)).rejects.toThrow("HeyGen refused the request");
     const avatar = await createTwin(consent.id, deps);
     expect(avatar.heygen_group_id).toBe("group_mock_0001");
@@ -166,7 +169,7 @@ describe("createTwin (mock HeyGen)", () => {
         throw new HeygenError("bad_request", "HeyGen refused the request (invalid_parameter).");
       },
     } as HeygenClient;
-    await expect(createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client })).rejects.toThrow(
+    await expect(createTwin(consent.id, { store: mem.store, storage: clips.storage, heygen: client, spend: spend.store })).rejects.toThrow(
       "HeyGen refused the request (invalid_parameter).",
     );
     expect(mem.avatars[0]).toMatchObject({ status: "training", error: "HeyGen refused the request (invalid_parameter)." });

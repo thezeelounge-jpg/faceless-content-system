@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BRAND_ID, memoryClipStorage, memoryConsentStore } from "@/tests/helpers/consent-memory";
+import { memorySpendStore } from "@/tests/helpers/spend-memory";
 
 const requireAdmin = vi.fn();
 const redirect = vi.fn((url: string) => {
@@ -23,6 +24,8 @@ vi.mock("@/lib/consent-store", () => ({
   createConsentStore: () => mem.store,
   createClipStorage: () => clips.storage,
 }));
+vi.mock("@/lib/heygen-spend-store", () => ({ createSpendStore: () => spend.store }));
+let spend: ReturnType<typeof memorySpendStore>;
 
 const actions = await import("@/app/admin/consents/actions");
 
@@ -38,6 +41,7 @@ const savedEnv = { ...process.env };
 beforeEach(() => {
   mem = memoryConsentStore();
   clips = memoryClipStorage();
+  spend = memorySpendStore();
   requireAdmin.mockReset().mockResolvedValue({ id: "admin-1", email: "a@x.com", isAdmin: true });
   redirect.mockClear();
   trigger.mockReset().mockResolvedValue({ id: "run_1" });

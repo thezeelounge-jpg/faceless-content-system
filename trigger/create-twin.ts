@@ -2,6 +2,7 @@ import { logger, schemaTask } from "@trigger.dev/sdk";
 import { z } from "zod";
 import { createClipStorage, createConsentStore } from "../lib/consent-store";
 import { heygen } from "../lib/heygen";
+import { createSpendStore } from "../lib/heygen-spend-store";
 import { createTwin } from "../lib/twin";
 import { pollTwinTask } from "./poll-twin";
 
@@ -22,6 +23,7 @@ export const createTwinTask = schemaTask({
       store: createConsentStore(),
       storage: createClipStorage(),
       heygen: heygen(),
+      spend: createSpendStore(),
     });
     logger.log("Twin created on HeyGen, waiting for consent", { consentId, avatarId: avatar.id });
     await pollTwinTask.trigger({ avatarId: avatar.id }, { idempotencyKey: `poll-twin-${avatar.id}` });

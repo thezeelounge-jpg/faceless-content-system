@@ -3,6 +3,7 @@ import path from "node:path";
 import { redact } from "@/lib/admin-errors";
 import type { AvatarRow, AvatarStatus, ClipStorage, ConsentStore } from "@/lib/consent-store-types";
 import { HeygenError, type CreatedTwin, type HeygenClient, type HeygenErrorCode } from "@/lib/heygen";
+import { SpendGuardError, withHeygenSpend, type SpendStore } from "@/lib/heygen-spend";
 import { PlainError } from "@/lib/plain-error";
 
 // Creating the digital twin after the admin approves the consent clip, and
@@ -66,7 +67,10 @@ function consentEmail(brandName: string, url: string): { subject: string; body: 
  * flow and "emails" the link (mock outbox). Safe to run again: it skips the
  * steps that are already done.
  */
-export async function createTwin(consentId: string, deps: TwinDeps & { storage: ClipStorage }): Promise<AvatarRow> {
+export async function createTwin(
+  consentId: string,
+  deps: TwinDeps & { storage: ClipStorage; spend: SpendStore },
+): Promise<AvatarRow> {
   const consent = await deps.store.getConsent(consentId);
   if (!consent) throw new PlainError("Consent not found.");
   // CLAUDE.md: no twin before admin approval of the consent clip.
@@ -95,13 +99,15 @@ export async function createTwin(consentId: string, deps: TwinDeps & { storage: 
       if (!(await deps.store.claimTwinCreate(avatar.id, new Date().toISOString()))) throw new PlainError(LOST_TWIN);
       let twin: CreatedTwin;
       try {
-        twin = await deps.heygen.createDigitalTwin({
-          name: `${brand.name} twin`,
-          file: { type: "asset_id", asset_id: assetId },
-        });
+        // Spend guard: pause switch + daily cap + a provider_usage row, before the POST.
+        twin = await withHeygenSpend(
+          { kind: "create_twin", avatarId: avatar.id, mock: deps.heygen.mock, store: deps.spend },
+          () => deps.heygen.createDigitalTwin({ name: `${brand.name} twin`, file: { type: "asset_id", asset_id: assetId } }),
+        );
       } catch (error) {
-        // HeyGen clearly said no (nothing was made): free the claim so a retry may try again.
-        if (error instanceof HeygenError && HEYGEN_DID_NOT_CREATE.includes(error.code)) {
+        // Nothing was made (guard refused, or HeyGen clearly said no): free the claim so a retry may try again.
+        const refused = error instanceof HeygenError && HEYGEN_DID_NOT_CREATE.includes(error.code);
+        if (refused || error instanceof SpendGuardError) {
           await deps.store.updateAvatar(avatar.id, { create_started_at: null });
         }
         throw error;

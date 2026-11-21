@@ -105,7 +105,7 @@ describe("database setup", () => {
 
   it("seeds the safety settings", async () => {
     const result = await db.query<{ key: string }>("select key from public.app_settings order by key");
-    expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "ramadan", "renders_paused"]);
+    expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "heygen_daily_caps", "ramadan", "renders_paused"]);
   });
 
   it("stores tiny Claude costs exactly (ai_usage.cost_usd has 6 decimals)", async () => {
@@ -328,6 +328,63 @@ describe("avatars (Phase 3 twin creation)", () => {
       expect((await db.query(claim, [id])).rows).toHaveLength(1);
       expect((await db.query(claim, [id])).rows).toHaveLength(0);
       await db.exec(`delete from public.avatars where id = '${id}'`);
+    });
+  });
+});
+
+// Phase 3 part B: the HeyGen spend guard (lib/heygen-spend.ts) reserves a
+// provider_usage row before every paid HeyGen call, capped per day.
+describe("HeyGen spend guard (provider_usage + reserve_heygen_spend)", () => {
+  const reserve = (kind: string, since: string, cap: number, note: string | null = "mock") =>
+    db.query<{ id: string | null }>(
+      "select public.reserve_heygen_spend($1, $2::timestamptz, $3, null, null, $4) as id",
+      [kind, since, cap, note],
+    );
+
+  it("the default caps row exists: render 3, create_twin 2", async () => {
+    const caps = await db.query<{ value: unknown }>("select value from public.app_settings where key = 'heygen_daily_caps'");
+    expect(caps.rows).toEqual([{ value: { render: 3, create_twin: 2 } }]);
+  });
+
+  it("reserves until the cap, then returns null; older rows don't count", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec(`insert into public.provider_usage (provider, kind, status, created_at)
+                     values ('heygen', 'create_twin', 'succeeded', now() - interval '2 days')`);
+      const since = new Date(Date.now() - 60_000).toISOString();
+      const first = (await reserve("create_twin", since, 2)).rows[0].id;
+      const second = (await reserve("create_twin", since, 2)).rows[0].id;
+      const third = (await reserve("create_twin", since, 2)).rows[0].id;
+      expect(first).toMatch(/^[0-9a-f-]{36}$/);
+      expect(second).toMatch(/^[0-9a-f-]{36}$/);
+      expect(third).toBeNull();
+      // Renders have their own count.
+      expect((await reserve("render", since, 1)).rows[0].id).not.toBeNull();
+      const row = await db.query("select provider, kind, status, cost_usd::float as cost, note from public.provider_usage where id = $1", [first]);
+      expect(row.rows).toEqual([{ provider: "heygen", kind: "create_twin", status: "reserved", cost: 0, note: "mock" }]);
+      await expect(reserve("other", since, 5)).rejects.toThrow(/unknown spend kind/);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("kind and status only take the listed values", async () => {
+    await asRole("service_role", null, async () => {
+      await expect(db.exec(`insert into public.provider_usage (provider, kind) values ('heygen', 'lunch')`)).rejects.toThrow(
+        /check constraint/,
+      );
+      await expect(
+        db.exec(`insert into public.provider_usage (provider, kind, status) values ('heygen', 'render', 'maybe')`),
+      ).rejects.toThrow(/check constraint/);
+    });
+  });
+
+  it("customers and logged-out visitors can't call reserve_heygen_spend or read provider_usage", async () => {
+    const since = new Date().toISOString();
+    await asUser(USER_A, async () => {
+      await expect(reserve("render", since, 99)).rejects.toThrow(/permission denied/);
+      await expect(db.query("select * from public.provider_usage")).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(reserve("render", since, 99)).rejects.toThrow(/permission denied/);
     });
   });
 });
