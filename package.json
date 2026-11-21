@@ -10,6 +10,7 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:bundle": "vitest run tests/security/bundle.test.ts",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy",
     "db:push": "supabase db push"

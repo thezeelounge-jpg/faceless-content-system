@@ -19,7 +19,7 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 - Set `output_config.effort` explicitly on every call (start: medium for scripts and plans, low for FAST tasks). Opus 5.5 defaults to medium; Sonnet 5.5 defaults to high.
 - Do not set `temperature`, `top_p` or `top_k`. Do not prefill the assistant message. Both return a 400.
 - Do not force tool use (`tool_choice` any/tool), which returns a 400 on these models. For JSON, use the SDK's structured outputs (`output_config.format` with a zod schema). Read the SDK docs for the exact helper; do not guess.
-- Check `stop_reason` before reading content. Handle `"refusal"` with a plain error, and enable server-side fallbacks as described in the Anthropic docs.
+- Check `stop_reason` before reading content. Handle `"refusal"` with a plain error. Stable Messages API only (no beta server-side fallbacks for now); if MAIN or PLANNER is still overloaded (529) after retries, `lib/claude.ts` makes one FAST call and logs it as `<task>:fallback_fast`.
 - Stream long outputs (monthly plans) and use the SDK's final-message helper.
 - Put the brand profile in a cached system block (prompt caching). Use the Batch API for scheduled monthly planning.
 - Log tokens and cost for every call to `ai_usage`. Keep every prompt as a file in `/prompts`.
@@ -56,10 +56,12 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 
 ## Money-safety and mock mode
 - `MOCK_HEYGEN=true` and `MOCK_STT=true` in local development: return fixture files from `tests/fixtures/` and spend nothing.
+- `MOCK_CLAUDE=true` too: `lib/claude.ts` returns sample answers from `lib/claude-mocks.ts`, builds no client and calls nothing. All three switches mean "mock" unless set to exactly `false` (`lib/config.ts`).
 - Real renders happen only when the owner says yes, and only on staging or production.
 - Pause switches (`app_settings`): `renders_paused` (global) and `brands.paused`. Daily spend caps email the admin and pause renders.
 
 ## Commands
+- Bundle secret scan: `npm run build` then `npm run test:bundle` (fails without a build). `npm test` also scans `.next/static` when it exists.
 - `npm run dev` | `npm run lint` | `npm run typecheck` | `npm test` | `npm run test:e2e` (Phase 9) | `npm run eval:scripts` (Phase 2, costs cents, ask first)
 - `npm run trigger:dev` (local jobs) | `npm run trigger:deploy` (production jobs)
 - `npm run db:push` (migrations; needs `npx supabase login` and `npx supabase link` once)
@@ -76,5 +78,5 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 - Done: MOCK_CLAUDE switch; onboarding form (`components/onboarding/brand-form.tsx`, schema `lib/brand-input.ts`) + Admin → Clients → New client; `lib/claude.ts` (only entry point `runClaudeTask`, mock answers in `lib/claude-mocks.ts`, prices in `lib/ai-prices.ts`, prompts in `/prompts`); brand profile + versions (`save_brand_version` rpc, `lib/brand-versions.ts`, brand page).
 - In progress: nothing.
 - Next: Part B: item 4 monthly planner (`lib/posting-times.ts`), 5 script writer (`lib/plans.ts`), 6 Gate 1, 7 Gate 2, 8 golden set.
-- Known issues: `.env.example` still needs `MOCK_CLAUDE=true` added by the operator (agent can't edit env files). Claude prices are estimates. Server-side fallbacks use the beta API.
+- Known issues: Claude prices are estimates.
 - QA thresholds last calibrated: never.
