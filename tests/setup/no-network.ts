@@ -1,27 +1,38 @@
 import { afterEach, beforeEach, expect } from "vitest";
-import { disabledFetch, networkAllowed } from "./network-guard";
+import {
+  disabledFetch,
+  installSocketGuard,
+  networkAllowed,
+  realFetchForGuardTests,
+  setNetworkBlocked,
+} from "./network-guard";
 
-// Loaded before every test file (vitest.config.mts setupFiles). Before each
-// test, globalThis.fetch becomes a function that throws
-// "network disabled in tests: <url>"; after each test it is put back to that
-// same thrower (never the real fetch), so a passthrough spy or
-// vi.restoreAllMocks() can't reach HeyGen, Anthropic or Supabase.
-// Tests that need an answer inject a fake (createHeygenClient({ fetch }) etc.).
+// Loaded before every test file (vitest.config.mts setupFiles; also
+// vitest.staging.config.mts, and vitest.eval.config.mts unless both live
+// switches are on). Two layers:
 //
-// Clients that could reach the network from tests, and why they can't:
-// - lib/heygen.ts: calls globalThis.fetch at request time → the thrower.
-// - Anthropic SDK (lib/claude.ts): mock mode builds no client; a real client
-//   uses globalThis.fetch → the thrower.
-// - supabase-js: tests never build it (memory stores + vi.mock of the store
-//   modules); if one did, it uses globalThis.fetch → the thrower.
+// 1. globalThis.fetch: before each test it becomes a function that throws
+//    "network disabled in tests: <url>"; after each test it is put back to
+//    that same thrower (never the real fetch), so a passthrough spy or
+//    vi.restoreAllMocks() can't reach HeyGen, Anthropic or Supabase.
+// 2. Sockets (SF1): net.Socket.prototype.connect, net.connect /
+//    createConnection, tls.connect, http(s).request / get all throw
+//    "network disabled in tests: <host>". That covers node:http, node:https,
+//    net, tls and undici (Node's real fetch), whatever a library uses.
+//    PGlite is in-process and needs no socket.
+//
+// Tests that need an answer inject a fake (createHeygenClient({ fetch }) etc.).
 // Exception: tests/staging/*, only when RUN_STAGING_TESTS=1 (opt-in, never in npm test).
 
-const realFetch = globalThis.fetch;
+installSocketGuard();
+const realFetch = realFetchForGuardTests();
 
 function install() {
   const allowed = networkAllowed({ env: process.env, testPath: expect.getState().testPath });
   globalThis.fetch = allowed ? realFetch : disabledFetch;
+  setNetworkBlocked(!allowed);
 }
 
+install();
 beforeEach(install);
 afterEach(install);
