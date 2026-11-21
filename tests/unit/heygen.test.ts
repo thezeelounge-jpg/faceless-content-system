@@ -307,7 +307,7 @@ describe("errors, retries and 429", () => {
   it("real mode is chosen only when MOCK_HEYGEN is exactly 'false'", async () => {
     process.env.MOCK_HEYGEN = "false";
     delete process.env.HEYGEN_API_KEY;
-    const spy = vi.spyOn(globalThis, "fetch");
+    const spy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network is not allowed in tests"));
     const error = (await heygen().getCurrentUser().catch((e: unknown) => e)) as HeygenError;
     expect(error.code).toBe("not_set_up");
     expect(spy).not.toHaveBeenCalled();

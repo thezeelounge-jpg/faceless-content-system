@@ -22,7 +22,7 @@ afterEach(() => {
 describe("HeyGen check route", () => {
   it("admin in mock mode gets the mock user and no fetch happens", async () => {
     getCurrentUser.mockResolvedValue({ id: "u1", email: "admin@x.com", isAdmin: true });
-    const spy = vi.spyOn(globalThis, "fetch");
+    const spy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network is not allowed in tests"));
     const response = await GET();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
@@ -36,7 +36,7 @@ describe("HeyGen check route", () => {
   });
 
   it("customers and logged-out visitors get 404 and HeyGen is never asked", async () => {
-    const spy = vi.spyOn(globalThis, "fetch");
+    const spy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network is not allowed in tests"));
     for (const user of [null, { id: "u2", email: "c@x.com", isAdmin: false }]) {
       getCurrentUser.mockResolvedValue(user);
       const response = await GET();
@@ -50,7 +50,7 @@ describe("HeyGen check route", () => {
     getCurrentUser.mockResolvedValue({ id: "u1", email: "admin@x.com", isAdmin: true });
     process.env.MOCK_HEYGEN = "false";
     delete process.env.HEYGEN_API_KEY;
-    const spy = vi.spyOn(globalThis, "fetch");
+    const spy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network is not allowed in tests"));
     vi.spyOn(console, "error").mockImplementation(() => {});
     const response = await GET();
     expect(response.status).toBe(502);

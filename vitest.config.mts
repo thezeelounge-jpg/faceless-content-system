@@ -13,6 +13,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["tests/**/*.test.ts"],
+    // SF5: every test runs with globalThis.fetch replaced by a thrower.
+    setupFiles: ["tests/setup/no-network.ts"],
     testTimeout: 30_000,
   },
 });
