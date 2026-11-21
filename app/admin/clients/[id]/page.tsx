@@ -18,7 +18,7 @@ import { PlanGrid, PlanList } from "@/components/admin/plan-view";
 import { getBrand, listBrandVersions } from "@/lib/brands";
 import { timezoneFor } from "@/lib/posting-times";
 import { listPosts } from "@/lib/posts";
-import { generateBrandProfile, planNextFourWeeks, saveProfileEdit } from "./actions";
+import { generateBrandProfile, planNextFourWeeks, saveProfileEdit, writeScript } from "./actions";
 
 export default function BrandPage({ params }: PageProps<"/admin/clients/[id]">) {
   return (
@@ -132,7 +132,21 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
           {posts.length > 0 ? (
             <>
               <PlanGrid posts={posts} timezone={timezone} />
-              <PlanList posts={posts} timezone={timezone} />
+              <PlanList
+                posts={posts}
+                timezone={timezone}
+                actions={(post) =>
+                  post.status === "planned" && post.scripts.length === 0 ? (
+                    <ActionButton
+                      action={writeScript.bind(null, post.id)}
+                      label="Write script"
+                      pendingLabel="Writing… (up to a minute)"
+                      variant="outline"
+                      size="sm"
+                    />
+                  ) : null
+                }
+              />
             </>
           ) : (
             <p className="text-muted-foreground text-sm">No posts planned yet.</p>

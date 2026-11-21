@@ -60,9 +60,13 @@ export function PlanList({
             <div className="font-medium">{post.title}</div>
             {post.hook && <div className="text-muted-foreground">“{post.hook}”</div>}
             {script && (
-              <div className="text-xs">
-                Script v{script.version} · about {Math.round(Number(script.est_seconds ?? 0))} s · QA {script.qa_status}
-              </div>
+              <details className="text-xs">
+                <summary className="cursor-pointer">
+                  Script v{script.version} · about {Math.round(Number(script.est_seconds ?? 0))} s · QA {script.qa_status}
+                </summary>
+                <p className="mt-1 break-words whitespace-pre-wrap">{script.display_text}</p>
+                <p className="text-muted-foreground mt-1">{script.hashtags.join(" ")}</p>
+              </details>
             )}
             {actions?.(post)}
           </li>

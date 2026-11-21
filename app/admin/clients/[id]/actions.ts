@@ -9,7 +9,8 @@ import { runClaudeTask } from "@/lib/claude";
 import type { ActionState } from "@/lib/plain-error";
 import { createMonthlyPlan, planStartDate } from "@/lib/planner";
 import { localDateString, timezoneFor } from "@/lib/posting-times";
-import { insertPosts, lastPlannedDate, loadPlanSettings } from "@/lib/posts";
+import { getOwnerPlan, getPost, insertPosts, lastPlannedDate, loadPlanSettings, saveFirstScript } from "@/lib/posts";
+import { maxSecondsFor, writeScriptForPost } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 const NOT_FOUND = { status: "error", message: "Client not found." } as const satisfies ActionState;
@@ -58,6 +59,34 @@ export async function planNextFourWeeks(brandId: string, _prev: ActionState): Pr
     return {
       status: "error",
       message: plainAdminMessage(error, "Couldn't plan the next 4 weeks. Please try again in a minute."),
+    };
+  }
+}
+
+/** "Write script" for one planned post: Claude (MAIN) writes it, our code checks the length, we save version 1. */
+export async function writeScript(postId: string, _prev: ActionState): Promise<ActionState> {
+  await requireAdmin();
+  try {
+    const post = await getPost(postId);
+    if (!post) return { status: "error", message: "Post not found." };
+    if (post.status !== "planned") return { status: "error", message: "This post already has a script." };
+    const brand = await getBrand(post.brand_id);
+    if (!brand) return NOT_FOUND;
+    const maxSeconds = maxSecondsFor(await getOwnerPlan(brand.owner_id));
+    const row = await writeScriptForPost({
+      brand,
+      post,
+      maxSeconds,
+      runScript: (ctx) => runClaudeTask("script", ctx),
+    });
+    await saveFirstScript(row);
+    revalidatePath(`/admin/clients/${brand.id}`);
+    return { status: "ok", message: `Script written (about ${Math.round(row.est_seconds)} seconds).` };
+  } catch (error) {
+    logAdminError("[admin] write script failed", { postId }, error);
+    return {
+      status: "error",
+      message: plainAdminMessage(error, "Couldn't write the script. Please try again in a minute."),
     };
   }
 }
