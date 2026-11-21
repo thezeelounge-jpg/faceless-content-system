@@ -61,13 +61,25 @@ export type AvatarRow = {
   error: string | null;
   /** Set just before the paid "create twin" POST (SF2 claim). */
   create_started_at: string | null;
+  /** The engine picked in the likeness test (history; brands.engine is what renders use). */
+  chosen_engine?: string | null;
+  /** The likeness test decision: { decision, engine?, at, video_ids }. */
+  likeness_test?: unknown;
   created_at: string;
 };
 
 export type AvatarPatch = Partial<
   Pick<
     AvatarRow,
-    "heygen_group_id" | "heygen_look_id" | "voice_id" | "supported_engines" | "status" | "error" | "create_started_at"
+    | "heygen_group_id"
+    | "heygen_look_id"
+    | "voice_id"
+    | "supported_engines"
+    | "status"
+    | "error"
+    | "create_started_at"
+    | "chosen_engine"
+    | "likeness_test"
   >
 >;
 

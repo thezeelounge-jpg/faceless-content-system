@@ -47,3 +47,43 @@ export const PRONUNCIATION_PREP = {
   /** At most this many unknown risky words go to Claude (FAST) per script. */
   max_suggestions_per_script: 10,
 } as const;
+
+/**
+ * Renders on HeyGen (Phase 3 part B, lib/render.ts). Not quality gates, but
+ * the numbers that bound how long and how many: kept here with the others.
+ */
+export const RENDER = {
+  /** HeyGen allows 10 videos at once on Pay-As-You-Go (docs "Usage Limits"). */
+  max_concurrent: 10,
+  /** When all slots are busy, the render task waits this long and tries again... */
+  busy_wait_s: 60,
+  /** ...at most this many times (about an hour), then leaves the video queued. */
+  busy_max_waits: 60,
+  /** Polling backup (webhooks are attempted once): every 30 s for up to 30 minutes. */
+  poll_every_s: 30,
+  poll_max_s: 1800,
+} as const;
+
+/**
+ * brands.words_per_second: the rolling average of the last 10 real post
+ * renders (words in spoken_text / real duration). Samples outside these
+ * bounds are ignored as absurd (a broken duration, an empty script).
+ */
+export const WORDS_PER_SECOND = {
+  window: 10,
+  min_duration_s: 3,
+  max_duration_s: 600,
+  min_wps: 0.8,
+  max_wps: 5,
+} as const;
+
+/**
+ * Likeness test (Phase 3 item 6): one render per realistic engine the look
+ * lists in supported_api_engines. HeyGen's docs give no realism ranking
+ * (checked 22 Nov 2026), so this list is OUR choice: the newest full-quality
+ * engines; "-turbo" (a speed variant) and avatar_iii (older) are left out.
+ * Order = order on the page. The owner can change it.
+ */
+export const LIKENESS = {
+  realistic_engines: ["heygen-avatar-6", "avatar_v", "avatar_iv"],
+} as const;
