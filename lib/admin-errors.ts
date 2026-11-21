@@ -1,17 +1,18 @@
 import "server-only";
 import { ClaudeError } from "@/lib/claude";
+import { PlainError } from "@/lib/plain-error";
 
 // Admin actions show one plain sentence. The technical details (database
 // messages, stack traces) go only to the server log, with enough context to
 // find the row. Never log keys or tokens here.
 
 /**
- * The sentence an admin sees. ClaudeError messages are our own plain words
- * (e.g. "Claude is busy right now…"), so they are safe to show; anything
- * else gets the generic `fallback`.
+ * The sentence an admin sees. PlainError messages (ClaudeError, PlanError,
+ * ...) are our own plain words, so they are safe to show; anything else
+ * gets the generic `fallback`.
  */
 export function plainAdminMessage(error: unknown, fallback: string): string {
-  return error instanceof ClaudeError ? error.message : fallback;
+  return error instanceof PlainError ? error.message : fallback;
 }
 
 /** Logs the details of a failed admin action on the server. */

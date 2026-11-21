@@ -13,8 +13,12 @@ import {
   splitSamples,
   WEEKDAYS,
 } from "@/lib/brand-input";
+import { ActionButton } from "@/components/admin/action-button";
+import { PlanGrid, PlanList } from "@/components/admin/plan-view";
 import { getBrand, listBrandVersions } from "@/lib/brands";
-import { generateBrandProfile, saveProfileEdit } from "./actions";
+import { timezoneFor } from "@/lib/posting-times";
+import { listPosts } from "@/lib/posts";
+import { generateBrandProfile, planNextFourWeeks, saveProfileEdit } from "./actions";
 
 export default function BrandPage({ params }: PageProps<"/admin/clients/[id]">) {
   return (
@@ -42,6 +46,8 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
   const versions = await listBrandVersions(brand.id);
   const hasProfile = brand.current_version > 0 && Boolean(brand.profile_md);
   const samples = splitSamples(brand.samples);
+  const timezone = timezoneFor(brand.audience_countries);
+  const posts = await listPosts(brand.id);
 
   return (
     <div className="space-y-4">
@@ -108,6 +114,31 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
           </CardContent>
         </Card>
       )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Plan</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-muted-foreground text-sm">
+            Times are local to {label(COUNTRIES, brand.audience_countries[0] ?? "PK")} ({timezone}).
+          </p>
+          <ActionButton
+            action={planNextFourWeeks.bind(null, brand.id)}
+            label="Plan next 4 weeks"
+            pendingLabel="Planning… (up to a few minutes)"
+            size="lg"
+          />
+          {posts.length > 0 ? (
+            <>
+              <PlanGrid posts={posts} timezone={timezone} />
+              <PlanList posts={posts} timezone={timezone} />
+            </>
+          ) : (
+            <p className="text-muted-foreground text-sm">No posts planned yet.</p>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

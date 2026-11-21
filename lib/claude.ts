@@ -26,6 +26,7 @@ import {
 } from "@/lib/claude-mocks";
 import { splitSamples } from "@/lib/brand-input";
 import { isMockClaude, readEnv } from "@/lib/config";
+import { PlainError } from "@/lib/plain-error";
 import { loadPrompt } from "@/lib/prompts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -185,7 +186,7 @@ export type ClaudeDeps = {
 };
 
 /** A plain error with a short code, safe to save on a row and show in admin. */
-export class ClaudeError extends Error {
+export class ClaudeError extends PlainError {
   constructor(
     readonly code: "refusal" | "cut_off" | "bad_output" | "busy" | "failed" | "not_set_up",
     message: string,

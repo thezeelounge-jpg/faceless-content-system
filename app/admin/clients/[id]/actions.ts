@@ -6,9 +6,13 @@ import { requireAdmin } from "@/lib/auth";
 import { getBrand } from "@/lib/brands";
 import { profileFromFormData, profileProblem, saveBrandVersion, type ProfileActionState } from "@/lib/brand-versions";
 import { runClaudeTask } from "@/lib/claude";
+import type { ActionState } from "@/lib/plain-error";
+import { createMonthlyPlan, planStartDate } from "@/lib/planner";
+import { localDateString, timezoneFor } from "@/lib/posting-times";
+import { insertPosts, lastPlannedDate, loadPlanSettings } from "@/lib/posts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-const NOT_FOUND: ProfileActionState = { status: "error", message: "Client not found." };
+const NOT_FOUND = { status: "error", message: "Client not found." } as const satisfies ActionState;
 
 /** "Write profile": Claude (MAIN) writes profile_md and 4 to 6 pillars, saved as a new version. */
 export async function generateBrandProfile(brandId: string, _prev: ProfileActionState): Promise<ProfileActionState> {
@@ -27,6 +31,42 @@ export async function generateBrandProfile(brandId: string, _prev: ProfileAction
       message: plainAdminMessage(error, "Couldn't write the profile. Please try again in a minute."),
     };
   }
+}
+
+/** "Plan next 4 weeks": our code picks the slots, Claude (PLANNER) fills them, we save planned posts. */
+export async function planNextFourWeeks(brandId: string, _prev: ActionState): Promise<ActionState> {
+  await requireAdmin();
+  try {
+    const brand = await getBrand(brandId);
+    if (!brand) return NOT_FOUND;
+    const timezone = timezoneFor(brand.audience_countries);
+    const [settings, lastDate] = await Promise.all([loadPlanSettings(), lastPlannedDate(brand.id, timezone)]);
+    const startDate = planStartDate(localDateString(new Date(), timezone), lastDate);
+    const rows = await createMonthlyPlan({
+      brand,
+      startDate,
+      settings,
+      runPlan: (ctx) => runClaudeTask("plan", ctx),
+    });
+    await insertPosts(rows);
+    revalidatePath(`/admin/clients/${brand.id}`);
+    const first = shortDate(localDateString(new Date(rows[0].scheduled_for), timezone));
+    const last = shortDate(localDateString(new Date(rows[rows.length - 1].scheduled_for), timezone));
+    return { status: "ok", message: `Planned ${rows.length} posts from ${first} to ${last}.` };
+  } catch (error) {
+    logAdminError("[admin] plan failed", { brandId }, error);
+    return {
+      status: "error",
+      message: plainAdminMessage(error, "Couldn't plan the next 4 weeks. Please try again in a minute."),
+    };
+  }
+}
+
+/** "2026-12-07" → "7 Dec". */
+function shortDate(date: string): string {
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" }).format(
+    new Date(`${date}T00:00:00Z`),
+  );
 }
 
 /** Saves the admin's edit of the profile and pillars as a new version. */

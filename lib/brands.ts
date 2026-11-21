@@ -20,6 +20,7 @@ export type BrandRow = {
   posting_days: number[];
   posts_per_week: number;
   audience_countries: string[];
+  posting_times_override: unknown;
   autopilot_level: string;
   words_per_second: number;
   is_managed: boolean;
