@@ -116,6 +116,48 @@ describe("createTwin (mock HeyGen)", () => {
     expect(mem.outbox).toHaveLength(1);
   });
 
+  it("SF2: twin created on HeyGen but saving its id fails → the retry does NOT create a second twin", async () => {
+    const consent = await consentWith("approved");
+    const { client, calls } = counted(mockHeygen());
+    const deps = { store: mem.store, storage: clips.storage, heygen: client };
+    const realUpdate = mem.store.updateAvatar.bind(mem.store);
+    let failOnce = true;
+    mem.store.updateAvatar = async (id, patch) => {
+      if (patch.heygen_group_id && failOnce) {
+        failOnce = false;
+        throw new Error("database timeout");
+      }
+      return realUpdate(id, patch);
+    };
+
+    await expect(createTwin(consent.id, deps)).rejects.toThrow("database timeout");
+    // The Trigger.dev retry:
+    await expect(createTwin(consent.id, deps)).rejects.toThrow(
+      "A twin may already exist on HeyGen for this clip, but we did not save its id.",
+    );
+    expect(calls.filter((c) => c === "createDigitalTwin")).toHaveLength(1);
+    expect(mem.avatars).toHaveLength(1);
+    expect(mem.avatars[0].error).toContain("Check the HeyGen dashboard");
+  });
+
+  it("SF2: a definite HeyGen refusal (400) frees the claim, so a later retry may try again", async () => {
+    const consent = await consentWith("approved");
+    let refusals = 1;
+    const base = mockHeygen();
+    const { client, calls } = counted({
+      ...base,
+      createDigitalTwin: async (input: Parameters<HeygenClient["createDigitalTwin"]>[0]) => {
+        if (refusals-- > 0) throw new HeygenError("bad_request", "HeyGen refused the request (invalid_parameter).");
+        return base.createDigitalTwin(input);
+      },
+    } as HeygenClient);
+    const deps = { store: mem.store, storage: clips.storage, heygen: client };
+    await expect(createTwin(consent.id, deps)).rejects.toThrow("HeyGen refused the request");
+    const avatar = await createTwin(consent.id, deps);
+    expect(avatar.heygen_group_id).toBe("group_mock_0001");
+    expect(calls.filter((c) => c === "createDigitalTwin")).toHaveLength(2);
+  });
+
   it("a HeyGen error is saved on the avatar in plain words, then thrown (so the task retries)", async () => {
     const consent = await consentWith("approved");
     const client = {
@@ -225,6 +267,45 @@ describe("polling until the twin is ready", () => {
       supported_engines: ["avatar_iv", "avatar_v"],
     });
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("SF3: a throwing getAvatarGroup saves a plain error on the avatar, then rethrows", async () => {
+    const { avatar } = await avatarAwaitingConsent();
+    const heygen = {
+      ...mockHeygen(),
+      getAvatarGroup: async () => {
+        throw new HeygenError("failed", "Could not reach HeyGen. Try again later.");
+      },
+    } as HeygenClient;
+    const wait = vi.fn(async () => {});
+    await expect(pollTwinUntilReady(avatar.id, { store: mem.store, heygen, wait })).rejects.toThrow("Could not reach HeyGen.");
+    expect((await mem.store.getAvatar(avatar.id))?.error).toBe("Could not reach HeyGen. Try again later.");
+  });
+
+  it("SF3: a raw listLooks error is saved as a generic sentence: no key, no response body", async () => {
+    const { avatar } = await avatarAwaitingConsent();
+    const heygen = {
+      ...mockHeygen(),
+      getAvatarGroup: async (groupId: string) => ({ groupId, status: "pending_consent", consentStatus: "pending", voiceId: null }),
+      listLooks: async () => {
+        throw new Error('401 {"error":"bad key sk_live_ABCDEFGH12345678 X-Api-Key: abcdefghijklmnopqrstuvwxyz0123456789"}');
+      },
+    } as HeygenClient;
+    await expect(pollTwinOnce(avatar.id, { store: mem.store, heygen })).rejects.toThrow("401");
+    const saved = (await mem.store.getAvatar(avatar.id))?.error;
+    expect(saved).toBe("Something went wrong talking to HeyGen. See server logs.");
+  });
+
+  it("SF3: even our own plain messages are redacted before saving", async () => {
+    const { avatar } = await avatarAwaitingConsent();
+    const heygen = {
+      ...mockHeygen(),
+      getAvatarGroup: async () => {
+        throw new HeygenError("bad_request", "HeyGen refused the request (sk_test_SHOULDNOTBESAVED99).");
+      },
+    } as HeygenClient;
+    await expect(pollTwinOnce(avatar.id, { store: mem.store, heygen })).rejects.toThrow();
+    expect((await mem.store.getAvatar(avatar.id))?.error).toBe("HeyGen refused the request ([redacted]).");
   });
 
   it("an avatar without a HeyGen group cannot be polled", async () => {

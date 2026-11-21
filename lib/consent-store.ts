@@ -69,6 +69,18 @@ export function createConsentStore(): ConsentStore {
       if (error) fail("update avatar", error);
       return (data as AvatarRow | null) ?? null;
     },
+    async claimTwinCreate(id, at) {
+      const { data, error } = await db
+        .from("avatars")
+        .update({ create_started_at: at })
+        .eq("id", id)
+        .is("heygen_group_id", null)
+        .is("create_started_at", null)
+        .select()
+        .maybeSingle();
+      if (error) fail("claim twin creation", error);
+      return (data as AvatarRow | null) ?? null;
+    },
     async insertOutbox(row) {
       const { error } = await db.from("email_outbox").insert(row);
       if (error) fail("save mocked email", error);

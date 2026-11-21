@@ -53,11 +53,16 @@ export type AvatarRow = {
   supported_engines: string[];
   status: AvatarStatus;
   error: string | null;
+  /** Set just before the paid "create twin" POST (SF2 claim). */
+  create_started_at: string | null;
   created_at: string;
 };
 
 export type AvatarPatch = Partial<
-  Pick<AvatarRow, "heygen_group_id" | "heygen_look_id" | "voice_id" | "supported_engines" | "status" | "error">
+  Pick<
+    AvatarRow,
+    "heygen_group_id" | "heygen_look_id" | "voice_id" | "supported_engines" | "status" | "error" | "create_started_at"
+  >
 >;
 
 export type OutboxRow = {
@@ -83,6 +88,12 @@ export interface ConsentStore {
   /** One avatar per consent: returns the existing row if there is one. */
   insertAvatar(row: Pick<AvatarRow, "brand_id" | "consent_id" | "status">): Promise<AvatarRow>;
   updateAvatar(id: string, patch: AvatarPatch): Promise<AvatarRow | null>;
+  /**
+   * Atomically claims "we are about to create the twin on HeyGen": sets
+   * create_started_at only if heygen_group_id AND create_started_at are both
+   * still null. Returns the row, or null when someone already claimed it.
+   */
+  claimTwinCreate(id: string, at: string): Promise<AvatarRow | null>;
   /** Mocked email: stored, never sent. */
   insertOutbox(row: OutboxRow): Promise<void>;
   hasOutbox(consentId: string, kind: OutboxRow["kind"]): Promise<boolean>;

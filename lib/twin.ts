@@ -1,7 +1,8 @@
 import "server-only";
 import path from "node:path";
+import { redact } from "@/lib/admin-errors";
 import type { AvatarRow, AvatarStatus, ClipStorage, ConsentStore } from "@/lib/consent-store-types";
-import type { HeygenClient } from "@/lib/heygen";
+import { HeygenError, type CreatedTwin, type HeygenClient, type HeygenErrorCode } from "@/lib/heygen";
 import { PlainError } from "@/lib/plain-error";
 
 // Creating the digital twin after the admin approves the consent clip, and
@@ -27,10 +28,22 @@ export const TWIN_POLL = {
 const STILL_WAITING =
   "Still waiting for HeyGen after many checks. Check the consent email was completed, then press “Check twin again”.";
 
+/** SF2: shown when a twin may exist on HeyGen but its id was never saved. */
+export const LOST_TWIN =
+  "A twin may already exist on HeyGen for this clip, but we did not save its id. Check the HeyGen dashboard before creating another one.";
+
+/**
+ * HeyGen answers that prove no twin was made, so the claim can be freed.
+ * Not here: "failed" (timeout or 5xx: it might have worked) and "bad_output"
+ * (HeyGen said OK, so the twin probably exists).
+ */
+const HEYGEN_DID_NOT_CREATE: HeygenErrorCode[] = ["not_set_up", "unauthorized", "not_found", "bad_request", "busy"];
+
 type TwinDeps = { store: ConsentStore; heygen: HeygenClient };
 
+/** The sentence saved on avatars.error: our own plain words only, redacted. Never raw bodies. */
 function plain(error: unknown): string {
-  return error instanceof PlainError ? error.message : "Something went wrong talking to HeyGen. See server logs.";
+  return error instanceof PlainError ? redact(error.message) : "Something went wrong talking to HeyGen. See server logs.";
 }
 
 function consentEmail(brandName: string, url: string): { subject: string; body: string } {
@@ -65,7 +78,12 @@ export async function createTwin(consentId: string, deps: TwinDeps & { storage: 
   let avatar = await deps.store.insertAvatar({ brand_id: consent.brand_id, consent_id: consent.id, status: "training" });
 
   try {
+    // SF2: re-read the row. A twin id already saved → skip creation. A claim
+    // without an id → an earlier try may have made the twin on HeyGen and then
+    // crashed: refuse (never make a second paid twin) and ask the admin.
+    avatar = (await deps.store.getAvatar(avatar.id)) ?? avatar;
     if (!avatar.heygen_group_id) {
+      if (avatar.create_started_at) throw new PlainError(LOST_TWIN);
       const bytes = await deps.storage.download(consent.clip_path);
       const ext = path.extname(consent.clip_path).toLowerCase();
       const assetId = await deps.heygen.uploadAsset({
@@ -73,10 +91,21 @@ export async function createTwin(consentId: string, deps: TwinDeps & { storage: 
         filename: `consent${ext}`,
         contentType: ext === ".webm" ? "video/webm" : "video/mp4",
       });
-      const twin = await deps.heygen.createDigitalTwin({
-        name: `${brand.name} twin`,
-        file: { type: "asset_id", asset_id: assetId },
-      });
+      // Claim right before the paid POST (atomic in the database).
+      if (!(await deps.store.claimTwinCreate(avatar.id, new Date().toISOString()))) throw new PlainError(LOST_TWIN);
+      let twin: CreatedTwin;
+      try {
+        twin = await deps.heygen.createDigitalTwin({
+          name: `${brand.name} twin`,
+          file: { type: "asset_id", asset_id: assetId },
+        });
+      } catch (error) {
+        // HeyGen clearly said no (nothing was made): free the claim so a retry may try again.
+        if (error instanceof HeygenError && HEYGEN_DID_NOT_CREATE.includes(error.code)) {
+          await deps.store.updateAvatar(avatar.id, { create_started_at: null });
+        }
+        throw error;
+      }
       avatar =
         (await deps.store.updateAvatar(avatar.id, {
           heygen_group_id: twin.groupId,
@@ -114,13 +143,25 @@ export async function createTwin(consentId: string, deps: TwinDeps & { storage: 
 
 export type PollResult = { done: boolean; status: AvatarStatus };
 
-/** One check of the twin on HeyGen. Saves what it learns. */
+/**
+ * One check of the twin on HeyGen. Saves what it learns. If HeyGen (or the
+ * store) throws, a plain redacted sentence is saved to avatars.error (SF3),
+ * then the error is rethrown so the task can retry.
+ */
 export async function pollTwinOnce(avatarId: string, deps: TwinDeps): Promise<PollResult> {
   const avatar = await deps.store.getAvatar(avatarId);
   if (!avatar) throw new PlainError("Twin not found.");
   if (!avatar.heygen_group_id) throw new PlainError("This twin has not been created on HeyGen yet.");
+  try {
+    return await checkTwin(avatar, avatar.heygen_group_id, deps);
+  } catch (error) {
+    await deps.store.updateAvatar(avatar.id, { error: plain(error) }).catch(() => null);
+    throw error;
+  }
+}
 
-  const group = await deps.heygen.getAvatarGroup(avatar.heygen_group_id);
+async function checkTwin(avatar: AvatarRow, groupId: string, deps: TwinDeps): Promise<PollResult> {
+  const group = await deps.heygen.getAvatarGroup(groupId);
   if (avatar.consent_id && group.consentStatus) {
     await deps.store.updateConsent(avatar.consent_id, { heygen_consent_status: group.consentStatus });
   }
@@ -132,7 +173,7 @@ export async function pollTwinOnce(avatarId: string, deps: TwinDeps): Promise<Po
   if (group.status === "failed" || group.consentStatus === "rejected") {
     return finish("failed", "The person did not accept HeyGen's consent check. Start a new consent.", true);
   }
-  const looks = await deps.heygen.listLooks(avatar.heygen_group_id);
+  const looks = await deps.heygen.listLooks(groupId);
   const look = looks.find((l) => l.status === "completed") ?? looks[0];
   if (look?.status === "failed") {
     return finish("reshoot_needed", "HeyGen could not train the twin from this clip. Ask for a reshoot.", true);

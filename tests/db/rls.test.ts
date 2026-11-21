@@ -316,6 +316,20 @@ describe("avatars (Phase 3 twin creation)", () => {
       await db.exec(`delete from public.avatars where consent_id = '${id}'; delete from public.consents where id = '${id}';`);
     });
   });
+
+  it("SF2 claim: only the first 'about to create the twin' update wins", async () => {
+    await asRole("service_role", null, async () => {
+      const avatar = await db.query<{ id: string }>(
+        `insert into public.avatars (brand_id) values ('${BRAND_A}') returning id`,
+      );
+      const id = avatar.rows[0].id;
+      const claim = `update public.avatars set create_started_at = now()
+                     where id = $1 and heygen_group_id is null and create_started_at is null returning id`;
+      expect((await db.query(claim, [id])).rows).toHaveLength(1);
+      expect((await db.query(claim, [id])).rows).toHaveLength(0);
+      await db.exec(`delete from public.avatars where id = '${id}'`);
+    });
+  });
 });
 
 // Privilege guard over EVERY table in the public schema, read from pg_tables

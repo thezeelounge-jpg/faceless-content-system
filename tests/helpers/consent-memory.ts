@@ -64,6 +64,7 @@ export function memoryConsentStore() {
         voice_id: null,
         supported_engines: [],
         error: null,
+        create_started_at: null,
         created_at: new Date().toISOString(),
         ...row,
       };
@@ -74,6 +75,12 @@ export function memoryConsentStore() {
       const row = avatars.find((a) => a.id === avatarId);
       if (!row) return null;
       Object.assign(row, structuredClone(patch));
+      return structuredClone(row);
+    },
+    async claimTwinCreate(avatarId, at) {
+      const row = avatars.find((a) => a.id === avatarId);
+      if (!row || row.heygen_group_id !== null || row.create_started_at !== null) return null;
+      row.create_started_at = at;
       return structuredClone(row);
     },
     async insertOutbox(row) {
