@@ -66,6 +66,33 @@ Context7 **was available** this session (library `/websites/developers_heygen`).
 
 **UNCONFIRMED list (check on the first real call, staging, with the owner's OK)**: create-video response id position; `GET /v3/videos` duration unit and in-progress status names; webhook endpoint answer nesting; `avatar_video.fail` fields; `users/me` fields other than `billing_type`; consent `url` position; whether `voice_id` ever appears on a look/group.
 
+## (g) Fix pass p3-fix1 (22 Nov 2026): video download hosts, safe downloader, lost POST answers
+
+Context7 (`/websites/developers_heygen`), read only; no request to any HeyGen host.
+
+**Video file hosts in the docs** (all the docs show):
+| Host | Where | What |
+|---|---|---|
+| `resource2.heygen.ai` | Avatar 6 model page, completed-video example: `"video_url": "https://resource2.heygen.ai/videos/.../VIDEO.mp4"` — https://developers.heygen.com/docs/models/avatar-6 (also the "Completed video response" example next to `GET /v3/models/videos/{id}`) | rendered MP4 |
+| `files.heygen.ai` | Avatar Looks list example: `preview_image_url` / `preview_video_url` — https://developers.heygen.com/docs/avatar-looks | look previews only, **not** renders, so **not** allowed |
+
+`GET /v3/videos/{id}` (`/video-agent`, `/models/avatar-6`) documents `video_url` ("signed ... poll again for a fresh one") but shows **no example host**. The `avatar_video.success` webhook `url` ("pre-signed download URL", `/webhook-events`) has **no JSON example**. No CDN list, no domains to allowlist, no CloudFront/S3 host for downloads anywhere in the docs.
+
+**Allowlist** (`HEYGEN_DOWNLOAD_HOSTS` in `lib/heygen.ts`): `resource2.heygen.ai` only, exact match. **UNCONFIRMED** for our `/v3/videos` and webhook path. It fails closed: a video on any other host gets the plain "The video link from HeyGen is not usable." and nothing is fetched. On the first real render, look at the host of the real `video_url` (do not paste the full signed URL anywhere) and add it here with its source.
+
+**Downloader rules** (`lib/safe-download.ts`, used only by `downloadVideo`; limits in `RENDER` in `lib/qa/config.ts`), checked on every hop:
+1. https only; no `user:pass@`; no port other than 443; no literal IP host.
+2. Host on the allowlist (exact host, or an explicit `.suffix` entry on a dot boundary; none used today).
+3. DNS (`node:dns` lookup, all addresses; tests inject a fake): refuse if ANY address is private (10/8, 172.16/12, 192.168/16), loopback (127/8, ::1), link-local (169.254/16, fe80::/10), CGNAT (100.64/10), ULA (fc00::/7), unspecified (0.0.0.0/8, ::), multicast/reserved, IPv4-mapped/NAT64/6to4 forms of these, or metadata (169.254.169.254, fd00:ec2::254, 100.100.100.200). IPv6 outside 2000::/3 is refused.
+4. `redirect: "manual"`, at most `download_max_redirects` = 3 hops.
+5. 2xx with a `video/*` content type; `download_max_bytes` = 200 MB checked on Content-Length and while streaming (stream cancelled); `download_timeout_s` = 300 s for the whole download, body included.
+6. Timeouts, network errors and 5xx retry (3 tries, backoff); refusals don't. Errors never contain the URL. Our API key is never sent.
+Known limit: fetch resolves DNS again itself (rebinding window); pinning the address would need the `undici` package (not added). The exact-host allowlist is the main guard.
+
+**Lost POST answers (SF3/SF5)**: a timeout or 5xx on `POST /v3/videos` leaves the video `rendering` with its claim and no HeyGen id (the "unknown" state, `RENDER_UNKNOWN` on the row); it is never POSTed again. The webhook matches it by `callback_id`, saves HeyGen's id and completes it; the poll completes it once the id is known. After `RENDER.poll_max_s` (30 min) from `render_started_at` with no word, it fails to the team queue. Likeness re-runs (SF6) reuse any row that reached HeyGen.
+
+**UNCONFIRMED (add to the list above)**: the real host of `video_url` / webhook `url`; whether HeyGen download URLs redirect; the content type HeyGen sends for the MP4 (we require `video/*`).
+
 ## How to run once (owner): register the HeyGen webhook
 
 Do this **once**, after the app has a public https address (Vercel preview or production) and after Zee says yes. It is free, but it changes the live HeyGen account. The script refuses unless `MOCK_HEYGEN` is exactly `false` **and** you add `--yes-create-webhook`. It never saves the secret.
