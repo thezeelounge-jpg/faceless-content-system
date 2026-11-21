@@ -108,6 +108,20 @@ describe("database setup", () => {
     expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "ramadan", "renders_paused"]);
   });
 
+  it("stores tiny Claude costs exactly (ai_usage.cost_usd has 6 decimals)", async () => {
+    const column = await db.query<{ numeric_precision: number; numeric_scale: number }>(
+      `select numeric_precision, numeric_scale from information_schema.columns
+       where table_schema = 'public' and table_name = 'ai_usage' and column_name = 'cost_usd'`,
+    );
+    expect(column.rows[0]).toEqual({ numeric_precision: 12, numeric_scale: 6 });
+    const saved = await db.query<{ cost: string }>(
+      `insert into public.ai_usage (task, model, cost_usd) values ('test', 'claude-haiku-5-5', 0.000123)
+       returning cost_usd::text as cost`,
+    );
+    expect(saved.rows[0].cost).toBe("0.000123");
+    await db.exec(`delete from public.ai_usage where task = 'test'`);
+  });
+
   it("rejects values outside the allowed lists", async () => {
     await expect(
       db.exec(`insert into public.brands (owner_id, name, posts_per_week) values ('${USER_A}', 'Bad', 20)`),
