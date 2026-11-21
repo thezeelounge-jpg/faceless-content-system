@@ -58,6 +58,11 @@ export const SOUND_QUESTIONS = [
   { key: "never_say", question: "What would you never say?" },
 ] as const;
 
+/** The 3 sound questions with the brand's answers, in form order ("—" when missing). */
+export function soundAnswerList(answers: Record<string, string> | null | undefined) {
+  return SOUND_QUESTIONS.map((q) => ({ question: q.question, answer: answers?.[q.key]?.trim() || "—" }));
+}
+
 export const MAX_POSTS_PER_DAY = 2;
 
 type Values<T extends readonly { value: unknown }[]> = T[number]["value"];

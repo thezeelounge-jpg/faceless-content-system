@@ -4,10 +4,22 @@ import {
   brandInputSchema,
   brandInputToRow,
   joinSamples,
+  soundAnswerList,
   splitSamples,
   SOUND_QUESTIONS,
   type BrandInput,
 } from "@/lib/brand-input";
+
+describe("onboarding answers on the brand page", () => {
+  it("lists the 3 sound questions with their answers, in order, with a dash when missing", () => {
+    expect(soundAnswerList({ phrases: "Seedhi baat", greeting: "Assalam o alaikum" })).toEqual([
+      { question: "How do you usually start a video or a message?", answer: "Assalam o alaikum" },
+      { question: "Which words or phrases do you say a lot?", answer: "Seedhi baat" },
+      { question: "What would you never say?", answer: "—" },
+    ]);
+    expect(soundAnswerList(null)).toHaveLength(3);
+  });
+});
 
 const SAMPLES = [
   "Most clinics lose patients at the front desk, not in the doctor's room.",

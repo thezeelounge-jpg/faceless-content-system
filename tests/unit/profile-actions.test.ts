@@ -85,6 +85,37 @@ describe("Write profile", () => {
   });
 });
 
+describe("errors shown to the admin", () => {
+  const DB_DETAIL = 'duplicate key value violates unique constraint "brand_versions_brand_id_version_key"';
+
+  it("Write profile shows one plain sentence and logs the details on the server", async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: { message: DB_DETAIL } } as never);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const state = await generateBrandProfile(BRAND_ID, idle);
+    expect(state).toEqual({ status: "error", message: "Couldn't write the profile. Please try again in a minute." });
+    expect(state.message).not.toContain("duplicate");
+    expect(log).toHaveBeenCalledWith("[admin] write profile failed", expect.objectContaining({ brandId: BRAND_ID }));
+    expect(JSON.stringify(log.mock.calls)).toContain("duplicate key");
+    log.mockRestore();
+  });
+
+  it("Save edit shows one plain sentence, keeps the typed values and logs the details", async () => {
+    rpc.mockResolvedValueOnce({ data: null, error: { message: DB_DETAIL } } as never);
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const data = new FormData();
+    data.set("profile_md", "## Who they are\n" + "Coach Sana helps new team leads. ".repeat(10));
+    for (let n = 1; n <= 4; n++) {
+      data.set(`pillar_name_${n}`, `Pillar ${n}`);
+      data.set(`pillar_description_${n}`, `What pillar ${n} is about.`);
+    }
+    const state = await saveProfileEdit(BRAND_ID, idle, data);
+    expect(state).toMatchObject({ status: "error", message: "Couldn't save the profile. Please try again in a minute." });
+    expect(state.values?.pillars).toHaveLength(4);
+    expect(log).toHaveBeenCalledWith("[admin] save profile failed", expect.objectContaining({ brandId: BRAND_ID }));
+    log.mockRestore();
+  });
+});
+
 describe("Save profile edit", () => {
   function form(pillarCount: number) {
     const data = new FormData();

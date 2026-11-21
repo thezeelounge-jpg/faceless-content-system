@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { logAdminError, plainAdminMessage } from "@/lib/admin-errors";
 import { requireAdmin } from "@/lib/auth";
 import { getBrand } from "@/lib/brands";
 import { profileFromFormData, profileProblem, saveBrandVersion, type ProfileActionState } from "@/lib/brand-versions";
@@ -20,9 +21,11 @@ export async function generateBrandProfile(brandId: string, _prev: ProfileAction
     revalidatePath(`/admin/clients/${brand.id}`);
     return { status: "ok", message: `Profile version ${version} saved.` };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[admin] write profile failed:", message);
-    return { status: "error", message: `Couldn't write the profile. ${message}` };
+    logAdminError("[admin] write profile failed", { brandId }, error);
+    return {
+      status: "error",
+      message: plainAdminMessage(error, "Couldn't write the profile. Please try again in a minute."),
+    };
   }
 }
 
@@ -46,8 +49,12 @@ export async function saveProfileEdit(
     revalidatePath(`/admin/clients/${brand.id}`);
     return { status: "ok", message: `Profile version ${version} saved.` };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error("[admin] save profile failed:", message);
-    return { status: "error", message: `Couldn't save the profile. ${message}`, values, attempt };
+    logAdminError("[admin] save profile failed", { brandId }, error);
+    return {
+      status: "error",
+      message: plainAdminMessage(error, "Couldn't save the profile. Please try again in a minute."),
+      values,
+      attempt,
+    };
   }
 }

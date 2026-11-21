@@ -4,7 +4,15 @@ import { AdminPage } from "@/components/admin/admin-page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ProfileEditForm, WriteProfileButton } from "@/components/admin/brand-profile-forms";
 import { pillarSchema } from "@/lib/ai-schemas";
-import { AUTOPILOT_LEVELS, COUNTRIES, LANGUAGES, NICHE_PRESETS, WEEKDAYS } from "@/lib/brand-input";
+import {
+  AUTOPILOT_LEVELS,
+  COUNTRIES,
+  LANGUAGES,
+  NICHE_PRESETS,
+  soundAnswerList,
+  splitSamples,
+  WEEKDAYS,
+} from "@/lib/brand-input";
 import { getBrand, listBrandVersions } from "@/lib/brands";
 import { generateBrandProfile, saveProfileEdit } from "./actions";
 
@@ -33,6 +41,7 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
   const pillars = parsedPillars.success ? parsedPillars.data : [];
   const versions = await listBrandVersions(brand.id);
   const hasProfile = brand.current_version > 0 && Boolean(brand.profile_md);
+  const samples = splitSamples(brand.samples);
 
   return (
     <div className="space-y-4">
@@ -118,6 +127,27 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
             <Row term="Autopilot">{label(AUTOPILOT_LEVELS, brand.autopilot_level)}</Row>
             <Row term="Banned words">{brand.banned_words.join(", ") || "None"}</Row>
           </dl>
+          <h3 className="mt-4 text-sm font-medium">How they sound</h3>
+          <dl className="mt-1 space-y-2 text-sm">
+            {soundAnswerList(brand.sound_answers).map((item) => (
+              <div key={item.question}>
+                <dt className="text-muted-foreground">{item.question}</dt>
+                <dd className="break-words whitespace-pre-wrap">{item.answer}</dd>
+              </div>
+            ))}
+          </dl>
+          <h3 className="mt-4 text-sm font-medium">Writing samples ({samples.length})</h3>
+          {samples.length > 0 ? (
+            <ol className="mt-1 list-decimal space-y-2 pl-5 text-sm">
+              {samples.map((sample, i) => (
+                <li key={i} className="break-words whitespace-pre-wrap">
+                  {sample}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-muted-foreground text-sm">None saved.</p>
+          )}
         </CardContent>
       </Card>
     </div>
