@@ -13,10 +13,17 @@ export function memoryConsentStore() {
   const outbox: (OutboxRow & { status: "mocked" })[] = [];
   let n = 0;
   const id = (prefix: string) => `${prefix}000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+  /** brands.contact_email for BRAND_ID (decision 6). */
+  let contactEmail: string | null = null;
 
   const store: ConsentStore = {
     async getBrandContact(brandId) {
-      return brandId === BRAND_ID ? { id: BRAND_ID, name: "Dr Ayesha Clinic", ownerEmail: "owner@example.com" } : null;
+      return brandId === BRAND_ID
+        ? { id: BRAND_ID, name: "Dr Ayesha Clinic", ownerEmail: "owner@example.com", contactEmail }
+        : null;
+    },
+    async setBrandContactEmail(brandId, email) {
+      if (brandId === BRAND_ID) contactEmail = email;
     },
     async insertConsent(row) {
       const saved: ConsentRow = {
@@ -102,7 +109,11 @@ export function memoryConsentStore() {
       return outbox.some((o) => o.consent_id === consentId && o.kind === kind);
     },
   };
-  return { store, consents, avatars, outbox };
+  const setContactEmail = (email: string | null) => {
+    contactEmail = email;
+  };
+  const getContactEmail = () => contactEmail;
+  return { store, consents, avatars, outbox, setContactEmail, getContactEmail };
 }
 
 /** The private bucket: uploads land here; downloads read the fixture clips. */

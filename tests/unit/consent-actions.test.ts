@@ -113,6 +113,21 @@ describe("start consent", () => {
     expect(mem.consents[0]).toMatchObject({ ip: "203.0.113.9", user_agent: "Mozilla/5.0 Test", admin_status: "pending" });
   });
 
+  it("decision 6: saves the client's email on the brand; a bad email is a plain error and nothing is saved", async () => {
+    expect(
+      await actions.startConsentAction(BRAND_ID, idle, form({ legal_name: "Ayesha Khan", agree: "on", client_email: "nope" })),
+    ).toEqual({ status: "error", message: "Type the client's email address, or leave it empty." });
+    expect(mem.consents).toHaveLength(0);
+    await expect(
+      actions.startConsentAction(
+        BRAND_ID,
+        idle,
+        form({ legal_name: "Ayesha Khan", agree: "on", client_email: "ayesha@clinic.example" }),
+      ),
+    ).rejects.toThrow(/NEXT_REDIRECT/);
+    expect(mem.getContactEmail()).toBe("ayesha@clinic.example");
+  });
+
   it("without the checkbox: a plain error and nothing saved", async () => {
     expect(await actions.startConsentAction(BRAND_ID, idle, form({ legal_name: "Ayesha Khan" }))).toEqual({
       status: "error",

@@ -27,6 +27,10 @@ export function StartConsentForm({ action }: { action: (prev: ActionState, formD
         <Label htmlFor="legal_name">Full legal name of the person in the clip</Label>
         <Input id="legal_name" name="legal_name" required minLength={3} maxLength={120} autoComplete="off" />
       </div>
+      <div className="space-y-1">
+        <Label htmlFor="client_email">Client&apos;s own email (HeyGen&apos;s consent link goes here; optional)</Label>
+        <Input id="client_email" name="client_email" type="email" maxLength={254} autoComplete="off" />
+      </div>
       <label className="flex items-start gap-2 text-sm">
         <input type="checkbox" name="agree" required className="mt-1" />
         <span>

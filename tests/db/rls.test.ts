@@ -325,6 +325,21 @@ describe("avatars (Phase 3 twin creation)", () => {
     });
   });
 
+  it("decision 6: brands.contact_email holds an email or nothing; customers still cannot write it", async () => {
+    await asRole("service_role", null, async () => {
+      await db.query("update public.brands set contact_email = 'client@clinic.example' where id = $1", [BRAND_A]);
+      await expect(db.query("update public.brands set contact_email = 'nope' where id = $1", [BRAND_A])).rejects.toThrow(
+        /check constraint/,
+      );
+      await db.query("update public.brands set contact_email = null where id = $1", [BRAND_A]);
+    });
+    await asUser(USER_A, async () => {
+      await expect(
+        db.query("update public.brands set contact_email = 'x@y.example' where id = $1", [BRAND_A]),
+      ).rejects.toThrow(/permission denied/);
+    });
+  });
+
   it("decision 2: consents.clip_check_status takes only pending/running/done/failed", async () => {
     await asRole("service_role", null, async () => {
       const consent = await db.query<{ id: string; status: string | null }>(

@@ -70,6 +70,19 @@ describe("start consent", () => {
     expect(mem.consents).toHaveLength(0);
   });
 
+  it("decision 6: the client's own email (optional) is saved on the brand; a bad one is refused", async () => {
+    const deps = { store: mem.store, now: NOW };
+    const base = { brandId: BRAND_ID, legalName: "Ayesha Khan", agreed: true, ip: null, userAgent: null };
+    await expect(startConsent({ ...base, clientEmail: "not-an-email" }, deps)).rejects.toThrow(
+      "Type the client's email address, or leave it empty.",
+    );
+    expect(mem.consents).toHaveLength(0);
+    await startConsent({ ...base, clientEmail: "  Ayesha@Clinic.example " }, deps);
+    expect(mem.getContactEmail()).toBe("ayesha@clinic.example");
+    await startConsent({ ...base, clientEmail: "" }, deps);
+    expect(mem.getContactEmail()).toBe("ayesha@clinic.example"); // empty leaves it as it was
+  });
+
   it("New words: fresh words and expiry, and any clip with the old words is dropped", async () => {
     const consent = await started();
     await mem.store.updateConsent(consent.id, { clip_path: "x/y/z.mp4", clip_checks: null });
@@ -240,18 +253,25 @@ describe.skipIf(!hasFfmpeg)("automatic clip checks are saved on the consent", ()
     expect(mem.outbox).toEqual([]);
   });
 
-  it("bad clip: fails with tips, and the reshoot tips 'email' goes to the mock outbox (not sent)", async () => {
+  it("bad clip: fails with tips; decision 6: the reshoot tips 'email' goes to the admins only (mock outbox, not sent)", async () => {
     const { consent, storage } = await withClip("consent-bad.mp4");
-    const result = await checkConsentClip(consent.id, { store: mem.store, storage, claude, fixtureName: "consent-bad.mp4" });
+    mem.setContactEmail("client@clinic.example");
+    const result = await checkConsentClip(consent.id, {
+      store: mem.store,
+      storage,
+      claude,
+      fixtureName: "consent-bad.mp4",
+      adminEmails: ["admin@studio.example"],
+    });
     expect(result.passed).toBe(false);
     expect(mem.outbox).toHaveLength(1);
     expect(mem.outbox[0]).toMatchObject({
       kind: "reshoot_tips",
-      to_email: "owner@example.com",
+      to_email: "admin@studio.example",
       consent_id: consent.id,
       brand_id: BRAND_ID,
       status: "mocked",
-      subject: "Please record your clip again",
+      subject: "Reshoot needed for Dr Ayesha Clinic (forward these tips to the client)",
     });
     expect(mem.outbox[0].body).toContain("Only you should be in the clip.");
     expect(mem.outbox[0].body).toContain("Face a window in daylight");

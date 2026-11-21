@@ -16,11 +16,19 @@ export function createConsentStore(): ConsentStore {
   const db = createAdminClient();
   return {
     async getBrandContact(brandId) {
-      const { data: brand, error } = await db.from("brands").select("id, name, owner_id").eq("id", brandId).maybeSingle();
+      const { data: brand, error } = await db
+        .from("brands")
+        .select("id, name, owner_id, contact_email")
+        .eq("id", brandId)
+        .maybeSingle();
       if (error) fail("load brand", error);
       if (!brand) return null;
       const { data: owner } = await db.from("profiles").select("email").eq("id", brand.owner_id).maybeSingle();
-      return { id: brand.id, name: brand.name, ownerEmail: owner?.email || null };
+      return { id: brand.id, name: brand.name, ownerEmail: owner?.email || null, contactEmail: brand.contact_email ?? null };
+    },
+    async setBrandContactEmail(brandId, email) {
+      const { error } = await db.from("brands").update({ contact_email: email }).eq("id", brandId);
+      if (error) fail("save client email", error);
     },
     async insertConsent(row) {
       const { data, error } = await db.from("consents").insert(row).select().single();

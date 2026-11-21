@@ -3,7 +3,9 @@ import { randomUUID } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { parseAdminEmails } from "@/lib/admin";
 import type { ClaudeDeps } from "@/lib/claude";
+import { reshootRecipients } from "@/lib/email-recipients";
 import type { ClipChecksResult } from "@/lib/clip-checks/evaluate";
 import { runClipChecks } from "@/lib/clip-checks/run";
 import { generateConsentWords, uploadBlockedReason, wordsExpireAt, type RandomInt } from "@/lib/consent-words";
@@ -23,6 +25,8 @@ import { PlainError } from "@/lib/plain-error";
 export { CONSENT_UPLOAD, validateUpload } from "@/lib/consent-upload-rules";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Same shape as the brands.contact_email check in the migration. */
+const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 type StoreDeps = { store: ConsentStore; now?: Date };
 
@@ -33,15 +37,28 @@ async function load(store: ConsentStore, id: string): Promise<ConsentRow> {
 }
 
 export async function startConsent(
-  input: { brandId: string; legalName: string; agreed: boolean; ip: string | null; userAgent: string | null },
+  input: {
+    brandId: string;
+    legalName: string;
+    agreed: boolean;
+    ip: string | null;
+    userAgent: string | null;
+    /** Decision 6: the client's own email for HeyGen's consent link (optional; empty keeps the saved one). */
+    clientEmail?: string;
+  },
   deps: StoreDeps & { random?: RandomInt },
 ): Promise<ConsentRow> {
   const now = deps.now ?? new Date();
   const legalName = input.legalName.trim().replace(/\s+/g, " ");
   if (!input.agreed) throw new PlainError("Tick the box to confirm the person agrees to a digital twin.");
   if (legalName.length < 3 || legalName.length > 120) throw new PlainError("Type the person's full legal name.");
+  const clientEmail = input.clientEmail?.trim().toLowerCase() ?? "";
+  if (clientEmail && (!EMAIL.test(clientEmail) || clientEmail.length > 254)) {
+    throw new PlainError("Type the client's email address, or leave it empty.");
+  }
   const brand = UUID.test(input.brandId) ? await deps.store.getBrandContact(input.brandId) : null;
   if (!brand) throw new PlainError("Client not found.");
+  if (clientEmail) await deps.store.setBrandContactEmail(brand.id, clientEmail);
   return deps.store.insertConsent({
     brand_id: brand.id,
     person_legal_name: legalName,
@@ -121,9 +138,9 @@ export async function clipPlaybackUrl(consent: Pick<ConsentRow, "clip_path">, st
 
 function reshootEmail(brandName: string, tips: string[]): { subject: string; body: string } {
   return {
-    subject: "Please record your clip again",
+    subject: `Reshoot needed for ${brandName} (forward these tips to the client)`,
     body: [
-      `Hi ${brandName},`,
+      `The consent clip for ${brandName} needs a reshoot. Suggested message for the client:`,
       "",
       "Thanks for your clip. Our checks found a few things to fix before we can make your twin:",
       "",
@@ -164,6 +181,8 @@ export async function checkConsentClip(
     claude?: Partial<ClaudeDeps>;
     /** Mock/test only: the fixture name that picks the mock face answer. */
     fixtureName?: string;
+    /** Who gets reshoot tips. Defaults to ADMIN_EMAILS. */
+    adminEmails?: string[];
   },
 ): Promise<ClipChecksResult> {
   const consent = await load(deps.store, consentId);
@@ -209,14 +228,17 @@ export async function checkConsentClip(
   if (!(await deps.store.saveClipChecks(consentId, clipPath, result))) {
     throw new PlainError(CLIP_CHANGED);
   }
-  if (!result.passed && brand.ownerEmail) {
-    await deps.store.insertOutbox({
-      brand_id: brand.id,
-      consent_id: consent.id,
-      to_email: brand.ownerEmail,
-      kind: "reshoot_tips",
-      ...reshootEmail(brand.name, result.tips),
-    });
+  // Decision 6: reshoot tips go to the admins only; they talk to the client.
+  if (!result.passed) {
+    for (const to of reshootRecipients(deps.adminEmails ?? parseAdminEmails(process.env.ADMIN_EMAILS))) {
+      await deps.store.insertOutbox({
+        brand_id: brand.id,
+        consent_id: consent.id,
+        to_email: to,
+        kind: "reshoot_tips",
+        ...reshootEmail(brand.name, result.tips),
+      });
+    }
   }
   return result;
 }

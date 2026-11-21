@@ -13,9 +13,13 @@ beforeEach(() => {
   mem = memoryConsentStore();
   clips = memoryClipStorage();
   spend = memorySpendStore({ caps: { create_twin: 100 } });
+  vi.stubEnv("ADMIN_EMAILS", "Admin@Studio.example");
   vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network is not allowed in tests"));
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
 
 /** A consent with a passing clip, in the given admin status. */
 async function consentWith(status: "pending" | "approved" | "rejected") {
@@ -35,6 +39,7 @@ async function consentWith(status: "pending" | "approved" | "rejected") {
 }
 
 const mockHeygen = () => createHeygenClient({ mock: true, apiKey: "dummy" });
+const deps = () => ({ store: mem.store, storage: clips.storage, heygen: mockHeygen(), spend: spend.store });
 
 /** Wraps a client so every HeyGen helper call is counted. */
 function counted(client: HeygenClient) {
@@ -96,15 +101,26 @@ describe("createTwin (mock HeyGen)", () => {
       heygen_consent_status: "pending",
       heygen_consent_url: "https://consent.example.invalid/mock/group_mock_0001",
     });
-    expect(mem.outbox).toHaveLength(1);
-    expect(mem.outbox[0]).toMatchObject({
-      kind: "consent_link",
-      to_email: "owner@example.com",
-      status: "mocked",
-      subject: "Please confirm your consent on HeyGen (within 24 hours)",
-    });
-    expect(mem.outbox[0].body).toContain("https://consent.example.invalid/mock/group_mock_0001");
+    // Decision 6: the client (brand owner here, not an admin) + a copy for the admin.
+    expect(mem.outbox.map((o) => [o.to_email, o.kind, o.status, o.subject])).toEqual([
+      ["owner@example.com", "consent_link", "mocked", "Please confirm your consent on HeyGen (within 24 hours)"],
+      ["admin@studio.example", "consent_link", "mocked", "[Copy] Please confirm your consent on HeyGen (within 24 hours)"],
+    ]);
+    for (const row of mem.outbox) expect(row.body).toContain("https://consent.example.invalid/mock/group_mock_0001");
     expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it("decision 6: the brand's contact email is the client; an admin-owned brand without one gets admin copies only", async () => {
+    const consent = await consentWith("approved");
+    mem.setContactEmail("Ayesha@Clinic.example");
+    await createTwin(consent.id, { ...deps(), adminEmails: ["owner@example.com"] });
+    expect(mem.outbox.map((o) => o.to_email)).toEqual(["ayesha@clinic.example", "owner@example.com"]);
+
+    const mem2 = memoryConsentStore();
+    mem = mem2;
+    const second = await consentWith("approved");
+    await createTwin(second.id, { ...deps(), adminEmails: ["owner@example.com"] }); // owner IS the admin
+    expect(mem2.outbox.map((o) => [o.to_email, o.subject.startsWith("[Copy]")])).toEqual([["owner@example.com", true]]);
   });
 
   it("running twice (a retry) makes no second twin and no second email", async () => {
@@ -116,7 +132,7 @@ describe("createTwin (mock HeyGen)", () => {
     expect(calls.filter((c) => c === "createDigitalTwin")).toHaveLength(1);
     expect(calls.filter((c) => c === "startConsent")).toHaveLength(1);
     expect(mem.avatars).toHaveLength(1);
-    expect(mem.outbox).toHaveLength(1);
+    expect(mem.outbox).toHaveLength(2); // client + admin copy, once
   });
 
   it("SF2: twin created on HeyGen but saving its id fails → the retry does NOT create a second twin", async () => {

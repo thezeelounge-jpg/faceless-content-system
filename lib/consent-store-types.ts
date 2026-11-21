@@ -80,10 +80,13 @@ export type OutboxRow = {
   body: string;
 };
 
-export type BrandContact = { id: string; name: string; ownerEmail: string | null };
+/** ownerEmail = the brand owner's login email; contactEmail = brands.contact_email (the client, decision 6). */
+export type BrandContact = { id: string; name: string; ownerEmail: string | null; contactEmail: string | null };
 
 export interface ConsentStore {
   getBrandContact(brandId: string): Promise<BrandContact | null>;
+  /** Decision 6: the client's own email on the brand (done-for-you brands are admin-owned). */
+  setBrandContactEmail(brandId: string, email: string): Promise<void>;
   insertConsent(row: NewConsentRow): Promise<ConsentRow>;
   getConsent(id: string): Promise<ConsentRow | null>;
   /** With onlyIfPending, changes nothing (returns null) unless admin_status is still pending. */

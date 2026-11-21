@@ -33,7 +33,11 @@ const FAILED = "Something went wrong. Please try again in a minute.";
 const page = (consentId: string) => `/admin/consents/${consentId}`;
 
 const noteSchema = z.object({ note: z.string().max(500, "Keep the note under 500 characters.").default("") });
-const startSchema = z.object({ legal_name: z.string().default(""), agree: z.literal("on").optional() });
+const startSchema = z.object({
+  legal_name: z.string().default(""),
+  agree: z.literal("on").optional(),
+  client_email: z.string().max(254).default(""),
+});
 const fileSchema = z.object({
   name: z.string().min(1).max(300),
   type: z.string().max(100),
@@ -59,13 +63,24 @@ function failure(label: string, context: Record<string, unknown>, error: unknown
 /** Admin → client → Consent: legal name + checkbox. Opens the consent page. */
 export async function startConsentAction(brandId: string, _prev: ActionState, formData: FormData): Promise<ActionState> {
   await requireAdmin();
-  const parsed = startSchema.safeParse({ legal_name: text(formData, "legal_name"), agree: text(formData, "agree") });
+  const parsed = startSchema.safeParse({
+    legal_name: text(formData, "legal_name"),
+    agree: text(formData, "agree"),
+    client_email: text(formData, "client_email"),
+  });
   if (!parsed.success) return { status: "error", message: "Tick the box to confirm the person agrees to a digital twin." };
   let consentId: string;
   try {
     const { ip, userAgent } = await requestInfo();
     const consent = await startConsent(
-      { brandId, legalName: parsed.data.legal_name, agreed: parsed.data.agree === "on", ip, userAgent },
+      {
+        brandId,
+        legalName: parsed.data.legal_name,
+        agreed: parsed.data.agree === "on",
+        ip,
+        userAgent,
+        clientEmail: parsed.data.client_email,
+      },
       { store: createConsentStore() },
     );
     consentId = consent.id;

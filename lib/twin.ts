@@ -1,6 +1,8 @@
 import "server-only";
 import path from "node:path";
+import { parseAdminEmails } from "@/lib/admin";
 import { redact } from "@/lib/admin-errors";
+import { clientEmailFor, consentLinkRecipients } from "@/lib/email-recipients";
 import type { AvatarRow, AvatarStatus, ClipStorage, ConsentStore } from "@/lib/consent-store-types";
 import { HeygenError, type CreatedTwin, type HeygenClient, type HeygenErrorCode } from "@/lib/heygen";
 import { SpendGuardError, withHeygenSpend, type SpendStore } from "@/lib/heygen-spend";
@@ -69,7 +71,7 @@ function consentEmail(brandName: string, url: string): { subject: string; body: 
  */
 export async function createTwin(
   consentId: string,
-  deps: TwinDeps & { storage: ClipStorage; spend: SpendStore },
+  deps: TwinDeps & { storage: ClipStorage; spend: SpendStore; adminEmails?: string[] },
 ): Promise<AvatarRow> {
   const consent = await deps.store.getConsent(consentId);
   if (!consent) throw new PlainError("Consent not found.");
@@ -130,14 +132,20 @@ export async function createTwin(
       consent.heygen_consent_url = started.consentUrl;
     }
 
-    if (consent.heygen_consent_url && brand.ownerEmail && !(await deps.store.hasOutbox(consent.id, "consent_link"))) {
-      await deps.store.insertOutbox({
-        brand_id: brand.id,
-        consent_id: consent.id,
-        to_email: brand.ownerEmail,
-        kind: "consent_link",
-        ...consentEmail(brand.name, consent.heygen_consent_url),
-      });
+    // Decision 6: the client's own email + a copy for each admin (mock outbox only).
+    if (consent.heygen_consent_url && !(await deps.store.hasOutbox(consent.id, "consent_link"))) {
+      const admins = deps.adminEmails ?? parseAdminEmails(process.env.ADMIN_EMAILS);
+      const email = consentEmail(brand.name, consent.heygen_consent_url);
+      for (const { to, copy } of consentLinkRecipients(clientEmailFor(brand, admins), admins)) {
+        await deps.store.insertOutbox({
+          brand_id: brand.id,
+          consent_id: consent.id,
+          to_email: to,
+          kind: "consent_link",
+          subject: copy ? `[Copy] ${email.subject}` : email.subject,
+          body: email.body,
+        });
+      }
     }
 
     return (await deps.store.updateAvatar(avatar.id, { status: "consent_pending", error: null })) ?? avatar;
