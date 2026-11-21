@@ -1,0 +1,158 @@
+// Runs our real migration on an in-memory Postgres (PGlite) with small stand-ins
+// for Supabase's auth schema and roles, then proves the access rules work:
+// user A can never see user B's data, and customers can't write anything.
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { PGlite } from "@electric-sql/pglite";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+const MIGRATION = readFileSync(
+  path.resolve(process.cwd(), "supabase/migrations/20261120000000_initial_schema.sql"),
+  "utf8",
+);
+
+// Minimal stand-ins for what Supabase provides in every project.
+const SUPABASE_STUBS = `
+  create schema auth;
+  create table auth.users (
+    id uuid primary key,
+    email text,
+    raw_user_meta_data jsonb not null default '{}'::jsonb
+  );
+  create function auth.uid() returns uuid language sql stable as $$
+    select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid
+  $$;
+  create role anon nologin;
+  create role authenticated nologin;
+  create role service_role nologin bypassrls;
+  grant usage on schema public to anon, authenticated, service_role;
+  grant usage on schema auth to anon, authenticated, service_role;
+  grant execute on function auth.uid() to anon, authenticated, service_role;
+`;
+
+const USER_A = "00000000-0000-0000-0000-00000000000a";
+const USER_B = "00000000-0000-0000-0000-00000000000b";
+const BRAND_A = "10000000-0000-0000-0000-00000000000a";
+const BRAND_B = "10000000-0000-0000-0000-00000000000b";
+const POST_A = "20000000-0000-0000-0000-00000000000a";
+const POST_B = "20000000-0000-0000-0000-00000000000b";
+
+let db: PGlite;
+
+async function asRole<T>(role: "authenticated" | "anon" | "service_role", userId: string | null, fn: () => Promise<T>) {
+  await db.exec(`set role ${role}; select set_config('request.jwt.claim.sub', '${userId ?? ""}', false);`);
+  try {
+    return await fn();
+  } finally {
+    await db.exec(`reset role; select set_config('request.jwt.claim.sub', '', false);`);
+  }
+}
+
+const asUser = <T>(userId: string, fn: () => Promise<T>) => asRole("authenticated", userId, fn);
+
+async function names(sql: string): Promise<string[]> {
+  const result = await db.query<{ name: string }>(sql);
+  return result.rows.map((row) => row.name).sort();
+}
+
+beforeAll(async () => {
+  db = await PGlite.create();
+  await db.exec(SUPABASE_STUBS);
+  await db.exec(MIGRATION);
+
+  // Two sign-ups, each with a brand, a post, a script and an internal QA report.
+  await db.exec(`
+    insert into auth.users (id, email, raw_user_meta_data) values
+      ('${USER_A}', 'a@example.com', '{"full_name": "User A"}'),
+      ('${USER_B}', 'b@example.com', '{}');
+    insert into public.brands (id, owner_id, name) values
+      ('${BRAND_A}', '${USER_A}', 'Brand A'),
+      ('${BRAND_B}', '${USER_B}', 'Brand B');
+    insert into public.posts (id, brand_id, scheduled_for, title) values
+      ('${POST_A}', '${BRAND_A}', now(), 'Post A'),
+      ('${POST_B}', '${BRAND_B}', now(), 'Post B');
+    insert into public.scripts (post_id, display_text) values
+      ('${POST_A}', 'Script A'),
+      ('${POST_B}', 'Script B');
+    insert into public.qa_reports (script_id, gate, passed)
+      select id, 'script', true from public.scripts;
+  `);
+}, 60_000);
+
+afterAll(async () => {
+  await db?.close();
+});
+
+describe("database setup", () => {
+  it("creates a profile automatically on sign-up", async () => {
+    const result = await db.query<{ id: string; email: string; full_name: string | null; role: string }>(
+      "select id, email, full_name, role from public.profiles order by email",
+    );
+    expect(result.rows).toEqual([
+      { id: USER_A, email: "a@example.com", full_name: "User A", role: "customer" },
+      { id: USER_B, email: "b@example.com", full_name: null, role: "customer" },
+    ]);
+  });
+
+  it("seeds the safety settings", async () => {
+    const result = await db.query<{ key: string }>("select key from public.app_settings order by key");
+    expect(result.rows.map((row) => row.key)).toEqual(["daily_spend_cap_usd", "ramadan", "renders_paused"]);
+  });
+
+  it("rejects values outside the allowed lists", async () => {
+    await expect(
+      db.exec(`insert into public.brands (owner_id, name, posts_per_week) values ('${USER_A}', 'Bad', 20)`),
+    ).rejects.toThrow(/check constraint/);
+  });
+});
+
+describe("customers only see their own rows", () => {
+  it("user A sees only user A's profile, brand, post and script", async () => {
+    await asUser(USER_A, async () => {
+      const profiles = await db.query<{ email: string }>("select email from public.profiles");
+      expect(profiles.rows).toEqual([{ email: "a@example.com" }]);
+      expect(await names("select name from public.brands")).toEqual(["Brand A"]);
+      expect(await names("select title as name from public.posts")).toEqual(["Post A"]);
+      expect(await names("select display_text as name from public.scripts")).toEqual(["Script A"]);
+    });
+  });
+
+  it("user B sees only user B's brand", async () => {
+    await asUser(USER_B, async () => {
+      expect(await names("select name from public.brands")).toEqual(["Brand B"]);
+    });
+  });
+
+  it("customers cannot insert, update or delete anything", async () => {
+    await asUser(USER_A, async () => {
+      await expect(
+        db.exec(`insert into public.brands (owner_id, name) values ('${USER_A}', 'Sneaky')`),
+      ).rejects.toThrow(/permission denied/);
+      await expect(db.exec(`update public.profiles set role = 'admin'`)).rejects.toThrow(/permission denied/);
+      await expect(db.exec(`delete from public.posts`)).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("customers cannot read internal tables", async () => {
+    await asUser(USER_A, async () => {
+      for (const table of ["qa_reports", "webhook_events", "ai_usage", "provider_usage", "app_settings"]) {
+        await expect(db.query(`select * from public.${table}`)).rejects.toThrow(/permission denied/);
+      }
+    });
+  });
+
+  it("logged-out visitors cannot read anything", async () => {
+    await asRole("anon", null, async () => {
+      await expect(db.query("select * from public.profiles")).rejects.toThrow(/permission denied/);
+      await expect(db.query("select * from public.brands")).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("server code (secret key) sees everything", async () => {
+    await asRole("service_role", null, async () => {
+      expect(await names("select name from public.brands")).toEqual(["Brand A", "Brand B"]);
+      const reports = await db.query("select * from public.qa_reports");
+      expect(reports.rows).toHaveLength(2);
+    });
+  });
+});
