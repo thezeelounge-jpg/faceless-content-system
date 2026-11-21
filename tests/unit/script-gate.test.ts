@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { ScriptQaOutput } from "@/lib/ai-schemas";
-import { runClaudeTask, type ClaudeContext, type ClaudeTaskName, type TaskOutput } from "@/lib/claude";
+import { ClaudeError, runClaudeTask, type ClaudeContext, type ClaudeTaskName, type TaskOutput } from "@/lib/claude";
 import type { MockScenario } from "@/lib/claude-mocks";
+import { canRunChecks } from "@/lib/qa/can-run-checks";
 import { SCRIPT_QA } from "@/lib/qa/config";
 import {
   postStatusAfterChecks,
@@ -167,6 +168,59 @@ describe("Gate 1: fail → rewrite → fail goes to the team queue, never a seco
     expect(post.status).toBe("needs_you");
     expect(post.status_reason).toMatch(/^We couldn't get this script right on our own/);
     expect(post.status_reason).not.toMatch(/_|second|credit|engine|QA/);
+  });
+
+  it("a rewrite that throws leaves version 1 pending and the post untouched, and a retry then finishes", async () => {
+    const draft = await firstDraft(store, "always_bad");
+    const { run: bad } = mockRunner("always_bad");
+    const busy = new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes.");
+    const throwingRewrite = (async (task: ClaudeTaskName, ctx: ClaudeContext<ClaudeTaskName>) => {
+      if (task === "script_rewrite") throw busy;
+      return bad(task, ctx as never);
+    }) as typeof bad;
+
+    await expect(
+      runScriptChecks({ brand: BRAND, postId: POST.id, script: draft, maxSeconds: MAX, run: throwingRewrite, store }),
+    ).rejects.toBe(busy);
+    expect(store.scripts.map((s) => [s.version, s.qa_status])).toEqual([[1, "pending"]]);
+    expect(store.posts.has(POST.id)).toBe(false);
+    expect(canRunChecks(store.scripts, { status: "scripting" })).toBe(true);
+
+    // "Run checks" again: this time the rewrite works, fails again and goes to the team queue.
+    const { run, calls } = mockRunner("always_bad");
+    const retry = await runScriptChecks({ brand: BRAND, postId: POST.id, script: store.scripts[0], maxSeconds: MAX, run, store });
+    expect(retry.outcome).toBe("team_review");
+    expect(calls).toEqual(["script_qa", "script_rewrite", "script_qa"]);
+    expect(store.scripts.map((s) => [s.version, s.qa_status])).toEqual([
+      [1, "failed"],
+      [2, "team_review"],
+    ]);
+    expect(store.posts.get(POST.id)?.status).toBe("team_review");
+    expect(canRunChecks(store.scripts, { status: "team_review" })).toBe(false);
+  });
+
+  it("if checking the rewrite throws, version 2 stays pending and a retry checks it without another rewrite", async () => {
+    const draft = await firstDraft(store, "bad_first_draft");
+    const { run: mock } = mockRunner("bad_first_draft");
+    let qaCalls = 0;
+    const flaky = (async (task: ClaudeTaskName, ctx: ClaudeContext<ClaudeTaskName>) => {
+      if (task === "script_qa" && qaCalls++ === 1) throw new ClaudeError("busy", "Claude is busy right now.");
+      return mock(task, ctx as never);
+    }) as typeof mock;
+    await expect(
+      runScriptChecks({ brand: BRAND, postId: POST.id, script: draft, maxSeconds: MAX, run: flaky, store }),
+    ).rejects.toThrow(/busy/);
+    expect(store.scripts.map((s) => [s.version, s.qa_status])).toEqual([
+      [1, "failed"],
+      [2, "pending"],
+    ]);
+    expect(canRunChecks(store.scripts, { status: "scripting" })).toBe(true);
+
+    const { run, calls } = mockRunner("bad_first_draft");
+    const retry = await runScriptChecks({ brand: BRAND, postId: POST.id, script: store.scripts[1], maxSeconds: MAX, run, store });
+    expect(calls).not.toContain("script_rewrite");
+    expect(retry.outcome).toBe("script_review");
+    expect(store.scripts.map((s) => s.qa_status)).toEqual(["failed", "passed"]);
   });
 
   it("a pending version 2 (already a rewrite) is checked but never rewritten again", async () => {

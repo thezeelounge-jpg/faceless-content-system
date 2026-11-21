@@ -103,18 +103,49 @@ export async function saveFirstScript(row: NewScriptRow): Promise<string> {
   return (data as { id: string }).id;
 }
 
+/** Ids come from the browser: anything that isn't a UUID is "not found", without asking the database. */
+export function isUuid(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
 const SCRIPT_COLUMNS =
   "id, post_id, version, est_seconds, qa_status, spoken_text, hook, body, cta, display_text, captions, hashtags, broll_keywords, edit_plan";
 
-/** A script and its post, for "Run checks". */
-export async function getScriptForChecks(scriptId: string): Promise<{ script: StoredScript; post: PostRow } | null> {
-  if (!/^[0-9a-f-]{36}$/i.test(scriptId)) return null;
-  const { data, error } = await createAdminClient().from("scripts").select(SCRIPT_COLUMNS).eq("id", scriptId).maybeSingle();
+export type ScriptVersionRow = Pick<StoredScript, "id" | "version" | "qa_status" | "spoken_text">;
+
+/** A script, its post and every version of the post's script, for "Run checks". */
+export async function getScriptForChecks(
+  scriptId: string,
+): Promise<{ script: StoredScript; post: PostRow; versions: ScriptVersionRow[] } | null> {
+  if (!isUuid(scriptId)) return null;
+  const db = createAdminClient();
+  const { data, error } = await db.from("scripts").select(SCRIPT_COLUMNS).eq("id", scriptId).maybeSingle();
   if (error) throw new Error(`Could not load script: ${error.message}`);
   if (!data) return null;
   const script = { ...(data as unknown as StoredScript), est_seconds: Number((data as { est_seconds: unknown }).est_seconds) };
   const post = await getPost(script.post_id);
-  return post ? { script, post } : null;
+  if (!post) return null;
+  const { data: versions, error: versionsError } = await db
+    .from("scripts")
+    .select("id, version, qa_status, spoken_text")
+    .eq("post_id", post.id);
+  if (versionsError) throw new Error(`Could not load script versions: ${versionsError.message}`);
+  return { script, post, versions: (versions ?? []) as ScriptVersionRow[] };
+}
+
+/**
+ * Saves one plain sentence on a post that is still being scripted, so the
+ * problem shows on the row (status unchanged). The QA gates clear it when
+ * they move the post on.
+ */
+export async function savePostProblem(postId: string, reason: string): Promise<void> {
+  if (!isUuid(postId)) return;
+  const { error } = await createAdminClient()
+    .from("posts")
+    .update({ status_reason: reason })
+    .eq("id", postId)
+    .in("status", ["planned", "scripting"]);
+  if (error) throw new Error(`Could not save the post's problem: ${error.message}`);
 }
 
 export async function getPost(postId: string): Promise<PostRow | null> {

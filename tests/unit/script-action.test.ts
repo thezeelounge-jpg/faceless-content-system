@@ -44,6 +44,7 @@ const getPost = vi.fn();
 const getOwnerPlan = vi.fn(async (_ownerId: string) => null as string | null);
 const saveFirstScript = vi.fn(async (_row: Record<string, unknown>): Promise<string> => "");
 const getScriptForChecks = vi.fn();
+const savePostProblem = vi.fn(async (_postId: string, _reason: string) => {});
 const runClaudeTask = vi.fn();
 let store: MemoryStore;
 
@@ -55,6 +56,7 @@ vi.mock("@/lib/posts", () => ({
   getOwnerPlan: (id: string) => getOwnerPlan(id),
   saveFirstScript: (row: Record<string, unknown>) => saveFirstScript(row),
   getScriptForChecks: (id: string) => getScriptForChecks(id),
+  savePostProblem: (id: string, reason: string) => savePostProblem(id, reason),
 }));
 vi.mock("@/lib/qa/store", () => ({ createQaStore: () => store }));
 vi.mock("@/lib/claude", async (importActual) => {
@@ -77,6 +79,7 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(async (row) => store.insertScriptVersion({ ...row, spoken_text: null } as never));
   getScriptForChecks.mockReset().mockResolvedValue(null);
+  savePostProblem.mockReset().mockResolvedValue(undefined);
   runClaudeTask.mockReset().mockImplementation((task, ctx) => realRun(task, ctx, { mock: true, logUsage: async () => {} }));
 });
 
@@ -173,6 +176,58 @@ describe("Write script", () => {
     expect(store.scripts).toHaveLength(1);
     expect(store.scripts[0].qa_status).toBe("pending");
   });
+
+  it("saves a plain reason on the post when the checks didn't finish (no provider text)", async () => {
+    runClaudeTask.mockImplementation((task, ctx) =>
+      task === "script_qa"
+        ? Promise.reject(new ClaudeError("failed", "Claude call failed (400). See server logs.", { cause: new Error("invalid_request_error sk-ant-fake") }))
+        : realRun(task, ctx, { mock: true, logUsage: async () => {} }),
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    await writeScript(POST_ID, idle);
+    log.mockRestore();
+    expect(savePostProblem).toHaveBeenCalledWith(
+      POST_ID,
+      "Script written, but the checks didn't finish. Press “Run checks” to try again.",
+    );
+  });
+
+  it("saves a plain reason on the post when writing failed", async () => {
+    runClaudeTask.mockRejectedValue(new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes."));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    await writeScript(POST_ID, idle);
+    log.mockRestore();
+    expect(savePostProblem).toHaveBeenCalledWith(POST_ID, "Couldn't write the script. Press “Write script” to try again.");
+  });
+
+  it("still answers plainly if saving the reason fails too", async () => {
+    runClaudeTask.mockRejectedValue(new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes."));
+    savePostProblem.mockRejectedValue(new Error("db down"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const state = await writeScript(POST_ID, idle);
+    log.mockRestore();
+    expect(state).toEqual({ status: "error", message: "Claude is busy right now. Try again in a few minutes." });
+  });
+
+  it("a rewrite that throws leaves the script retryable, and Run checks then finishes it", async () => {
+    const bad = (task: string, ctx: unknown) => realRun(task as never, ctx as never, { mock: true, mockScenario: "always_bad", logUsage: async () => {} });
+    runClaudeTask.mockImplementation((task, ctx) =>
+      task === "script_rewrite" ? Promise.reject(new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes.")) : bad(task, ctx),
+    );
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const first = await writeScript(POST_ID, idle);
+    log.mockRestore();
+    expect(first.message).toMatch(/Press “Run checks” to try again\.$/);
+    expect(store.scripts.map((s) => s.qa_status)).toEqual(["pending"]);
+
+    // The page shows "Run checks" for this post, and the action accepts it.
+    runClaudeTask.mockImplementation(bad);
+    getScriptForChecks.mockResolvedValue({ script: store.scripts[0], post: { ...POST, status: "scripting" }, versions: store.scripts });
+    const retry = await checkScript(store.scripts[0].id, idle);
+    expect(retry).toEqual({ status: "ok", message: "It failed the checks after one rewrite and is in the team queue." });
+    expect(store.scripts.map((s) => s.qa_status)).toEqual(["failed", "team_review"]);
+    expect(store.posts.get(POST_ID)?.status).toBe("team_review");
+  });
 });
 
 describe("Run checks", () => {
@@ -195,6 +250,7 @@ describe("Run checks", () => {
     },
     post: { ...POST, status: "scripting" },
   });
+  const withVersions = (found: ReturnType<typeof pending>) => ({ ...found, versions: [found.script] });
 
   it("checks admin before anything else", async () => {
     requireAdmin.mockRejectedValue(new Error("NEXT_NOT_FOUND"));
@@ -211,7 +267,7 @@ describe("Run checks", () => {
     const found = pending();
     await store.insertScriptVersion(found.script as never);
     found.script.id = store.scripts[0].id;
-    getScriptForChecks.mockResolvedValue(found);
+    getScriptForChecks.mockResolvedValue(withVersions(found));
     const state = await checkScript(found.script.id, idle);
     expect(state).toEqual({ status: "ok", message: "Checked: ready for script review." });
     expect(store.reports.map((r) => r.gate)).toEqual(["script", "pronunciation_prep"]);
@@ -219,8 +275,37 @@ describe("Run checks", () => {
 
   it("refuses a script that was already checked", async () => {
     const found = pending();
-    getScriptForChecks.mockResolvedValue({ ...found, script: { ...found.script, qa_status: "passed", spoken_text: "x" } });
+    const done = { ...found.script, qa_status: "passed", spoken_text: "x" };
+    getScriptForChecks.mockResolvedValue({ ...found, script: done, versions: [done] });
     expect(await checkScript("script-9", idle)).toEqual({ status: "error", message: "This script has already been checked." });
     expect(runClaudeTask).not.toHaveBeenCalled();
+  });
+
+  it("uses the same rule as the page: refuses an older version when a newer one exists", async () => {
+    const found = pending();
+    const newer = { ...found.script, id: "script-10", version: 2 };
+    getScriptForChecks.mockResolvedValue({ ...found, versions: [found.script, newer] });
+    expect(await checkScript("script-9", idle)).toEqual({ status: "error", message: "This script has already been checked." });
+    expect(runClaudeTask).not.toHaveBeenCalled();
+  });
+
+  it("uses the same rule as the page: refuses once the post has moved on", async () => {
+    const found = pending();
+    getScriptForChecks.mockResolvedValue({ ...withVersions(found), post: { ...POST, status: "approved" } });
+    expect(await checkScript("script-9", idle)).toEqual({ status: "error", message: "This script has already been checked." });
+    expect(runClaudeTask).not.toHaveBeenCalled();
+  });
+
+  it("saves a plain reason on the post when the checks fail to run", async () => {
+    const found = pending();
+    await store.insertScriptVersion(found.script as never);
+    found.script.id = store.scripts[0].id;
+    getScriptForChecks.mockResolvedValue(withVersions(found));
+    runClaudeTask.mockRejectedValue(new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes."));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const state = await checkScript(found.script.id, idle);
+    log.mockRestore();
+    expect(state).toEqual({ status: "error", message: "Claude is busy right now. Try again in a few minutes." });
+    expect(savePostProblem).toHaveBeenCalledWith(POST_ID, "The checks didn't finish. Press “Run checks” to try again.");
   });
 });

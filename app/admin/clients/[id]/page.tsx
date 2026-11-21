@@ -18,6 +18,7 @@ import { PlanGrid, PlanList } from "@/components/admin/plan-view";
 import { getBrand, listBrandVersions } from "@/lib/brands";
 import { timezoneFor } from "@/lib/posting-times";
 import { listPosts } from "@/lib/posts";
+import { canRunChecks, latestScript } from "@/lib/qa/can-run-checks";
 import { checkScript, generateBrandProfile, planNextFourWeeks, saveProfileEdit, writeScript } from "./actions";
 
 export default function BrandPage({ params }: PageProps<"/admin/clients/[id]">) {
@@ -152,10 +153,9 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
                       />
                     );
                   }
-                  const latest = [...post.scripts].sort((a, b) => b.version - a.version)[0];
-                  const needsChecks =
-                    latest && (latest.qa_status === "pending" || (latest.qa_status === "passed" && !latest.spoken_text));
-                  return needsChecks ? (
+                  // Same rule as the checkScript action (lib/qa/can-run-checks.ts).
+                  const latest = latestScript(post.scripts);
+                  return latest && canRunChecks(post.scripts, post) ? (
                     <ActionButton
                       action={checkScript.bind(null, latest.id)}
                       label="Run checks"

@@ -174,7 +174,9 @@ export async function runGate1(args: GateArgs): Promise<Gate1Result> {
   const rewritesLeft = SCRIPT_QA.max_rewrites - (args.script.version - 1);
   if (rewritesLeft <= 0) return { passed: false, script: args.script, issues: first.issues };
 
-  await args.store.updateScript(args.script.id, { qa_status: "failed" });
+  // Version 1 stays "pending" until the rewrite is saved: if the rewrite
+  // throws (busy, timeout, bad output), "Run checks" can simply try again
+  // (lib/qa/can-run-checks.ts).
   const wps = Number(args.brand.words_per_second);
   const rewritten = await args.run("script_rewrite", {
     brand: args.brand,
@@ -194,6 +196,8 @@ export async function runGate1(args: GateArgs): Promise<Gate1Result> {
     spoken_text: null,
   };
   const id = await args.store.insertScriptVersion(next);
+  // Now the pending rewrite is the latest version, so marking this one failed can't strand the post.
+  await args.store.updateScript(args.script.id, { qa_status: "failed" });
   const fixed = [...new Set(first.issues.filter((i) => i.severity === "hard").map((i) => i.code))];
   const autoFix = `Rewrote once (version ${next.version}) to fix: ${fixed.join(", ")}.`;
   const second = await checkOnce(args, { ...next, id }, autoFix);

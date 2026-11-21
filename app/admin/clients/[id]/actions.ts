@@ -17,7 +17,9 @@ import {
   lastPlannedDate,
   loadPlanSettings,
   saveFirstScript,
+  savePostProblem,
 } from "@/lib/posts";
+import { canRunChecks, latestScript } from "@/lib/qa/can-run-checks";
 import { runScriptChecks, type PostStatus } from "@/lib/qa/script-pipeline";
 import { createQaStore } from "@/lib/qa/store";
 import { maxSecondsFor, writeScriptForPost } from "@/lib/scripts";
@@ -113,6 +115,7 @@ export async function writeScript(postId: string, _prev: ActionState): Promise<A
     return { status: "ok", message: `${written} ${CHECK_OUTCOME[checks.outcome]}` };
   } catch (error) {
     logAdminError(written ? "[admin] script checks failed" : "[admin] write script failed", { postId }, error);
+    await saveProblem(postId, written ? CHECKS_UNFINISHED_AFTER_WRITE : WRITE_FAILED);
     if (written) {
       const why = plainAdminMessage(error, "something went wrong.");
       return { status: "error", message: `Script written, but the checks didn't finish: ${why} Press “Run checks” to try again.` };
@@ -124,15 +127,31 @@ export async function writeScript(postId: string, _prev: ActionState): Promise<A
   }
 }
 
-/** "Run checks": Gates 1 and 2 for a script still pending (or passed but without spoken_text). */
+/** Plain sentences saved on the post (status_reason) when an action stops half-way. Never provider text. */
+const WRITE_FAILED = "Couldn't write the script. Press “Write script” to try again.";
+const CHECKS_UNFINISHED_AFTER_WRITE = "Script written, but the checks didn't finish. Press “Run checks” to try again.";
+const CHECKS_UNFINISHED = "The checks didn't finish. Press “Run checks” to try again.";
+
+/** Saves the problem on the post; if even that fails, only log it (the admin still gets the plain message). */
+async function saveProblem(postId: string, reason: string): Promise<void> {
+  try {
+    await savePostProblem(postId, reason);
+  } catch (error) {
+    logAdminError("[admin] saving the post's problem failed", { postId }, error);
+  }
+}
+
+/** "Run checks": Gates 1 and 2 when canRunChecks says the post's latest script needs them (same rule as the page). */
 export async function checkScript(scriptId: string, _prev: ActionState): Promise<ActionState> {
   await requireAdmin();
+  let postId: string | null = null;
   try {
     const found = await getScriptForChecks(scriptId);
     if (!found) return { status: "error", message: "Script not found." };
-    const { script, post } = found;
-    const runnable = script.qa_status === "pending" || (script.qa_status === "passed" && !script.spoken_text);
+    const { script, post, versions } = found;
+    const runnable = latestScript(versions)?.id === script.id && canRunChecks(versions, post);
     if (!runnable) return { status: "error", message: "This script has already been checked." };
+    postId = post.id;
     const brand = await getBrand(post.brand_id);
     if (!brand) return NOT_FOUND;
     const maxSeconds = maxSecondsFor(await getOwnerPlan(brand.owner_id));
@@ -148,6 +167,7 @@ export async function checkScript(scriptId: string, _prev: ActionState): Promise
     return { status: "ok", message: CHECK_OUTCOME[checks.outcome] };
   } catch (error) {
     logAdminError("[admin] script checks failed", { scriptId }, error);
+    if (postId) await saveProblem(postId, CHECKS_UNFINISHED);
     return {
       status: "error",
       message: plainAdminMessage(error, "Couldn't run the checks. Please try again in a minute."),
