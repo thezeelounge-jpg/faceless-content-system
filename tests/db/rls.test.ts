@@ -256,6 +256,68 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
   });
 });
 
+// Phase 3: emails are never sent yet. The consent link and reshoot tips are
+// written to email_outbox (server only), so nothing reaches a real inbox.
+describe("email_outbox (mocked emails, Phase 3)", () => {
+  it("server code can store a mocked email; status is always 'mocked'", async () => {
+    await asRole("service_role", null, async () => {
+      const saved = await db.query<{ status: string; kind: string }>(
+        `insert into public.email_outbox (brand_id, to_email, kind, subject, body)
+         values ('${BRAND_A}', 'a@example.com', 'consent_link', 'Confirm', 'Link') returning status, kind`,
+      );
+      expect(saved.rows).toEqual([{ status: "mocked", kind: "consent_link" }]);
+      await expect(
+        db.exec(`insert into public.email_outbox (to_email, kind, subject, body, status)
+                 values ('a@example.com', 'consent_link', 's', 'b', 'sent')`),
+      ).rejects.toThrow(/check constraint/);
+      await expect(
+        db.exec(`insert into public.email_outbox (to_email, kind, subject, body)
+                 values ('a@example.com', 'newsletter', 's', 'b')`),
+      ).rejects.toThrow(/check constraint/);
+    });
+  });
+
+  it("customers and logged-out visitors cannot read or write it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(db.query("select * from public.email_outbox")).rejects.toThrow(/permission denied/);
+      await expect(
+        db.exec(`insert into public.email_outbox (to_email, kind, subject, body) values ('x@y.z', 'consent_link', 's', 'b')`),
+      ).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(db.query("select * from public.email_outbox")).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  it("RLS is on for email_outbox", async () => {
+    const result = await db.query<{ on: boolean }>(
+      "select relrowsecurity as on from pg_class where oid = 'public.email_outbox'::regclass",
+    );
+    expect(result.rows).toEqual([{ on: true }]);
+  });
+});
+
+describe("avatars (Phase 3 twin creation)", () => {
+  it("one twin per consent: a second avatar for the same consent is refused", async () => {
+    await asRole("service_role", null, async () => {
+      const consent = await db.query<{ id: string }>(
+        `insert into public.consents (brand_id, person_legal_name, checkbox_at, words, words_expire_at)
+         values ('${BRAND_A}', 'Twin Test', now(), '{a,b,c}', now() + interval '30 minutes') returning id`,
+      );
+      const id = consent.rows[0].id;
+      await db.exec(`insert into public.avatars (brand_id, consent_id) values ('${BRAND_A}', '${id}')`);
+      await expect(
+        db.exec(`insert into public.avatars (brand_id, consent_id) values ('${BRAND_A}', '${id}')`),
+      ).rejects.toThrow(/duplicate key/);
+      const saved = await db.query<{ error: string | null }>(
+        `update public.avatars set error = 'HeyGen said no' where consent_id = '${id}' returning error`,
+      );
+      expect(saved.rows).toEqual([{ error: "HeyGen said no" }]);
+      await db.exec(`delete from public.avatars where consent_id = '${id}'; delete from public.consents where id = '${id}';`);
+    });
+  });
+});
+
 // Privilege guard over EVERY table in the public schema, read from pg_tables
 // (so a new table is covered automatically). Customers (authenticated) may only
 // SELECT; anon gets nothing. This catches a stray GRANT even if a default-deny
@@ -263,7 +325,7 @@ describe("isolation for consents, twins, names, videos, usage and payments", () 
 describe("table privileges for anon and authenticated", () => {
   // Allow-list: internal tables. Customers cannot even read these; only server
   // code (service_role) uses them. Any other public table must be customer-readable.
-  const INTERNAL_TABLES = ["ai_usage", "app_settings", "provider_usage", "qa_reports", "webhook_events"];
+  const INTERNAL_TABLES = ["ai_usage", "app_settings", "email_outbox", "provider_usage", "qa_reports", "webhook_events"];
   const PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE"] as const;
 
   async function publicTables(): Promise<string[]> {
