@@ -147,7 +147,7 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
                       <ActionButton
                         action={writeScript.bind(null, post.id)}
                         label="Write script"
-                        pendingLabel="Writing and checking… (a few minutes)"
+                        pendingLabel="Writing… (then checking, a few minutes)"
                         variant="outline"
                         size="sm"
                       />

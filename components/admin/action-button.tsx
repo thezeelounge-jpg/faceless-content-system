@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { actionButtonView } from "@/components/admin/action-button-view";
 import { Button } from "@/components/ui/button";
 import type { ActionState } from "@/lib/plain-error";
 
@@ -21,10 +22,11 @@ export function ActionButton({
   size?: "default" | "sm" | "lg";
 }) {
   const [state, formAction, pending] = useActionState(action, idle);
+  const view = actionButtonView(pending, label, pendingLabel);
   return (
-    <form action={formAction} className="space-y-1">
-      <Button type="submit" variant={variant} size={size} disabled={pending}>
-        {pending ? pendingLabel : label}
+    <form action={formAction} className="space-y-1" aria-busy={view.busy}>
+      <Button type="submit" variant={variant} size={size} disabled={view.disabled}>
+        {view.text}
       </Button>
       {state.status !== "idle" && (
         <p
