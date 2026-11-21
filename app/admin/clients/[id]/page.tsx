@@ -56,6 +56,10 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
       <p className="text-sm">
         <Link href={`/admin/clients/${brand.id}/names`} className="underline">
           How to say names →
+        </Link>{" "}
+        ·{" "}
+        <Link href={`/admin/clients/${brand.id}/consent`} className="underline">
+          Consent clip and twin →
         </Link>
       </p>
 
