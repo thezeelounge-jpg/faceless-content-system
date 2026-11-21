@@ -62,7 +62,7 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 
 ## Commands
 - Bundle secret scan: `npm run build` then `npm run test:bundle` (fails without a build). `npm test` also scans `.next/static` when it exists.
-- `npm run dev` | `npm run lint` | `npm run typecheck` | `npm test` | `npm run test:e2e` (Phase 9) | `npm run eval:scripts` (Phase 2, costs cents, ask first)
+- `npm run dev` | `npm run lint` | `npm run typecheck` | `npm test` | `npm run test:e2e` (Phase 9) | `npm run eval:scripts` (golden set; mock by default, live only when `MOCK_CLAUDE=false`, which costs cents, so ask first)
 - `npm run trigger:dev` (local jobs) | `npm run trigger:deploy` (production jobs)
 - `npm run db:push` (migrations; needs `npx supabase login` and `npx supabase link` once)
 
@@ -74,9 +74,10 @@ Next.js App Router + TypeScript + Tailwind + shadcn/ui on Vercel. Supabase (Post
 - If unsure about an API, read its docs first.
 
 ## Status (update at the end of every session)
-- Phase: 2 (the brain), branch `phase-2-brain`. Part A (items 0-3) and part B1 (items 4-5 + QA fixes) done.
-- Done: MOCK_CLAUDE switch; onboarding form (`components/onboarding/brand-form.tsx`, schema `lib/brand-input.ts`) + Admin → Clients → New client; `lib/claude.ts` (only entry point `runClaudeTask`, stable API, one FAST fallback on 529, mock answers in `lib/claude-mocks.ts`, prices in `lib/ai-prices.ts`, prompts in `/prompts`); brand profile + versions (`save_brand_version` rpc, `lib/brand-versions.ts`, brand page). B1: `lib/plans.ts`; `lib/posting-times.ts` (primary country = first audience country); `lib/planner.ts` (our slots, Claude fills them) + "Plan next 4 weeks"; `lib/scripts.ts` + "Write script" (version 1, qa_status pending, post → scripting); `ai_usage.cost_usd` numeric(12,6); bundle secret scan (`tests/security`); admin errors via `lib/admin-errors.ts` (`PlainError` messages only).
+- Phase: 2 (the brain), branch `phase-2-brain`. **Phase 2 code done in mock mode** (parts A, B1, B2). Waiting for QA review and live checks.
+- Done (A/B1): MOCK_CLAUDE switch; onboarding form (`components/onboarding/brand-form.tsx`, `lib/brand-input.ts`) + New client; `lib/claude.ts` (only entry `runClaudeTask`, stable API, one FAST fallback on 529, mocks in `lib/claude-mocks.ts`, prompts in `/prompts`); brand profile + versions (`save_brand_version` rpc); `lib/plans.ts`; `lib/posting-times.ts`; `lib/planner.ts` + "Plan next 4 weeks"; `lib/scripts.ts` + "Write script"; bundle secret scan; plain admin errors (`PlainError`).
+- Done (B2): Gate 1 = `lib/qa/script-checks.ts` (our checks + Claude rubric; voice is soft) and `lib/qa/script-pipeline.ts` (`runScriptChecks`: Gate 1 with one rewrite → Gate 2; every run writes `qa_reports`). Thresholds in `lib/qa/config.ts`. Post after passing: managed or "review everything" → `script_review`, else `approved`. Failing twice: managed → `team_review`, self-serve → `needs_you` (plain `status_reason`). Gate 2 = `lib/pronunciation/normalise.ts` (rules listed at the top of the file), `dictionary.ts` (approved only), `risky-words.ts` + Claude FAST suggestions saved as `suggested`/`qa`. "Write script" runs both gates; "Run checks" re-runs them. Admin → client → "How to say names" (`/admin/clients/[id]/names`). DB writes go through `lib/qa/store.ts`; tests use `tests/helpers/memory-store.ts`. Mock failing drafts: `runClaudeTask(..., { mockScenario })`. Golden set: `tests/golden/` (5 brands) + sample snapshot `tests/golden/__snapshots__/sample-mock-script.json`. HeyGen glossary finding: `docs/HEYGEN-NOTES.md`.
 - In progress: nothing.
-- Next: Part B2: item 6 Gate 1 (runs on scripts with qa_status pending, one rewrite), 7 Gate 2 (fills spoken_text), 8 golden set.
-- Known issues: Claude prices are estimates.
+- Next: QA review of `phase-2-brain`; then live checks once keys exist (one real script with its QA report; eval:scripts live with OK); then Phase 3 (wire the HeyGen Brand Glossary, see docs/HEYGEN-NOTES.md).
+- Known issues / deferred: brand handover to the customer (Phase 6); one-question-per-screen onboarding wizard (Phase 6); /prompts folder in the Trigger.dev build (Phase 8); "Write script" runs the writer and both gates in one Server Action (move to a Trigger.dev task in Phase 8); QA SHOULD FIX 4 (non-admin 404 test) parked until .env.local exists; Claude price estimates in `lib/ai-prices.ts` still to be checked by Rowan; live checks blocked on the Supabase and Anthropic keys; `eval:scripts` never run live (needs Sunny/Zee OK).
 - QA thresholds last calibrated: never.

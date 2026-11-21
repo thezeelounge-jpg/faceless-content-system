@@ -61,7 +61,9 @@ Steps:
 2. **Normalise for speech:** "Rs 2,999" → "two thousand nine hundred and ninety-nine rupees"; "50%" → "fifty percent"; "yourbrand.com" → "your brand dot com"; strip emojis; acronyms by rule ("CEO" → "C E O", "NASA" as a word).
 3. **Apply the brand dictionary:** replace each approved `pronunciations.written` with `say_as` in spoken_text only.
 4. **Unknown risky words:** Claude (FAST) suggests a phonetic respelling. Save it as `suggested`. Managed brands: the operator approves it in admin. Self-serve: show it in Settings → "How to say names".
-5. Before coding, check the HeyGen docs (llms.txt) for any built-in pronunciation, phoneme or glossary feature. If one exists, use it as well as the respelling.
+5. Before coding, check the HeyGen docs (llms.txt) for any built-in pronunciation, phoneme or glossary feature. If one exists, use it as well as the respelling. (Checked Nov 2026: HeyGen v3 has a Brand Glossary passed as `brand_glossary_id` on video create. See docs/HEYGEN-NOTES.md; it is wired in Phase 3.)
+
+Our reading of Gate 1 "voice match ... soft": a score under 7 is recorded (qa_reports.score plus a soft issue) and passed to any rewrite, but never fails the gate on its own. Gate 2 fails only when spoken_text still has characters a voice can't read; new words are soft notes.
 
 ---
 
