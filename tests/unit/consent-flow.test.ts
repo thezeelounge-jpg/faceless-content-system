@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CONSENT_UPLOAD,
   approveConsent,
   checkConsentClip,
   clipPlaybackUrl,
@@ -139,6 +140,40 @@ describe("upload into the private bucket", () => {
     expect(saved.clip_checks).toBeNull();
   });
 
+  describe("SF1: confirm re-checks the 30-minute window (Supabase upload tokens last 2 hours)", () => {
+    async function uploaded() {
+      const consent = await started(); // words expire 10:30
+      const clip = `${BRAND_ID}/${consent.id}/11111111-1111-4111-8111-111111111111.mp4`;
+      const { storage } = memoryClipStorage({ [clip]: { size: 40 * MB, contentType: "video/mp4" } });
+      return { consent, clip, storage };
+    }
+
+    it("the grace for an in-flight upload is 2 minutes, in one constant", () => {
+      expect(CONSENT_UPLOAD.confirm_grace_s).toBe(120);
+    });
+
+    it("confirm inside the grace (10:31:59) still counts", async () => {
+      const { consent, clip, storage } = await uploaded();
+      const saved = await confirmUpload(consent.id, clip, { store: mem.store, storage, now: new Date("2026-11-22T10:31:59.000Z") });
+      expect(saved.clip_path).toBe(clip);
+    });
+
+    it("confirm after words expiry + grace (10:32) is refused and nothing is saved", async () => {
+      const { consent, clip, storage } = await uploaded();
+      await expect(
+        confirmUpload(consent.id, clip, { store: mem.store, storage, now: new Date("2026-11-22T10:32:00.000Z") }),
+      ).rejects.toThrow("The 3 words have expired. Press “New words”, then record again saying the new words.");
+      expect((await mem.store.getConsent(consent.id))?.clip_path).toBeNull();
+    });
+
+    it("a token used near the end of its 2 hours (11:59) is refused", async () => {
+      const { consent, clip, storage } = await uploaded();
+      await expect(
+        confirmUpload(consent.id, clip, { store: mem.store, storage, now: new Date("2026-11-22T11:59:00.000Z") }),
+      ).rejects.toThrow("The 3 words have expired.");
+    });
+  });
+
   it("playback uses a short-lived signed URL (5 minutes)", async () => {
     const { storage, signed } = memoryClipStorage();
     const url = await clipPlaybackUrl({ clip_path: "b/c/x.mp4" }, storage);
@@ -182,17 +217,64 @@ describe.skipIf(!hasFfmpeg)("automatic clip checks are saved on the consent", ()
     expect(mem.outbox[0].body).toContain("Only you should be in the clip.");
     expect(mem.outbox[0].body).toContain("Face a window in daylight");
   });
+
+  it("SF4: the result names the clip it measured", async () => {
+    const { consent, storage } = await withClip("consent-good.mp4");
+    const result = await checkConsentClip(consent.id, { store: mem.store, storage, claude, fixtureName: "consent-good.mp4" });
+    expect(result.clip_path).toBe((await mem.store.getConsent(consent.id))?.clip_path);
+  });
+
+  it("SF4: a re-upload while the check runs cannot inherit the old pass", async () => {
+    const { consent, storage } = await withClip("consent-good.mp4");
+    const newer = `${BRAND_ID}/${consent.id}/99999999-9999-4999-8999-999999999999.mp4`;
+    const download = storage.download.bind(storage);
+    // A second tab confirms a new clip while the first check is downloading.
+    storage.download = async (p: string) => {
+      const bytes = await download(p);
+      await mem.store.updateConsent(consent.id, { clip_path: newer, clip_checks: null });
+      return bytes;
+    };
+    await expect(
+      checkConsentClip(consent.id, { store: mem.store, storage, claude, fixtureName: "consent-good.mp4" }),
+    ).rejects.toThrow("A new clip was uploaded while this one was being checked. Check the new clip.");
+    const saved = await mem.store.getConsent(consent.id);
+    expect(saved?.clip_path).toBe(newer);
+    expect(saved?.clip_checks).toBeNull();
+    await expect(approveConsent(consent.id, "", { store: mem.store })).rejects.toThrow("The clip checks must pass");
+  });
 });
 
 describe("admin approval", () => {
-  async function checked(passed: boolean) {
+  async function checked(passed: boolean, checkedPath?: string) {
     const consent = await started();
+    const clipPath = `${BRAND_ID}/${consent.id}/c.mp4`;
     await mem.store.updateConsent(consent.id, {
-      clip_path: `${BRAND_ID}/${consent.id}/c.mp4`,
-      clip_checks: { passed, checked_at: NOW.toISOString(), checks: [], tips: [], measurements: {} as never },
+      clip_path: clipPath,
+      clip_checks: {
+        passed,
+        clip_path: checkedPath ?? clipPath,
+        checked_at: NOW.toISOString(),
+        checks: [],
+        tips: [],
+        measurements: {} as never,
+      },
     });
     return consent;
   }
+
+  it("SF4: a pass for a different clip (or one with no clip_path) does not count", async () => {
+    const other = await checked(true, `${BRAND_ID}/elsewhere/old.mp4`);
+    await expect(approveConsent(other.id, "", { store: mem.store })).rejects.toThrow(
+      "The clip checks must pass before approval. Ask for a reshoot.",
+    );
+    const legacy = await started();
+    await mem.store.updateConsent(legacy.id, {
+      clip_path: `${BRAND_ID}/${legacy.id}/c.mp4`,
+      clip_checks: { passed: true, checked_at: NOW.toISOString(), checks: [], tips: [], measurements: {} as never },
+    });
+    await expect(approveConsent(legacy.id, "", { store: mem.store })).rejects.toThrow("The clip checks must pass");
+    expect(mem.avatars).toHaveLength(0);
+  });
 
   it("approve: saves status and note, and creates ONE avatar row (training) for this consent", async () => {
     const consent = await checked(true);

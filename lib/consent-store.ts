@@ -39,6 +39,18 @@ export function createConsentStore(): ConsentStore {
       if (error) fail("update consent", error);
       return (data as ConsentRow | null) ?? null;
     },
+    async saveClipChecks(id, clipPath, checks) {
+      const { data, error } = await db
+        .from("consents")
+        .update({ clip_checks: checks })
+        .eq("id", id)
+        .eq("clip_path", clipPath)
+        .eq("admin_status", "pending")
+        .select()
+        .maybeSingle();
+      if (error) fail("save clip checks", error);
+      return (data as ConsentRow | null) ?? null;
+    },
     async listConsents() {
       const { data, error } = await db.from("consents").select().order("created_at", { ascending: false }).limit(200);
       if (error) fail("list consents", error);

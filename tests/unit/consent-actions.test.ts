@@ -71,7 +71,7 @@ async function checkedConsent(passed = true) {
   clips.files[clipPath] = { size: 1 * MB, contentType: "video/mp4", fixture: "consent-good.mp4" };
   await mem.store.updateConsent(consent.id, {
     clip_path: clipPath,
-    clip_checks: { passed, checked_at: "", checks: [], tips: [], measurements: {} as never },
+    clip_checks: { passed, clip_path: clipPath, checked_at: "", checks: [], tips: [], measurements: {} as never },
   });
   return consent;
 }

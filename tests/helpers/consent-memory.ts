@@ -43,6 +43,12 @@ export function memoryConsentStore() {
       Object.assign(row, structuredClone(patch));
       return structuredClone(row);
     },
+    async saveClipChecks(consentId, clipPath, checks) {
+      const row = consents.find((c) => c.id === consentId);
+      if (!row || row.clip_path !== clipPath || row.admin_status !== "pending") return null;
+      row.clip_checks = structuredClone(checks);
+      return structuredClone(row);
+    },
     async listConsents() {
       return structuredClone(consents);
     },

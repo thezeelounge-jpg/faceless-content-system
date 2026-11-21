@@ -82,6 +82,11 @@ export interface ConsentStore {
   getConsent(id: string): Promise<ConsentRow | null>;
   /** With onlyIfPending, changes nothing (returns null) unless admin_status is still pending. */
   updateConsent(id: string, patch: ConsentPatch, onlyIfPending?: boolean): Promise<ConsentRow | null>;
+  /**
+   * SF4: saves clip check results only if the consent is still pending AND
+   * still has this clip_path. Returns null (nothing saved) otherwise.
+   */
+  saveClipChecks(id: string, clipPath: string, checks: ClipChecksResult): Promise<ConsentRow | null>;
   listConsents(): Promise<ConsentRow[]>;
   getAvatarByConsent(consentId: string): Promise<AvatarRow | null>;
   getAvatar(id: string): Promise<AvatarRow | null>;

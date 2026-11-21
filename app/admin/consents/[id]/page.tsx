@@ -53,7 +53,8 @@ async function ConsentDetail({ params }: Pick<PageProps<"/admin/consents/[id]">,
   const supabase = getSupabasePublicConfig();
   const pending = consent.admin_status === "pending";
   const expired = wordsExpired(consent.words_expire_at);
-  const checks = consent.clip_checks;
+  // SF4: results for another clip (or saved before clip_path was recorded) don't count.
+  const checks = consent.clip_checks?.clip_path === consent.clip_path ? consent.clip_checks : null;
 
   return (
     <div className="space-y-4">

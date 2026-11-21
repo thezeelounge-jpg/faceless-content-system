@@ -23,6 +23,14 @@ export const CONSENT_UPLOAD = {
   /** HeyGen accepts mp4 or webm (docs "Video to Avatar"). */
   types: { "video/mp4": "mp4", "video/webm": "webm" } as Record<string, string>,
   playback_seconds: 300,
+  /**
+   * SF1: confirmUpload re-checks the 30-minute words window, plus this grace
+   * for an upload that was already on its way when the words ran out.
+   * Needed because Supabase's signed upload token always lasts 2 hours:
+   * createSignedUploadUrl(path, { upsert }) takes no expiry option
+   * (@supabase/storage-js index.d.mts: "They are valid for 2 hours.").
+   */
+  confirm_grace_s: 120,
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -115,10 +123,14 @@ export async function confirmUpload(
   if (!objectPath.startsWith(prefix) || !/^[0-9a-f-]{36}\.(mp4|webm)$/i.test(name)) {
     throw new PlainError("That upload does not belong to this consent.");
   }
-  // Words are checked when the upload starts (prepareUpload); a slow upload
-  // that finishes after the 30 minutes still counts.
   const decided = decidedError(consent);
   if (decided) throw decided;
+  // SF1: the upload token outlives the words (2 hours vs 30 minutes), so the
+  // window is checked again here, with a short grace for an in-flight upload.
+  const now = deps.now ?? new Date();
+  const graceNow = new Date(now.getTime() - CONSENT_UPLOAD.confirm_grace_s * 1000);
+  const blocked = uploadBlockedReason(consent, graceNow);
+  if (blocked) throw new PlainError(blocked);
   const info = await deps.storage.info(objectPath);
   if (!info) throw new PlainError("We couldn't find the uploaded clip. Please upload it again.");
   const invalid = validateUpload({ name, type: info.contentType, size: info.size });
@@ -161,29 +173,34 @@ export async function checkConsentClip(
   },
 ): Promise<ClipChecksResult> {
   const consent = await load(deps.store, consentId);
-  if (!consent.clip_path) throw new PlainError("Upload the clip first.");
+  const clipPath = consent.clip_path;
+  if (!clipPath) throw new PlainError("Upload the clip first.");
   const brand = await deps.store.getBrandContact(consent.brand_id);
   if (!brand) throw new PlainError("Client not found.");
 
-  const ext = path.extname(consent.clip_path) || ".mp4";
+  const ext = path.extname(clipPath) || ".mp4";
   const file = path.join(os.tmpdir(), `consent-${randomUUID()}${ext}`);
   let result: ClipChecksResult;
   try {
-    await writeFile(file, await deps.storage.download(consent.clip_path));
-    result = await runClipChecks(file, {
+    await writeFile(file, await deps.storage.download(clipPath));
+    const measured = await runClipChecks(file, {
       brand: {
         id: brand.id, name: brand.name, niche: null, audience: null, offers: null, tone: null, sound_answers: {},
         samples: null, banned_words: [], language: "en", profile_md: null, pillars: [], words_per_second: 2.4,
       },
-      clipName: deps.fixtureName ?? consent.clip_path,
+      clipName: deps.fixtureName ?? clipPath,
       claude: deps.claude,
       now: deps.now,
     });
+    result = { ...measured, clip_path: clipPath };
   } finally {
     await rm(file, { force: true });
   }
 
-  await deps.store.updateConsent(consentId, { clip_checks: result });
+  // SF4: save only onto the clip we measured (a re-upload meanwhile wins).
+  if (!(await deps.store.saveClipChecks(consentId, clipPath, result))) {
+    throw new PlainError("A new clip was uploaded while this one was being checked. Check the new clip.");
+  }
   if (!result.passed && brand.ownerEmail) {
     await deps.store.insertOutbox({
       brand_id: brand.id,
@@ -214,7 +231,8 @@ export async function approveConsent(
   const decided = decidedError(consent);
   if (decided) throw decided;
   if (!consent.clip_path) throw new PlainError("Upload the clip first.");
-  if (!consent.clip_checks?.passed) throw new PlainError("The clip checks must pass before approval. Ask for a reshoot.");
+  // SF4: the pass must be for THIS clip.
+  if (!consent.clip_checks?.passed || consent.clip_checks.clip_path !== consent.clip_path) throw new PlainError("The clip checks must pass before approval. Ask for a reshoot.");
   const approved = await deps.store.updateConsent(consentId, { admin_status: "approved", admin_note: cleanNote(note) }, true);
   if (!approved) throw new PlainError("This consent is already decided.");
   const avatar = await deps.store.insertAvatar({ brand_id: consent.brand_id, consent_id: consent.id, status: "training" });

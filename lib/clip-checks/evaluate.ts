@@ -21,6 +21,12 @@ export type ClipCheck = {
 
 export type ClipChecksResult = {
   passed: boolean;
+  /**
+   * SF4: the consents.clip_path these results measured. Approval only counts
+   * results whose clip_path is the clip on the row now. (Missing on results
+   * saved before Phase 3 part B; those need a re-check.)
+   */
+  clip_path?: string;
   checked_at: string;
   checks: ClipCheck[];
   /** The tips of the failed checks, in order (for the reshoot email). */
