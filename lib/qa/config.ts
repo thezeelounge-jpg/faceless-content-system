@@ -62,6 +62,16 @@ export const RENDER = {
   /** Polling backup (webhooks are attempted once): every 30 s for up to 30 minutes. */
   poll_every_s: 30,
   poll_max_s: 1800,
+  /**
+   * The safe video downloader (lib/safe-download.ts, QA MUST FIX 1). 200 MB is
+   * far above a 60-second 1080p/2k reel (roughly 10 to 100 MB) and equals
+   * HeyGen's own direct-upload limit; the whole file sits in memory once.
+   */
+  download_max_bytes: 200 * 1024 * 1024,
+  /** At most this many redirects; every hop is checked again (https, allowlist, DNS). */
+  download_max_redirects: 3,
+  /** One timeout for the whole download, body included. */
+  download_timeout_s: 300,
 } as const;
 
 /**

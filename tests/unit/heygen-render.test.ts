@@ -1,12 +1,14 @@
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  HEYGEN_DOWNLOAD_HOSTS,
   HEYGEN_RETRY_AFTER_MAX_S,
   HEYGEN_VIDEO_RESOLUTION,
   MOCK_FIXTURE_VIDEO,
   createHeygenClient,
   heygen,
 } from "@/lib/heygen";
+import { RENDER } from "@/lib/qa/config";
 
 // Phase 3 part B step 2: POST /v3/videos, the video download and
 // POST /v3/webhooks/endpoints. Mock mode never fetches; with mock off the
@@ -42,8 +44,15 @@ function fakeFetch(answers: (() => Response)[]) {
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => () =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
-const realClient = (fakeFetchFn: typeof globalThis.fetch, sleep = vi.fn(async () => {})) =>
-  createHeygenClient({ mock: false, apiKey: "test-key-not-real", fetch: fakeFetchFn, sleep });
+/** A FAKE resolver: HeyGen's file host resolves to a public address. Never real DNS in tests. */
+const publicDns = () =>
+  vi.fn(async (host: string) => {
+    void host;
+    return [{ address: "93.184.216.34", family: 4 }];
+  });
+const realClient = (fakeFetchFn: typeof globalThis.fetch, sleep = vi.fn(async () => {}), resolve = publicDns()) =>
+  createHeygenClient({ mock: false, apiKey: "test-key-not-real", fetch: fakeFetchFn, sleep, resolve });
+const mp4 = (bytes: number[]) => () => new Response(new Uint8Array(bytes), { status: 200, headers: { "content-type": "video/mp4" } });
 
 describe("mock mode: renders, downloads and webhook setup never fetch", () => {
   it("createVideo gives a mock id per video, downloadVideo gives the fixture bytes, webhook setup a mock endpoint", async () => {
@@ -141,31 +150,73 @@ describe("POST /v3/videos (mock off, fake fetch)", () => {
   });
 });
 
-describe("downloadVideo (mock off, fake fetch)", () => {
-  it("downloads the bytes over https without sending our API key", async () => {
-    const fake = fakeFetch([() => new Response(new Uint8Array([1, 2, 3, 4]), { status: 200 })]);
-    const bytes = await realClient(fake.fetch).downloadVideo("https://files.heygen.ai/v/abc.mp4?sig=1");
-    expect(Array.from(bytes)).toEqual([1, 2, 3, 4]);
-    expect(fake.calls[0].url).toBe("https://files.heygen.ai/v/abc.mp4?sig=1");
-    expect(JSON.stringify(fake.calls[0].init.headers ?? {})).not.toContain("test-key-not-real");
+describe("downloadVideo (mock off, fake fetch): the safe downloader (QA MUST FIX 1)", () => {
+  it("the allowlist is HeyGen's documented file host only; limits live in lib/qa/config.ts RENDER", () => {
+    expect(HEYGEN_DOWNLOAD_HOSTS).toEqual(["resource2.heygen.ai"]);
+    expect(RENDER.download_max_bytes).toBe(200 * 1024 * 1024);
+    expect(RENDER.download_max_redirects).toBe(3);
+    expect(RENDER.download_timeout_s).toBe(300);
   });
 
-  it("refuses anything that is not an https URL (nothing fetched)", async () => {
+  it("downloads from the allowed host over https: no API key, redirect manual, DNS checked with the injected resolver", async () => {
+    const fake = fakeFetch([mp4([1, 2, 3, 4])]);
+    const resolve = publicDns();
+    const bytes = await realClient(fake.fetch, undefined, resolve).downloadVideo("https://resource2.heygen.ai/videos/abc/VIDEO.mp4?sig=1");
+    expect(Array.from(bytes)).toEqual([1, 2, 3, 4]);
+    expect(fake.calls[0].url).toBe("https://resource2.heygen.ai/videos/abc/VIDEO.mp4?sig=1");
+    expect(fake.calls[0].init.redirect).toBe("manual");
+    expect(JSON.stringify(fake.calls[0].init.headers ?? {})).not.toContain("test-key-not-real");
+    expect(resolve).toHaveBeenCalledWith("resource2.heygen.ai");
+  });
+
+  it("refuses non-https, off-allowlist hosts, look-alikes and metadata IPs with one plain message (nothing fetched, no DNS)", async () => {
     const fake = fakeFetch([]);
-    const client = realClient(fake.fetch);
-    for (const url of ["http://files.heygen.ai/a.mp4", "file:///etc/passwd", "not a url", ""]) {
-      await expect(client.downloadVideo(url)).rejects.toThrow("The video link from HeyGen is not usable.");
+    const resolve = publicDns();
+    const client = realClient(fake.fetch, undefined, resolve);
+    for (const url of [
+      "http://resource2.heygen.ai/a.mp4",
+      "file:///etc/passwd",
+      "not a url",
+      "",
+      "https://files.heygen.ai/v/abc.mp4",
+      "https://evil-heygen.com/a.mp4",
+      "https://resource2.heygen.ai.evil.com/a.mp4",
+      "https://resource2.heygen.ai@evil.com/a.mp4",
+      "https://169.254.169.254/latest/meta-data/",
+    ]) {
+      const error = await client.downloadVideo(url).catch((e: Error) => e);
+      expect(error, url).toMatchObject({ code: "bad_output", message: "The video link from HeyGen is not usable." });
+      expect(String((error as Error & { cause?: Error }).cause?.message)).not.toContain("://");
     }
+    expect(fake.calls).toHaveLength(0);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("refuses a host that resolves to a private address (nothing fetched)", async () => {
+    const fake = fakeFetch([mp4([1])]);
+    const resolve = vi.fn(async () => [{ address: "10.0.0.7", family: 4 }]);
+    await expect(realClient(fake.fetch, undefined, resolve).downloadVideo("https://resource2.heygen.ai/a.mp4")).rejects.toThrow(
+      "The video link from HeyGen is not usable.",
+    );
     expect(fake.calls).toHaveLength(0);
   });
 
-  it("retries a failed download (GET), then gives a plain error", async () => {
+  it("refuses an answer that is not a video (no retry)", async () => {
+    const fake = fakeFetch([() => new Response("<html>", { status: 200, headers: { "content-type": "text/html" } })]);
+    await expect(realClient(fake.fetch).downloadVideo("https://resource2.heygen.ai/a.mp4")).rejects.toThrow(
+      "The video link from HeyGen is not usable.",
+    );
+    expect(fake.calls).toHaveLength(1);
+  });
+
+  it("retries a failed download (5xx) with backoff, then gives a plain error", async () => {
     const sleep = vi.fn(async () => {});
     const fake = fakeFetch([json({}, 503), json({}, 503), json({}, 503)]);
-    await expect(realClient(fake.fetch, sleep).downloadVideo("https://files.heygen.ai/a.mp4")).rejects.toThrow(
+    await expect(realClient(fake.fetch, sleep).downloadVideo("https://resource2.heygen.ai/a.mp4")).rejects.toThrow(
       "Could not download the video from HeyGen. Try again later.",
     );
     expect(fake.calls).toHaveLength(3);
+    expect(sleep).toHaveBeenCalledTimes(2);
   });
 });
 

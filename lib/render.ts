@@ -286,7 +286,9 @@ export async function completeRender(
     const bytes = await download(outcome.videoUrl);
     await deps.files.upload(path, bytes, "video/mp4");
   } catch (error) {
-    await deps.videos.updateVideo(video.id, { error: SAVE_FAILED }).catch(() => null);
+    // A refused link (lib/safe-download.ts) gets its own plain reason; never the URL.
+    const refused = error instanceof HeygenError && error.code === "bad_output";
+    await deps.videos.updateVideo(video.id, { error: refused ? plain(error) : SAVE_FAILED }).catch(() => null);
     throw error;
   }
   const duration = outcome.durationS !== null && Number.isFinite(outcome.durationS) && outcome.durationS > 0 ? outcome.durationS : null;

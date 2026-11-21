@@ -5,6 +5,8 @@ import path from "node:path";
 import { z } from "zod";
 import { isMockHeygen, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
+import { RENDER } from "@/lib/qa/config";
+import { SafeDownloadError, safeDownload, systemResolver, type Resolver } from "@/lib/safe-download";
 import mockAvatarGroup from "@/tests/fixtures/heygen/avatar-group.json";
 import mockConsent from "@/tests/fixtures/heygen/consent.json";
 import mockCreateAvatar from "@/tests/fixtures/heygen/create-avatar.json";
@@ -32,9 +34,20 @@ export const HEYGEN_BASE_URL = "https://api.heygen.com";
 /** The video file mock mode hands out wherever a real video would come back. */
 export const MOCK_FIXTURE_VIDEO = "tests/fixtures/consent-good.mp4";
 
+/**
+ * QA MUST FIX 1: the ONLY hosts we download finished videos from (exact host
+ * match; lib/safe-download.ts). Source: HeyGen docs, "Avatar 6" model page
+ * (developers.heygen.com/docs/models/avatar-6, completed-video example:
+ * `"video_url": "https://resource2.heygen.ai/videos/.../VIDEO.mp4"`).
+ * UNCONFIRMED (docs: no example host is shown for GET /v3/videos/{id} or the
+ * avatar_video.success webhook `url`, and no CDN list exists). Fails closed:
+ * a video on any other host is refused with a plain error. Check the real
+ * host on the first real render and add it here with its source.
+ */
+export const HEYGEN_DOWNLOAD_HOSTS: readonly string[] = ["resource2.heygen.ai"];
+
 const TIMEOUT_MS = 60_000;
 const UPLOAD_TIMEOUT_MS = 10 * 60_000;
-const DOWNLOAD_TIMEOUT_MS = 5 * 60_000;
 const MAX_ATTEMPTS = 3;
 /**
  * SF6: the longest we will wait for HeyGen's Retry-After (seconds), in task code.
@@ -94,6 +107,8 @@ export type HeygenDeps = {
   sleep: (ms: number) => Promise<void>;
   /** Longest Retry-After this caller may wait (seconds). Tasks: HEYGEN_RETRY_AFTER_MAX_S; pages: HEYGEN_PAGE_MAX_WAIT_S. */
   maxWaitS: number;
+  /** DNS lookup for the safe downloader. Tests inject a fake; never real DNS in tests. */
+  resolve: Resolver;
 };
 
 // ---------------------------------------------------------------------------
@@ -326,12 +341,12 @@ function makeRequester(deps: HeygenDeps) {
   };
 }
 
-/** One HTTP call with retries. Used for the API and for the upload PUT. */
+/** One HTTP call with retries. Used for the API and for the upload PUT (never for video downloads: see downloadVideo). */
 async function send(
   deps: HeygenDeps,
   url: string,
   init: { method: string; headers: Record<string, string>; body?: BodyInit },
-  options: { method: string; timeoutMs?: number; read?: "json" | "bytes" },
+  options: { method: string; timeoutMs?: number },
 ): Promise<unknown> {
   const canRetryFailures = options.method === "GET";
   for (let attempt = 1; ; attempt++) {
@@ -346,7 +361,7 @@ async function send(
       }
       throw new HeygenError("failed", "Could not reach HeyGen. Try again later.", { cause });
     }
-    if (response.ok) return options.read === "bytes" ? new Uint8Array(await response.arrayBuffer()) : readJson(response);
+    if (response.ok) return readJson(response);
 
     const body = await readJson(response);
     const retryable = response.status === 429 || (canRetryFailures && response.status >= 500);
@@ -374,6 +389,7 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
     fetch: (...args) => globalThis.fetch(...args),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     maxWaitS: HEYGEN_RETRY_AFTER_MAX_S,
+    resolve: systemResolver,
     ...overrides,
   };
   const request = makeRequester(deps);
@@ -524,17 +540,37 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
 
     /**
      * Downloads a finished video file (the signed `video_url`, which expires:
-     * download at once). https only; our API key is NOT sent to the file host.
-     * Mock: the fixture video's bytes, no fetch.
+     * download at once) through the safe downloader (lib/safe-download.ts):
+     * https only, HEYGEN_DOWNLOAD_HOSTS only, every DNS answer public, manual
+     * redirects (each hop re-checked), video/* only, byte cap and timeout
+     * (RENDER in lib/qa/config.ts). Our API key is NOT sent to the file host.
+     * Timeouts, network errors and 5xx are retried with backoff; refusals are
+     * not. Errors never contain the URL. Mock: the fixture bytes, no fetch.
      */
     async downloadVideo(url: string): Promise<Uint8Array> {
       if (deps.mock) return new Uint8Array(await readFile(path.resolve(MOCK_FIXTURE_VIDEO)));
-      if (!isHttpsUrl(url)) throw new HeygenError("bad_output", "The video link from HeyGen is not usable.");
-      try {
-        const bytes = await send(deps, url, { method: "GET", headers: {} }, { method: "GET", timeoutMs: DOWNLOAD_TIMEOUT_MS, read: "bytes" });
-        return bytes as Uint8Array;
-      } catch (cause) {
-        throw new HeygenError("failed", "Could not download the video from HeyGen. Try again later.", { cause });
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const { bytes } = await safeDownload(url, {
+            fetch: deps.fetch,
+            resolve: deps.resolve,
+            allowedHosts: HEYGEN_DOWNLOAD_HOSTS,
+            maxBytes: RENDER.download_max_bytes,
+            maxRedirects: RENDER.download_max_redirects,
+            timeoutMs: RENDER.download_timeout_s * 1000,
+          });
+          return bytes;
+        } catch (cause) {
+          const retryable = cause instanceof SafeDownloadError && cause.retryable;
+          if (retryable && attempt < MAX_ATTEMPTS) {
+            await deps.sleep(heygenBackoffMs(attempt, null));
+            continue;
+          }
+          if (cause instanceof SafeDownloadError && !retryable && cause.code !== "too_big" && cause.code !== "http_error") {
+            throw new HeygenError("bad_output", "The video link from HeyGen is not usable.", { cause });
+          }
+          throw new HeygenError("failed", "Could not download the video from HeyGen. Try again later.", { cause });
+        }
       }
     },
 

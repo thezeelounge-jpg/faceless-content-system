@@ -175,6 +175,40 @@ describe("POST /api/webhooks/heygen", () => {
     expect(mem.events[0].processed_at).not.toBeNull();
   });
 
+  it("QA MUST FIX 1 (g): a signed payload URL to a metadata IP or a look-alike host is never fetched; video not done; plain reason; no URL in logs", async () => {
+    const dns = await import("node:dns");
+    const lookup = vi.spyOn(dns.promises, "lookup").mockRejectedValue(new Error("real DNS must not be used in tests"));
+    process.env.MOCK_HEYGEN = "false";
+    process.env.HEYGEN_API_KEY = "test-key-not-real";
+    // HeyGen's GET /v3/videos says "still processing", so the webhook falls back to the payload URL.
+    fetchSpy.mockImplementation(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.startsWith("https://api.heygen.com/v3/videos/")) {
+        return new Response(JSON.stringify({ data: { status: "processing" } }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error("this host must never be fetched");
+    });
+    const errors = vi.mocked(console.error);
+    for (const name of ["success-metadata-url", "success-evil-host"]) {
+      const body = readFileSync(`${DIR}/${name}.json`, "utf8");
+      const sig = createHmac("sha256", TEST_SECRET).update(body, "utf8").digest("hex");
+      const response = await post(body, sig);
+      expect(response.status, name).toBe(500);
+    }
+    // Only the free API status check was called; the payload hosts never were, and no DNS lookup ran.
+    const fetched: string[] = fetchSpy.mock.calls.map((args: unknown[]) => String(args[0]));
+    expect(fetched.length).toBeGreaterThan(0);
+    expect(fetched.every((u) => u.startsWith("https://api.heygen.com/v3/videos/"))).toBe(true);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(mem.videos[0]).toMatchObject({ status: "rendering", raw_path: null, error: "The video link from HeyGen is not usable." });
+    expect(files.uploads).toHaveLength(0);
+    expect(mem.events.every((e) => e.processed_at === null)).toBe(true);
+    const logged = JSON.stringify(errors.mock.calls);
+    expect(logged).not.toContain("169.254.169.254");
+    expect(logged).not.toContain("evil-cdn");
+    expect(logged).not.toContain("test-key-not-real");
+  });
+
   it("with TRIGGER_SECRET_KEY: success hands the download to the poll-render task (key = event) and answers fast", async () => {
     process.env.TRIGGER_SECRET_KEY = "tr_dev_dummy";
     const { body, sig } = fixture("success");
