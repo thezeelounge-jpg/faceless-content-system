@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   brandProfileOutput,
@@ -225,10 +227,18 @@ describe("request rules (CLAUDE.md)", () => {
       expect(brandBlock.cache_control).toEqual({ type: "ephemeral" });
       expect(brandBlock.text).toContain(BRAND.name);
       expect(brandBlock.text).toContain("miracle");
-      // Server-side fallbacks on refusal.
-      expect(params.fallbacks).toBe("default");
-      expect(params.betas).toContain("server-side-fallback-2026-07-01");
+      // Stable Messages API only: no beta server-side fallbacks.
+      for (const beta of ["fallbacks", "betas", "anthropic-beta"]) {
+        expect(params).not.toHaveProperty(beta);
+      }
     }
+  });
+
+  it("uses only the stable Messages API (no beta client, helpers or headers)", () => {
+    const source = readFileSync(path.join(process.cwd(), "lib/claude.ts"), "utf8");
+    expect(source).toContain("// TODO: revisit Anthropic server-side fallbacks (beta) once GA");
+    const code = source.replace(/\/\/.*$/gm, "");
+    expect(code).not.toMatch(/\.beta\.|helpers\/beta|resources\/beta|betaZodOutputFormat|anthropic-beta|fallbacks:|betas:/);
   });
 
   it("FAST tasks use low effort, scripts and plans use medium", () => {
@@ -292,14 +302,13 @@ describe("real mode with a fake client", () => {
     ).rejects.toThrow(/too long/i);
   });
 
-  it("reads only the answer after a server-side fallback", async () => {
+  it("reads only the text blocks of the answer (thinking blocks are skipped)", async () => {
     const good = { suggestions: [{ written: "Gulberg", say_as: "gul-berg" }] };
     const client = fakeClient([
       () =>
         fakeMessage({
           content: [
-            { type: "text", text: '{"suggestions": [' },
-            { type: "fallback", from: { model: "a" }, to: { model: "b" }, trigger: { type: "refusal", category: null } },
+            { type: "thinking", thinking: "", signature: "sig" },
             { type: "text", text: JSON.stringify(good) },
           ],
         }),
@@ -388,30 +397,173 @@ describe("real mode with a fake client", () => {
   });
 });
 
-describe("usage after a fallback", () => {
-  it("prices each model's part separately", () => {
+describe("usage", () => {
+  it("counts cache reads and writes as input and prices them with the model that answered", () => {
     const usage = usageFromMessage(
       fakeMessage({
-        model: "claude-sonnet-5-5",
-        usage: {
-          input_tokens: 2000,
-          output_tokens: 300,
-          cache_creation_input_tokens: 0,
-          cache_read_input_tokens: 0,
-          iterations: [
-            { type: "message", model: "claude-opus-5-5", input_tokens: 1000, output_tokens: 100, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-            { type: "fallback_message", model: "claude-sonnet-5-5", input_tokens: 1000, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-          ],
-        },
+        model: "claude-haiku-5-5",
+        usage: { input_tokens: 1000, output_tokens: 300, cache_creation_input_tokens: 500, cache_read_input_tokens: 2000 },
       }) as never,
     );
-    expect(usage.input_tokens).toBe(2000);
-    expect(usage.output_tokens).toBe(300);
-    expect(usage.cost_usd).toBeCloseTo(
-      estimateCostUsd("claude-opus-5-5", { input_tokens: 1000, output_tokens: 100 }) +
-        estimateCostUsd("claude-sonnet-5-5", { input_tokens: 1000, output_tokens: 200 }),
-      6,
+    expect(usage).toEqual({
+      model: "claude-haiku-5-5",
+      input_tokens: 3500,
+      output_tokens: 300,
+      cost_usd: estimateCostUsd("claude-haiku-5-5", {
+        input_tokens: 1000,
+        output_tokens: 300,
+        cache_creation_input_tokens: 500,
+        cache_read_input_tokens: 2000,
+      }),
+    });
+  });
+});
+
+describe("one FAST fallback when MAIN or PLANNER stays overloaded", () => {
+  const overloaded = () =>
+    Object.assign(new Error("Overloaded"), { status: 529, error: { type: "error", error: { type: "overloaded_error" } } });
+  const scriptAnswer = (model: string) =>
+    fakeMessage({ model, content: [{ type: "text", text: JSON.stringify(SCRIPT) }] });
+  const scriptCtx = { brand: BRAND, input: INPUTS.script as never };
+
+  beforeEach(() => {
+    vi.stubEnv("CLAUDE_MODEL_MAIN", "claude-sonnet-5-5");
+    vi.stubEnv("CLAUDE_MODEL_PLANNER", "claude-opus-5-5");
+    vi.stubEnv("CLAUDE_MODEL_FAST", "claude-haiku-5-5");
+  });
+
+  /** Every request the fake client saw must be a plain stable-API request. */
+  function expectNoBetaFields(requests: unknown[]) {
+    for (const params of requests) {
+      for (const key of ["fallbacks", "betas", "anthropic-beta"]) expect(params).not.toHaveProperty(key);
+      expect(JSON.stringify(params)).not.toMatch(/server-side-fallback|"fallbacks"|"betas"/);
+    }
+  }
+
+  it("after the retries run out on a 529, makes exactly one FAST call and logs it as a fallback", async () => {
+    const sleep = vi.fn(async () => {});
+    const logUsage = vi.fn(async (_row: UsageRow) => {});
+    const client = fakeClient([
+      () => {
+        throw overloaded();
+      },
+      () => {
+        throw overloaded();
+      },
+      () => {
+        throw overloaded();
+      },
+      () => scriptAnswer("claude-haiku-5-5"),
+    ]);
+    const out = await runClaudeTask("script", scriptCtx, { mock: false, client, sleep, logUsage });
+    expect(out).toEqual(SCRIPT);
+    expect(client.calls).toHaveLength(4);
+    const models = client.calls.map((c) => (c as { model: string }).model);
+    expect(models).toEqual(["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+    // Effort stays explicit and uses the FAST setting.
+    expect((client.calls[3] as { output_config: { effort: string } }).output_config.effort).toBe("low");
+    expect(logUsage).toHaveBeenCalledTimes(1);
+    expect(logUsage.mock.calls[0][0]).toMatchObject({
+      brand_id: BRAND.id,
+      task: "script:fallback_fast",
+      model: "claude-haiku-5-5",
+      cost_usd: estimateCostUsd("claude-haiku-5-5", { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 3000 }),
+    });
+    expectNoBetaFields(client.calls);
+  });
+
+  it("also covers streamed PLANNER tasks", async () => {
+    const plan = { posts: [{ date: "2026-12-01", pillar: "Fever myths", title: "Fever 101", hook: "Is it serious?", format: "talking" }] };
+    const client = fakeClient([
+      () => {
+        throw overloaded();
+      },
+      () => {
+        throw overloaded();
+      },
+      () => {
+        throw overloaded();
+      },
+      () => fakeMessage({ model: "claude-haiku-5-5", content: [{ type: "text", text: JSON.stringify(plan) }] }),
+    ]);
+    const logUsage = vi.fn(async (_row: UsageRow) => {});
+    const out = await runClaudeTask(
+      "plan",
+      { brand: BRAND, input: { slots: ["2026-12-01"], pillars: ["Fever myths"] } },
+      { mock: false, client, sleep: async () => {}, logUsage },
     );
+    expect(out).toEqual(plan);
+    expect(client.streamCalls.map((c) => (c as { model: string }).model)).toEqual([
+      "claude-opus-5-5",
+      "claude-opus-5-5",
+      "claude-opus-5-5",
+      "claude-haiku-5-5",
+    ]);
+    expect(logUsage.mock.calls[0][0]).toMatchObject({ task: "plan:fallback_fast", model: "claude-haiku-5-5" });
+    expectNoBetaFields(client.streamCalls);
+  });
+
+  it("does not fall back when the first call works", async () => {
+    const logUsage = vi.fn(async (_row: UsageRow) => {});
+    const client = fakeClient([() => scriptAnswer("claude-sonnet-5-5")]);
+    await runClaudeTask("script", scriptCtx, { mock: false, client, sleep: async () => {}, logUsage });
+    expect(client.calls).toHaveLength(1);
+    expect(logUsage.mock.calls[0][0]).toMatchObject({ task: "script", model: "claude-sonnet-5-5" });
+    expectNoBetaFields(client.calls);
+  });
+
+  it("does not fall back on a refusal", async () => {
+    const client = fakeClient([() => fakeMessage({ stop_reason: "refusal", content: [] })]);
+    await expect(
+      runClaudeTask("script", scriptCtx, { mock: false, client, sleep: async () => {}, logUsage: async () => {} }),
+    ).rejects.toThrow(/declined/i);
+    expect(client.calls).toHaveLength(1);
+  });
+
+  it("does not fall back on other server errors (only 529 overloaded)", async () => {
+    const client = fakeClient([
+      () => {
+        throw Object.assign(new Error("boom"), { status: 500 });
+      },
+    ]);
+    await expect(
+      runClaudeTask("script", scriptCtx, { mock: false, client, sleep: async () => {}, logUsage: async () => {} }),
+    ).rejects.toThrow(/busy/i);
+    expect(client.calls).toHaveLength(3);
+  });
+
+  it("gives a plain error when the FAST model fails too", async () => {
+    const logUsage = vi.fn(async (_row: UsageRow) => {});
+    const client = fakeClient([
+      () => {
+        throw overloaded();
+      },
+    ]);
+    const error = await runClaudeTask("script", scriptCtx, { mock: false, client, sleep: async () => {}, logUsage }).catch(
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("Claude is busy right now. Try again in a few minutes.");
+    expect(client.calls).toHaveLength(4);
+    expect(logUsage).not.toHaveBeenCalled();
+    expectNoBetaFields(client.calls);
+  });
+
+  it("FAST tasks have nothing smaller to fall back to", async () => {
+    const client = fakeClient([
+      () => {
+        throw overloaded();
+      },
+    ]);
+    await expect(
+      runClaudeTask("pronunciation_suggest", { brand: BRAND, input: INPUTS.pronunciation_suggest as never }, {
+        mock: false,
+        client,
+        sleep: async () => {},
+        logUsage: async () => {},
+      }),
+    ).rejects.toThrow(/busy/i);
+    expect(client.calls).toHaveLength(3);
   });
 });
 

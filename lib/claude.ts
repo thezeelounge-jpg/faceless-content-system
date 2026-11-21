@@ -1,10 +1,7 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
-import type {
-  BetaMessage,
-  MessageCreateParamsNonStreaming,
-} from "@anthropic-ai/sdk/resources/beta/messages/messages";
+import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
+import type { Message, MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources/messages/messages";
 import { z } from "zod";
 import { estimateCostUsd } from "@/lib/ai-prices";
 import {
@@ -38,13 +35,16 @@ import { createAdminClient } from "@/lib/supabase/admin";
 // - no temperature/top_p/top_k, no thinking settings, no prefill, no tool_choice;
 // - JSON answers use structured outputs (zod), checked again with zod;
 // - stop_reason is checked before reading the answer; "refusal" → plain error;
-// - server-side fallbacks are on (beta `fallbacks: "default"`);
+// - stable Messages API only (no beta). If MAIN or PLANNER is still
+//   overloaded (529) after our retries, we make exactly ONE call to the FAST
+//   model and log it as "<task>:fallback_fast";
 // - long answers (monthly plans) are streamed and read with finalMessage();
 // - the brand profile sits in a cached system block;
 // - every call has a timeout and retries busy errors with backoff;
 // - tokens and estimated cost go to ai_usage;
 // - prompts live in /prompts.
 // TODO(Phase 8): scheduled monthly planning should use the Message Batches API.
+// TODO: revisit Anthropic server-side fallbacks (beta) once GA
 
 export type ModelTier = "main" | "planner" | "fast";
 
@@ -167,7 +167,7 @@ export type UsageRow = {
 };
 
 export type ClaudeRequest = MessageCreateParamsNonStreaming;
-type ClaudeMessage = Pick<BetaMessage, "model" | "stop_reason" | "content" | "usage">;
+type ClaudeMessage = Pick<Message, "model" | "stop_reason" | "content" | "usage">;
 
 /** The small part of the Anthropic SDK we use. Tests pass a fake one. */
 export interface ClaudeClient {
@@ -199,8 +199,6 @@ export class ClaudeError extends Error {
 // ---------------------------------------------------------------------------
 // Building the request (pure: same inputs → same request)
 // ---------------------------------------------------------------------------
-
-const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 
 /** The brand details, sent as the cached system block on every call. */
 export function brandContext(brand: ClaudeBrand): string {
@@ -238,9 +236,8 @@ export function brandContext(brand: ClaudeBrand): string {
 
 function jsonFormat(schema: z.ZodType) {
   // The SDK helper turns the zod schema into the JSON schema the API expects.
-  // We keep only the plain format and check the answer with zod ourselves
-  // (so a server-side fallback's extra text blocks can't break parsing).
-  const format = betaZodOutputFormat(schema);
+  // We keep only the plain format and check the answer with zod ourselves.
+  const format = zodOutputFormat(schema);
   return { type: "json_schema" as const, schema: format.schema };
 }
 
@@ -261,8 +258,18 @@ export function buildClaudeRequest<T extends ClaudeTaskName>(task: T, ctx: Claud
       },
     ],
     output_config: { effort: def.effort, format: jsonFormat(def.output) },
-    fallbacks: "default",
-    betas: [FALLBACK_BETA],
+  };
+}
+
+/** Effort for the one FAST fallback call (CLAUDE.md: low for FAST tasks). */
+const FAST_FALLBACK_EFFORT = "low" as const;
+
+/** The same request, sent to the FAST model with FAST effort. */
+export function buildFastFallbackRequest(params: ClaudeRequest): ClaudeRequest {
+  return {
+    ...params,
+    model: claudeModel("fast"),
+    output_config: { ...params.output_config, effort: FAST_FALLBACK_EFFORT },
   };
 }
 
@@ -270,34 +277,17 @@ export function buildClaudeRequest<T extends ClaudeTaskName>(task: T, ctx: Claud
 // Reading the answer
 // ---------------------------------------------------------------------------
 
-/** Tokens and estimated cost, priced per model (a fallback model may have served part of it). */
+/** Tokens (cache reads and writes count as input) and estimated cost, priced for the model that answered. */
 export function usageFromMessage(message: ClaudeMessage): Omit<UsageRow, "brand_id" | "task"> {
   const usage = message.usage;
-  const parts = (usage.iterations ?? []).filter(
-    (it): it is Extract<typeof it, { type: "message" | "fallback_message" }> =>
-      it.type === "message" || it.type === "fallback_message",
-  );
-  const rows =
-    parts.length > 0
-      ? parts.map((it) => ({ ...it, model: it.model ?? message.model }))
-      : [
-          {
-            model: message.model,
-            input_tokens: usage.input_tokens ?? 0,
-            output_tokens: usage.output_tokens,
-            cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
-            cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
-          },
-        ];
-  let input = 0;
-  let output = 0;
-  let cost = 0;
-  for (const row of rows) {
-    input += row.input_tokens + (row.cache_creation_input_tokens ?? 0) + (row.cache_read_input_tokens ?? 0);
-    output += row.output_tokens;
-    cost += estimateCostUsd(row.model, row);
-  }
-  return { model: message.model, input_tokens: input, output_tokens: output, cost_usd: Math.round(cost * 1e6) / 1e6 };
+  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  return {
+    model: message.model,
+    input_tokens: usage.input_tokens + cacheWrite + cacheRead,
+    output_tokens: usage.output_tokens,
+    cost_usd: estimateCostUsd(message.model, usage),
+  };
 }
 
 function checkStopReason(message: ClaudeMessage) {
@@ -318,16 +308,9 @@ function checkStopReason(message: ClaudeMessage) {
   }
 }
 
-/** The JSON answer: text after the last server-side fallback block, checked with zod. */
+/** The JSON answer: the text blocks joined, checked with zod. */
 export function readAnswer<O>(message: ClaudeMessage, schema: z.ZodType<O>): O {
-  let start = 0;
-  message.content.forEach((block, i) => {
-    if (block.type === "fallback") start = i + 1;
-  });
-  const text = message.content
-    .slice(start)
-    .map((block) => (block.type === "text" ? block.text : ""))
-    .join("");
+  const text = message.content.map((block) => (block.type === "text" ? block.text : "")).join("");
   let json: unknown;
   try {
     json = JSON.parse(text);
@@ -381,11 +364,27 @@ async function withRetry<T>(fn: () => Promise<T>, sleep: (ms: number) => Promise
         });
       }
       if (attempt >= MAX_ATTEMPTS) {
-        throw new ClaudeError("busy", "Claude is busy right now. Try again in a few minutes.", { cause: error });
+        throw new ClaudeError("busy", BUSY_MESSAGE, { cause: error });
       }
       await sleep(backoffMs(attempt, error));
     }
   }
+}
+
+const BUSY_MESSAGE = "Claude is busy right now. Try again in a few minutes.";
+
+/** 529 / overloaded_error: the model itself is overloaded (not our request). */
+function isOverloaded(error: unknown): boolean {
+  if (statusOf(error) === 529) return true;
+  const body = (error as { error?: { error?: { type?: unknown } } })?.error;
+  return body?.error?.type === "overloaded_error";
+}
+
+/** Only MAIN and PLANNER tasks, only when the retries ran out on an overload. */
+function shouldFallBackToFast(def: TaskDef, error: unknown): boolean {
+  return (
+    def.model !== "fast" && error instanceof ClaudeError && error.code === "busy" && isOverloaded(error.cause)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -400,8 +399,8 @@ function createAnthropicClient(): ClaudeClient {
   // maxRetries 0: we retry ourselves (withRetry), so one place decides the backoff.
   const sdk = new Anthropic({ apiKey, maxRetries: 0 });
   return {
-    create: (params, opts) => sdk.beta.messages.create(params, { timeout: opts.timeout }),
-    stream: (params, opts) => sdk.beta.messages.stream(params, { timeout: opts.timeout }),
+    create: (params, opts) => sdk.messages.create(params, { timeout: opts.timeout }),
+    stream: (params, opts) => sdk.messages.stream(params, { timeout: opts.timeout }),
   };
 }
 
@@ -478,13 +477,27 @@ export async function runClaudeTask<T extends ClaudeTaskName>(
   const params = buildClaudeRequest(task, ctx);
   const client = deps.client ?? deps.createClient();
   const opts = { timeout: def.timeoutMs };
-  const message = await withRetry(
-    () => (def.stream ? client.stream(params, opts).finalMessage() : client.create(params, opts)),
-    deps.sleep,
-  );
+  const send = (request: ClaudeRequest) =>
+    def.stream ? client.stream(request, opts).finalMessage() : client.create(request, opts);
+
+  let message: ClaudeMessage;
+  let usageTask: string = task;
+  try {
+    message = await withRetry(() => send(params), deps.sleep);
+  } catch (error) {
+    if (!shouldFallBackToFast(def, error)) throw error;
+    // Exactly one call, no retries. If it fails too, give the same plain "busy" error.
+    console.error(`[claude] ${task}: ${claudeModel(def.model)} still overloaded, one fallback call to FAST`);
+    try {
+      message = await send(buildFastFallbackRequest(params));
+    } catch (fallbackError) {
+      throw new ClaudeError("busy", BUSY_MESSAGE, { cause: fallbackError });
+    }
+    usageTask = `${task}:fallback_fast`;
+  }
 
   // Tokens were spent even if the answer is unusable, so log first.
-  await deps.logUsage({ brand_id: ctx.brand.id, task, ...usageFromMessage(message) });
+  await deps.logUsage({ brand_id: ctx.brand.id, task: usageTask, ...usageFromMessage(message) });
   checkStopReason(message);
   return readAnswer(message, def.output) as TaskOutput<T>;
 }
