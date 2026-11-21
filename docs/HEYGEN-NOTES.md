@@ -44,6 +44,42 @@ Context7 was **not available** in this session and outside requests are not allo
 - **Retry-After ceiling** (SF6): `HEYGEN_RETRY_AFTER_MAX_S = 900` s (15 min) for task code, `HEYGEN_PAGE_MAX_WAIT_S = 30` s for pages, Server Actions and routes (`heygen({ forPage: true })`). We never shorten HeyGen's wait. If Retry-After is above the caller's limit, we fail at once with "HeyGen is busy. Try again in N minutes." The ceiling exists because Trigger.dev tasks have a `maxDuration` and serverless functions are killed sooner, so a longer sleep would be cut off mid-wait. Retry-After is read as seconds only (an HTTP-date falls back to 2 s, 4 s backoff).
 - **Spend guard**: every HeyGen call that can cost money goes through `lib/heygen-spend.ts` (`withHeygenSpend`) before the POST: create twin now, `POST /v3/videos` in step 2. It refuses when `app_settings.renders_paused` is on, or when today's (Asia/Karachi) count of that kind reached `app_settings.heygen_daily_caps` (default `{"render": 3, "create_twin": 2}`, also in `lib/config.ts`). Each guarded call is a `provider_usage` row (`kind`, `avatar_id`, `status` reserved → succeeded/failed, `note`; mock rows have cost 0 and note `mock`). Every row counts toward the cap, failed ones too. The check-and-insert is one Postgres function (`reserve_heygen_spend`, advisory lock per kind, service_role only). Free calls (users/me, group, looks, video status, asset upload) are not guarded.
 
+## (f) Phase 3 part B, step 2 findings (22 Nov 2026, session p3-b2)
+
+Context7 **was available** this session (library `/websites/developers_heygen`). Read only; no request to any HeyGen host. Page URLs are under https://developers.heygen.com/docs/.
+
+**Re-check of the two step-1 questions**
+- (a) **Idempotency key**: `POST /v3/videos` and `POST /v3/avatars` document **none**. An `Idempotency-Key` header (replayed 24 h, `409 request_in_progress`) is documented only for `/v3/models/videos`, look packs, `POST /v3/avatars/{group_id}/consent` and voices (`/models/heygen-video`, `/avatar-look-packs`, `/avatar-consent`, `/error-codes`). So we keep our own claims: `avatars.create_started_at` (twin) and `videos.render_started_at` (render, set atomically by `claim_render_slot` with the 10-at-once cap). Possible later improvement: send `Idempotency-Key` on the consent POST.
+- (b) **Voice field**: looks and groups use **`default_voice_id`** (`/create-avatar`, `/avatar-looks`). `voice_id` on a look or group was **not found**; `lib/heygen.ts` still reads both (harmless). `voice_id` is the field name on `POST /v3/videos` (optional on `/avatar-from-video`: "omit to use the character's default voice"; we always send it). Engines list: **`supported_api_engines`** (our column `avatars.supported_engines` holds it).
+
+**`POST /v3/videos`** (`/models/avatar-6`, `/avatar-from-video`, `/avatar-looks`, `/models/heygen-video`): `type: "avatar"`, `avatar_id` (look id), `script` (our `spoken_text`), `voice_id`, **`engine: { type }`** (an object; values per look: `heygen-avatar-6`, `heygen-avatar-6-turbo`, `avatar_iii`, `avatar_iv`, `avatar_v`; omitted = Avatar IV), `resolution` (`1080p` | `2k`; 720p and 4k not supported), `aspect_ratio` (`9:16` for us), `callback_id` (≤ 256 chars; "send callback_id alone to deliver to the webhook endpoints registered for your workspace"), `callback_url`, `title`. A callback is attempted **once**, so polling stays as the backup. Response id: `data.video_id` on `/models/avatar-6`, but `/avatar-looks` shows `id` and `/video-agent` a bare `video_id` — **UNCONFIRMED**, `lib/heygen.ts` reads all three.
+
+**`GET /v3/videos/{id}`** (`/video-agent`, `/models/avatar-6`): `data.status`, `data.video_url` (signed, expires: "poll again for a fresh one"), `data.duration`, `data.thumbnail_url`, `data.failure_code`, `data.failure_message`. Only `completed` and `failed` are documented; we treat anything else as "still working". Duration **unit UNCONFIRMED** (we assume seconds, as on `/v3/models/videos`).
+
+**Webhooks** (`/webhooks`, `/webhook-events`): create with `POST /v3/webhooks/endpoints` `{ url (https), events }` → `endpoint_id`, `secret` ("will not be shown again"; whether under `data` is **UNCONFIRMED**, both read). Events `avatar_video.success` / `avatar_video.fail`. Envelope `{ event_type, event_data }`; success `event_data`: `video_id`, `url`, `gif_download_url`, `video_page_url`, `video_share_page_url`, `folder_id`, `callback_id`. **No duration in the payload** (we call `GET /v3/videos/{id}`). Fail fields **UNCONFIRMED** (we read `msg`, else a plain default). Signature: header **`signature`** = hex HMAC-SHA256 of the raw body with the secret; no timestamp documented. Answer 2xx within **10 s**; retries with backoff for up to 24 h; the same event may arrive twice → dedupe on `event_type` + `video_id` (the docs' advice; our `webhook_events.event_key = heygen:<type>:<video_id>`).
+
+**Limits** (`/usage-limits`, `/error-codes`): 10 concurrent renders on Pay-As-You-Go (20 Enterprise); over → `429 rate_limit_exceeded` with `Retry-After` (seconds) except voice-provider limits (no header → backoff).
+
+**Engines and realism**: no realism ranking found. `LIKENESS.realistic_engines` in `lib/qa/config.ts` (`heygen-avatar-6`, `avatar_v`, `avatar_iv`; no turbo, no avatar_iii) is **our choice** — the owner can change it. Sandbox: still none.
+
+**How our code uses this** (`lib/render.ts`, `lib/likeness.ts`, `lib/heygen-webhook.ts`): every render needs MOCK_HEYGEN exactly `false` AND the admin's "I agree to spend" box, goes through `withHeygenSpend` (both pause switches, daily cap, `provider_usage` row), then `claim_render_slot`, then the POST. A saved `heygen_video_id` is never POSTed again; a claim without an id refuses ("check the HeyGen dashboard"). The raw MP4 goes to the private `videos` bucket at `raw/<brand>/<video>.mp4`.
+
+**UNCONFIRMED list (check on the first real call, staging, with the owner's OK)**: create-video response id position; `GET /v3/videos` duration unit and in-progress status names; webhook endpoint answer nesting; `avatar_video.fail` fields; `users/me` fields other than `billing_type`; consent `url` position; whether `voice_id` ever appears on a look/group.
+
+## How to run once (owner): register the HeyGen webhook
+
+Do this **once**, after the app has a public https address (Vercel preview or production) and after Zee says yes. It is free, but it changes the live HeyGen account. The script refuses unless `MOCK_HEYGEN` is exactly `false` **and** you add `--yes-create-webhook`. It never saves the secret.
+
+1. In PowerShell, go to the app folder: `cd <path>\creator-tool\app`.
+2. Turn mock off **for this window only**: `$env:MOCK_HEYGEN="false"`.
+3. Run (one line; replace the address):
+   `npx tsx --conditions=react-server --env-file=.env.local scripts/heygen-create-webhook.ts --yes-create-webhook --url=https://YOUR-APP.vercel.app/api/webhooks/heygen`
+   (`npx` may ask to download `tsx` once; say yes. `--env-file` reads your key from `.env.local`; the `MOCK_HEYGEN` you set in step 2 wins.)
+4. The script prints `HEYGEN_WEBHOOK_SECRET` **once**. Copy it, open `.env.local` in Notepad, and add the line `HEYGEN_WEBHOOK_SECRET=<the value>` yourself. Add the same value in Vercel and Trigger.dev (Environment Variables). Never paste it into chat.
+5. Close the PowerShell window (this also turns mock back on).
+
+Not yet tried for real: Rowan should check step 3 on staging the first time (the `tsx` flags are from the tsx/Node docs, not tested here). Locally webhooks can't reach `localhost`; the polling backup finishes videos there.
+
 ## (d) Brand Glossary scope: one per workspace
 
 "Each workspace has one glossary, and it holds rules for any number of languages." Creating a second one returns `409 conflict`. So **one glossary per brand is not possible** in one workspace. Plan: one shared workspace glossary; we sync every brand's **approved** `pronunciations` into it (terms are whole-word, case-insensitive; watch for two brands needing different respellings of the same word, in which case keep the respelled `spoken_text` as the only fix for that word). Sources: Brand Glossary — https://developers.heygen.com/docs/brand-glossary ; Manage a Glossary — https://developers.heygen.com/docs/brand-glossary/manage

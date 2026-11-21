@@ -75,11 +75,6 @@ export function createVideoStore(): VideoStore {
       if (error) fail("list likeness videos", error);
       return (data ?? []).map((row) => toVideo(row)!);
     },
-    async listRendering() {
-      const { data, error } = await db.from("videos").select().eq("status", "rendering").limit(100);
-      if (error) fail("list rendering videos", error);
-      return (data ?? []).map((row) => toVideo(row)!);
-    },
     async getRenderablePost(postId) {
       const { data: post, error } = await db.from("posts").select("id, brand_id, status, title").eq("id", postId).maybeSingle();
       if (error) fail("load post", error);

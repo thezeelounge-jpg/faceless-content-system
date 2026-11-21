@@ -73,8 +73,6 @@ export interface VideoStore {
   /** A video for this script that is not failed or skipped (newest), or null. */
   findActiveVideoForScript(scriptId: string): Promise<VideoRow | null>;
   listLikenessVideos(avatarId: string): Promise<VideoRow[]>;
-  /** Videos still 'rendering' (for the polling sweep). */
-  listRendering(): Promise<VideoRow[]>;
 
   getRenderablePost(postId: string): Promise<RenderablePost | null>;
   /** The script's text to speak and its post. */

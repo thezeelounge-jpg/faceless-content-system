@@ -78,9 +78,6 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
     async listLikenessVideos(avatarId) {
       return structuredClone(videos.filter((v) => v.avatar_id === avatarId && v.kind === "likeness_test"));
     },
-    async listRendering() {
-      return structuredClone(videos.filter((v) => v.status === "rendering"));
-    },
     async getRenderablePost(postId): Promise<RenderablePost | null> {
       const post = posts.find((p) => p.id === postId);
       if (!post) return null;
