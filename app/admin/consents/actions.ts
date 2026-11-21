@@ -157,7 +157,7 @@ async function startTwin(consentId: string): Promise<ActionState> {
       message: "Approved, but the twin was not started: add TRIGGER_SECRET_KEY, then press “Create twin”.",
     };
   }
-  const client = heygen();
+  const client = heygen({ forPage: true });
   const avatar = await createTwin(consentId, { store, storage: createClipStorage(), heygen: client });
   await pollTwinUntilReady(avatar.id, { store, heygen: client, wait: async () => {}, maxAttempts: 1 });
   return { status: "ok", message: "Approved. Mock twin created (no HeyGen call, nothing spent)." };
@@ -208,7 +208,7 @@ export async function checkTwinAction(avatarId: string, _prev: ActionState): Pro
   await requireAdmin();
   try {
     const store = createConsentStore();
-    const result = await pollTwinOnce(avatarId, { store, heygen: heygen() });
+    const result = await pollTwinOnce(avatarId, { store, heygen: heygen({ forPage: true }) });
     const avatar = await store.getAvatar(avatarId);
     if (avatar?.consent_id) revalidatePath(page(avatar.consent_id));
     return { status: result.done ? "ok" : "idle", message: `Twin status: ${result.status.replaceAll("_", " ")}.` };

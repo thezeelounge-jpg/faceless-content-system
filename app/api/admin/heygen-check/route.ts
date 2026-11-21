@@ -13,7 +13,7 @@ export async function GET() {
   if (!user?.isAdmin) {
     return Response.json({ ok: false, message: "Not found." }, { status: 404, headers: NO_STORE });
   }
-  const client = heygen();
+  const client = heygen({ forPage: true });
   try {
     const me = await client.getCurrentUser();
     return Response.json(

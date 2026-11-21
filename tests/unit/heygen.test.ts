@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HeygenError, MOCK_FIXTURE_VIDEO, createHeygenClient, heygen } from "@/lib/heygen";
+import {
+  HEYGEN_PAGE_MAX_WAIT_S,
+  HEYGEN_RETRY_AFTER_MAX_S,
+  HEYGEN_VIDEO_RESOLUTION,
+  HeygenError,
+  MOCK_FIXTURE_VIDEO,
+  createHeygenClient,
+  heygen,
+} from "@/lib/heygen";
 
 // HeyGen costs money. These tests prove two things:
 // 1. in mock mode (the default) no helper ever calls fetch, even with a key set;
@@ -211,6 +219,50 @@ describe("real requests (MOCK_HEYGEN=false) have the documented shape", () => {
   });
 });
 
+describe("decision 3: tolerant voice parsing (voice_id OR default_voice_id)", () => {
+  const twinAnswer = (voice: Record<string, string>) => ({
+    data: {
+      avatar_item: { id: "look_1", group_id: "group_1", status: "processing", ...voice },
+      avatar_group: { id: "group_1", status: "pending_consent", consent_status: "pending", ...voice },
+    },
+  });
+
+  it("create twin: reads voice_id when default_voice_id is missing", async () => {
+    const { fn } = fakeFetch([{ json: twinAnswer({ voice_id: "voice_plain" }) }]);
+    const twin = await real(fn).createDigitalTwin({ name: "x", file: { type: "asset_id", asset_id: "a" } });
+    expect(twin.voiceId).toBe("voice_plain");
+  });
+
+  it("group and look: read voice_id when default_voice_id is missing", async () => {
+    const { fn } = fakeFetch([
+      { json: { data: { id: "group_1", status: "completed", consent_status: "accepted", voice_id: "voice_g" } } },
+      { json: { data: [{ id: "look_1", group_id: "group_1", status: "completed", voice_id: "voice_l" }] } },
+      { json: { data: { id: "look_1", status: "completed", voice_id: "voice_one" } } },
+    ]);
+    const client = real(fn);
+    expect((await client.getAvatarGroup("group_1")).voiceId).toBe("voice_g");
+    expect((await client.listLooks("group_1"))[0].voiceId).toBe("voice_l");
+    expect((await client.getLook("look_1")).voiceId).toBe("voice_one");
+  });
+
+  it("both present and different: the documented default_voice_id wins", async () => {
+    const { fn } = fakeFetch([
+      { json: { data: { id: "g", status: null, consent_status: null, default_voice_id: "voice_doc", voice_id: "voice_other" } } },
+    ]);
+    expect((await real(fn).getAvatarGroup("g")).voiceId).toBe("voice_doc");
+  });
+
+  it("the documented default_voice_id shape still works", async () => {
+    const { fn } = fakeFetch([{ json: twinAnswer({ default_voice_id: "voice_doc" }) }]);
+    const twin = await real(fn).createDigitalTwin({ name: "x", file: { type: "asset_id", asset_id: "a" } });
+    expect(twin.voiceId).toBe("voice_doc");
+  });
+
+  it("renders will always ask for 1080p explicitly (docs disagree on the default)", () => {
+    expect(HEYGEN_VIDEO_RESOLUTION).toBe("1080p");
+  });
+});
+
 describe("errors, retries and 429", () => {
   it("waits for Retry-After on a 429, then succeeds", async () => {
     const { fn, calls } = fakeFetch([
@@ -240,10 +292,38 @@ describe("errors, retries and 429", () => {
     expect(sleep.mock.calls).toEqual([[2000], [4000]]);
   });
 
-  it("Retry-After is capped at 60 seconds", async () => {
-    const { fn } = fakeFetch([{ status: 429, headers: { "retry-after": "999" } }, { json: { data: {} } }]);
+  it("SF6: the Retry-After ceiling is 15 minutes, in one constant", () => {
+    expect(HEYGEN_RETRY_AFTER_MAX_S).toBe(900);
+  });
+
+  it("SF6: a Retry-After under the ceiling (600 s) is honoured in full, not truncated", async () => {
+    const { fn, calls } = fakeFetch([
+      { status: 429, headers: { "retry-after": "600" } },
+      { json: { data: { username: "z", billing_type: "wallet" } } },
+    ]);
     await real(fn).getCurrentUser();
-    expect(sleep).toHaveBeenCalledWith(60_000);
+    expect(sleep).toHaveBeenCalledWith(600_000);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("SF6: a Retry-After over the ceiling (999 s) fails at once with a plain retry-later error", async () => {
+    const { fn, calls } = fakeFetch([{ status: 429, headers: { "retry-after": "999" } }, { json: { data: {} } }]);
+    const error = (await real(fn).getCurrentUser().catch((e: unknown) => e)) as HeygenError;
+    expect(error).toBeInstanceOf(HeygenError);
+    expect(error.code).toBe("busy");
+    expect(error.message).toBe("HeyGen is busy. Try again in 17 minutes.");
+    expect(sleep).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
+  });
+
+  it("SF6: pages pass a short wait limit, so a page refuses instead of waiting (120 s > 30 s)", async () => {
+    const { fn, calls } = fakeFetch([{ status: 429, headers: { "retry-after": "120" } }]);
+    const client = createHeygenClient({ mock: false, apiKey: "k", fetch: fn, sleep, maxWaitS: HEYGEN_PAGE_MAX_WAIT_S });
+    const error = (await client.getAvatarGroup("g").catch((e: unknown) => e)) as HeygenError;
+    expect(HEYGEN_PAGE_MAX_WAIT_S).toBe(30);
+    expect(error.message).toBe("HeyGen is busy. Try again in 2 minutes.");
+    expect(sleep).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(1);
   });
 
   it("a 500 on a GET is retried; a 500 on a POST is not (it might have worked)", async () => {

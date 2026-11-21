@@ -32,7 +32,29 @@ export const MOCK_FIXTURE_VIDEO = "tests/fixtures/consent-good.mp4";
 const TIMEOUT_MS = 60_000;
 const UPLOAD_TIMEOUT_MS = 10 * 60_000;
 const MAX_ATTEMPTS = 3;
-const MAX_RETRY_AFTER_S = 60;
+/**
+ * SF6: the longest we will wait for HeyGen's Retry-After (seconds), in task code.
+ * Why a ceiling at all: a Trigger.dev task has a maxDuration (create-twin 900 s,
+ * poll-twin 600 s of compute), and serverless functions are killed sooner. A
+ * longer wait would be cut off mid-sleep. Above the ceiling we do NOT shorten
+ * the wait (that would just get another 429): we fail at once with a plain
+ * "HeyGen is busy. Try again in N minutes." and the task's own retry or the
+ * admin tries later.
+ */
+export const HEYGEN_RETRY_AFTER_MAX_S = 15 * 60;
+/**
+ * Server Actions and routes (a person is waiting on the page): wait at most
+ * this long, otherwise refuse with the same plain "try again in N minutes".
+ */
+export const HEYGEN_PAGE_MAX_WAIT_S = 30;
+
+/**
+ * Decision 3: every render asks for 1080p explicitly (POST /v3/videos
+ * `resolution`, Phase 3 part B step 2). The docs disagree on the default
+ * (Avatar 6 page: 1080p; Usage Limits: 720p for `avatar`). No endpoint used
+ * so far (assets, avatars, consent, looks) takes a resolution field.
+ */
+export const HEYGEN_VIDEO_RESOLUTION = "1080p";
 
 export type HeygenErrorCode =
   | "not_set_up"
@@ -66,6 +88,8 @@ export type HeygenDeps = {
   apiKey: string | undefined;
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
+  /** Longest Retry-After this caller may wait (seconds). Tasks: HEYGEN_RETRY_AFTER_MAX_S; pages: HEYGEN_PAGE_MAX_WAIT_S. */
+  maxWaitS: number;
 };
 
 // ---------------------------------------------------------------------------
@@ -73,6 +97,11 @@ export type HeygenDeps = {
 // ---------------------------------------------------------------------------
 
 const nullableString = z.string().nullish().transform((v) => v ?? null);
+
+// Decision 3: the docs name the voice `default_voice_id`, but some pages and
+// answers use `voice_id`. Read both; the documented one wins when they differ.
+const voiceFields = { default_voice_id: nullableString, voice_id: nullableString };
+const voiceOf = (x: { default_voice_id: string | null; voice_id: string | null }) => x.default_voice_id ?? x.voice_id;
 
 // Docs: API Key page ("billing_type and corresponding billing field").
 // `username` is UNCONFIRMED (docs: user-profile page not readable via Context7).
@@ -83,12 +112,12 @@ const usersMeSchema = z.object({
 // Docs: "Create Avatar" / "Video to Avatar".
 const createAvatarSchema = z.object({
   data: z.object({
-    avatar_item: z.object({ id: z.string(), group_id: z.string(), status: z.string(), default_voice_id: nullableString }),
+    avatar_item: z.object({ id: z.string(), group_id: z.string(), status: z.string(), ...voiceFields }),
     avatar_group: z.object({
       id: z.string(),
       status: nullableString,
       consent_status: nullableString,
-      default_voice_id: nullableString,
+      ...voiceFields,
     }),
   }),
 });
@@ -105,7 +134,7 @@ const groupSchema = z.object({
     id: z.string(),
     status: nullableString,
     consent_status: nullableString,
-    default_voice_id: nullableString,
+    ...voiceFields,
   }),
 });
 
@@ -115,7 +144,7 @@ const lookSchema = z.object({
   group_id: nullableString,
   status: nullableString,
   supported_api_engines: z.array(z.string()).nullish().transform((v) => v ?? []),
-  default_voice_id: nullableString,
+  ...voiceFields,
 });
 const looksSchema = z.object({ data: z.array(lookSchema) });
 const oneLookSchema = z.object({ data: lookSchema });
@@ -176,7 +205,7 @@ function toLook(look: z.output<typeof lookSchema>): AvatarLook {
     groupId: look.group_id,
     status: look.status,
     supportedEngines: look.supported_api_engines,
-    voiceId: look.default_voice_id,
+    voiceId: voiceOf(look),
   };
 }
 
@@ -192,11 +221,21 @@ function parse<S extends z.ZodType>(schema: S, json: unknown, what: string): z.o
 // Low-level request with timeout, retry and Retry-After
 // ---------------------------------------------------------------------------
 
-/** Retry-After in ms (capped), or 2 s, 4 s, ... */
-export function heygenBackoffMs(attempt: number, retryAfter: string | null): number {
+/** Retry-After in seconds when HeyGen sent a usable number, else null. */
+function retryAfterSeconds(retryAfter: string | null): number | null {
   const seconds = Number(retryAfter);
-  if (retryAfter && Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, MAX_RETRY_AFTER_S) * 1000;
-  return 2000 * 2 ** (attempt - 1);
+  return retryAfter && Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+/** Retry-After in ms (in full; callers check the ceiling first), or 2 s, 4 s, ... */
+export function heygenBackoffMs(attempt: number, retryAfter: string | null): number {
+  const seconds = retryAfterSeconds(retryAfter);
+  return seconds !== null ? seconds * 1000 : 2000 * 2 ** (attempt - 1);
+}
+
+function busyFor(seconds: number, status: number): HeygenError {
+  const minutes = Math.max(1, Math.ceil(seconds / 60));
+  return new HeygenError("busy", `HeyGen is busy. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`, { status });
 }
 
 function errorFor(status: number, body: unknown): HeygenError {
@@ -268,6 +307,9 @@ async function send(
 
     const body = await readJson(response);
     const retryable = response.status === 429 || (canRetryFailures && response.status >= 500);
+    const waitS = response.status === 429 ? retryAfterSeconds(response.headers.get("retry-after")) : null;
+    // SF6: never cut HeyGen's Retry-After short. Too long for this caller → plain retry-later error now.
+    if (waitS !== null && waitS > deps.maxWaitS) throw busyFor(waitS, response.status);
     if (retryable && attempt < MAX_ATTEMPTS) {
       await deps.sleep(heygenBackoffMs(attempt, response.headers.get("retry-after")));
       continue;
@@ -288,6 +330,7 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
     apiKey: readEnv("HEYGEN_API_KEY"),
     fetch: (...args) => globalThis.fetch(...args),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    maxWaitS: HEYGEN_RETRY_AFTER_MAX_S,
     ...overrides,
   };
   const request = makeRequester(deps);
@@ -353,7 +396,7 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
       return {
         groupId: group.id,
         lookId: look.id,
-        voiceId: group.default_voice_id ?? look.default_voice_id,
+        voiceId: voiceOf(group) ?? voiceOf(look),
         lookStatus: look.status,
         groupStatus: group.status,
         consentStatus: group.consent_status,
@@ -371,7 +414,7 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
     async getAvatarGroup(groupId: string): Promise<AvatarGroup> {
       const json = await call(mockAvatarGroup, `/v3/avatars/${enc(groupId)}`, { method: "GET" });
       const data = parse(groupSchema, json, "avatar group").data;
-      return { groupId: data.id, status: data.status, consentStatus: data.consent_status, voiceId: data.default_voice_id };
+      return { groupId: data.id, status: data.status, consentStatus: data.consent_status, voiceId: voiceOf(data) };
     },
 
     /** GET /v3/avatars/looks?group_id=…: the looks in one group, with engines and voice. */
@@ -406,7 +449,10 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
 
 export type HeygenClient = ReturnType<typeof createHeygenClient>;
 
-/** The app's HeyGen client, set up from env (mock unless MOCK_HEYGEN is exactly "false"). */
-export function heygen(): HeygenClient {
-  return createHeygenClient();
+/**
+ * The app's HeyGen client, set up from env (mock unless MOCK_HEYGEN is exactly "false").
+ * Background tasks: heygen(). Pages, Server Actions and routes: heygen({ forPage: true }).
+ */
+export function heygen(opts: { forPage?: boolean } = {}): HeygenClient {
+  return createHeygenClient(opts.forPage ? { maxWaitS: HEYGEN_PAGE_MAX_WAIT_S } : {});
 }
