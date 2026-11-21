@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { envStatus, getSiteUrl, getSupabasePublicConfig, isMockHeygen, isMockStt } from "@/lib/config";
+import {
+  envStatus,
+  getSiteUrl,
+  getSupabasePublicConfig,
+  isMockClaude,
+  isMockHeygen,
+  isMockStt,
+} from "@/lib/config";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -10,17 +17,26 @@ describe("money-safety mock switches", () => {
     for (const value of [undefined, "", "true", "yes", "FALSE ", "0"]) {
       vi.stubEnv("MOCK_HEYGEN", value as string);
       vi.stubEnv("MOCK_STT", value as string);
+      vi.stubEnv("MOCK_CLAUDE", value as string);
       const expected = value?.trim() !== "false";
       expect(isMockHeygen()).toBe(expected);
       expect(isMockStt()).toBe(expected);
+      expect(isMockClaude()).toBe(expected);
     }
   });
 
   it("turn OFF only with 'false'", () => {
     vi.stubEnv("MOCK_HEYGEN", "false");
     vi.stubEnv("MOCK_STT", "false");
+    vi.stubEnv("MOCK_CLAUDE", "false");
     expect(isMockHeygen()).toBe(false);
     expect(isMockStt()).toBe(false);
+    expect(isMockClaude()).toBe(false);
+  });
+
+  it("keeps Claude in mock mode when MOCK_CLAUDE is missing", () => {
+    vi.stubEnv("MOCK_CLAUDE", undefined as unknown as string);
+    expect(isMockClaude()).toBe(true);
   });
 });
 

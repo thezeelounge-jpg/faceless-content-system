@@ -19,6 +19,11 @@ export function isMockStt(): boolean {
   return process.env.MOCK_STT?.trim() !== "false";
 }
 
+/** Claude follows the same rule: sample answers, no API calls, unless exactly "false". */
+export function isMockClaude(): boolean {
+  return process.env.MOCK_CLAUDE?.trim() !== "false";
+}
+
 export function isGoogleLoginEnabled(): boolean {
   return process.env.NEXT_PUBLIC_GOOGLE_LOGIN?.trim() === "true";
 }
