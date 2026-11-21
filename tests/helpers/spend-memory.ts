@@ -15,12 +15,17 @@ export type SpendRow = {
   created_at: string;
 };
 
-export function memorySpendStore(settings: { rendersPaused?: boolean; caps?: Partial<Record<SpendKind, number>> | null } = {}) {
+export function memorySpendStore(
+  settings: { rendersPaused?: boolean; caps?: Partial<Record<SpendKind, number>> | null; pausedBrands?: string[] } = {},
+) {
   const rows: SpendRow[] = [];
   let n = 0;
   const store: SpendStore = {
     async getSettings() {
       return { rendersPaused: settings.rendersPaused ?? false, caps: settings.caps ?? null };
+    },
+    async isBrandPaused(brandId) {
+      return (settings.pausedBrands ?? []).includes(brandId);
     },
     async reserve(row) {
       const used = rows.filter((r) => r.kind === row.kind && r.created_at >= row.since).length;

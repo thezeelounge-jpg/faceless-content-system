@@ -103,7 +103,7 @@ export async function createTwin(
       try {
         // Spend guard: pause switch + daily cap + a provider_usage row, before the POST.
         twin = await withHeygenSpend(
-          { kind: "create_twin", avatarId: avatar.id, mock: deps.heygen.mock, store: deps.spend },
+          { kind: "create_twin", avatarId: avatar.id, brandId: consent.brand_id, mock: deps.heygen.mock, store: deps.spend },
           () => deps.heygen.createDigitalTwin({ name: `${brand.name} twin`, file: { type: "asset_id", asset_id: assetId } }),
         );
       } catch (error) {

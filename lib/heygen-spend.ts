@@ -6,7 +6,8 @@ import { PlainError } from "@/lib/plain-error";
 //   - create_twin: POST /v3/avatars (lib/twin.ts)
 //   - render:      POST /v3/videos  (Phase 3 part B step 2)
 // It refuses (plain error, nothing sent to HeyGen) when app_settings
-// renders_paused is true, or when today's guarded calls of that kind (Asia/
+// renders_paused is true, when the client's brands.paused is true (renders
+// must name their brand), or when today's guarded calls of that kind (Asia/
 // Karachi day) reached the cap in app_settings heygen_daily_caps (defaults in
 // lib/config.ts). Otherwise it reserves a provider_usage row ('reserved'),
 // which is marked 'succeeded' or 'failed' after the call. Every row counts
@@ -18,6 +19,8 @@ export type SpendKind = "create_twin" | "render";
 
 export interface SpendStore {
   getSettings(): Promise<{ rendersPaused: boolean; caps: Partial<Record<SpendKind, number>> | null }>;
+  /** brands.paused for this brand (a missing brand counts as paused: fail safe). */
+  isBrandPaused(brandId: string): Promise<boolean>;
   /**
    * Atomically: if fewer than `cap` heygen rows of `kind` were created since
    * `since`, insert a 'reserved' row and return its id; else return null.
@@ -53,6 +56,8 @@ export function karachiDayStart(now: Date): Date {
 
 type GuardOptions = {
   kind: SpendKind;
+  /** The client. Required for renders, so brands.paused is always checked. */
+  brandId?: string | null;
   avatarId?: string | null;
   videoId?: string | null;
   /** The HeyGen client's mock flag: mock rows get cost 0 and note 'mock'. */
@@ -66,6 +71,13 @@ export async function guardHeygenSpend(opts: GuardOptions): Promise<string> {
   const settings = await opts.store.getSettings();
   if (settings.rendersPaused) {
     throw new SpendGuardError("HeyGen work is paused (renders_paused is on). Nothing was sent to HeyGen.");
+  }
+  // CLAUDE.md "Pause switches": brands.paused stops this client's HeyGen work too.
+  if (!opts.brandId && opts.kind === "render") {
+    throw new SpendGuardError("A render needs its client, so the pause switch can be checked. Nothing was sent to HeyGen.");
+  }
+  if (opts.brandId && (await opts.store.isBrandPaused(opts.brandId))) {
+    throw new SpendGuardError("This client is paused. Nothing was sent to HeyGen.");
   }
   const configured = settings.caps?.[opts.kind];
   const cap = typeof configured === "number" && Number.isInteger(configured) && configured >= 0

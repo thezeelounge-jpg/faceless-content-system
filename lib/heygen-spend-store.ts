@@ -27,6 +27,12 @@ export function createSpendStore(): SpendStore {
         caps: caps && typeof caps === "object" ? (caps as Partial<Record<SpendKind, number>>) : null,
       };
     },
+    async isBrandPaused(brandId) {
+      const { data, error } = await db.from("brands").select("paused").eq("id", brandId).maybeSingle();
+      if (error) fail("load brand pause", error);
+      // A missing brand counts as paused (fail safe).
+      return data ? data.paused !== false : true;
+    },
     async reserve(row) {
       const { data, error } = await db.rpc("reserve_heygen_spend", {
         p_kind: row.kind,

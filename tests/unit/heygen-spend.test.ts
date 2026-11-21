@@ -28,7 +28,7 @@ describe("caps and the Karachi day", () => {
 
   it("under the cap: reserves a row (mock: cost 0, note 'mock')", async () => {
     const spend = memorySpendStore();
-    const id = await guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW, videoId: "v1" });
+    const id = await guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW, videoId: "v1", brandId: BRAND_ID });
     expect(spend.rows).toEqual([
       expect.objectContaining({ id, kind: "render", status: "reserved", cost_usd: 0, note: "mock", video_id: "v1" }),
     ]);
@@ -38,7 +38,9 @@ describe("caps and the Karachi day", () => {
     const spend = memorySpendStore();
     spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
     spend.seed("render", "2026-11-21T18:30:00.000Z", 5); // yesterday in Karachi: does not count
-    const error = await guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW }).catch((e) => e);
+    const error = await guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW, brandId: BRAND_ID }).catch(
+      (e) => e,
+    );
     expect(error).toBeInstanceOf(SpendGuardError);
     expect(error.message).toBe(
       "Today's HeyGen limit for videos is reached (3 a day). Nothing was sent to HeyGen. Try again tomorrow, or raise heygen_daily_caps in Settings.",
@@ -64,7 +66,7 @@ describe("caps and the Karachi day", () => {
 
   it("withHeygenSpend marks the row succeeded, or failed when the call throws", async () => {
     const spend = memorySpendStore();
-    const opts = { kind: "render" as const, mock: false, store: spend.store, now: NOW };
+    const opts = { kind: "render" as const, mock: false, store: spend.store, now: NOW, brandId: BRAND_ID };
     expect(await withHeygenSpend(opts, async () => "ok")).toBe("ok");
     await expect(
       withHeygenSpend(opts, async () => {
@@ -80,8 +82,50 @@ describe("caps and the Karachi day", () => {
   it("a refused guard never runs the call", async () => {
     const spend = memorySpendStore({ rendersPaused: true });
     const call = vi.fn(async () => "x");
-    await expect(withHeygenSpend({ kind: "render", mock: true, store: spend.store }, call)).rejects.toThrow(SpendGuardError);
+    await expect(withHeygenSpend({ kind: "render", mock: true, store: spend.store, brandId: BRAND_ID }, call)).rejects.toThrow(
+      SpendGuardError,
+    );
     expect(call).not.toHaveBeenCalled();
+  });
+});
+
+// CLAUDE.md "Pause switches": renders_paused (global) AND brands.paused.
+describe("pause rule: renders_paused and brands.paused", () => {
+  const OTHER_BRAND = "10000000-0000-0000-0000-000000000002";
+
+  it("brands.paused: a render for that brand is refused before anything, no row; another brand still renders", async () => {
+    const spend = memorySpendStore({ pausedBrands: [BRAND_ID] });
+    const call = vi.fn(async () => "x");
+    await expect(
+      withHeygenSpend({ kind: "render", mock: true, store: spend.store, brandId: BRAND_ID, now: NOW }, call),
+    ).rejects.toThrow("This client is paused. Nothing was sent to HeyGen.");
+    expect(call).not.toHaveBeenCalled();
+    expect(spend.rows).toEqual([]);
+    expect(await withHeygenSpend({ kind: "render", mock: true, store: spend.store, brandId: OTHER_BRAND, now: NOW }, call)).toBe("x");
+    expect(spend.rows).toHaveLength(1);
+  });
+
+  it("brands.paused also stops a new twin for that brand", async () => {
+    const spend = memorySpendStore({ pausedBrands: [BRAND_ID] });
+    await expect(
+      guardHeygenSpend({ kind: "create_twin", mock: true, store: spend.store, brandId: BRAND_ID, now: NOW }),
+    ).rejects.toThrow(SpendGuardError);
+    expect(spend.rows).toEqual([]);
+  });
+
+  it("renders_paused wins even when the brand is not paused", async () => {
+    const spend = memorySpendStore({ rendersPaused: true });
+    await expect(
+      guardHeygenSpend({ kind: "render", mock: true, store: spend.store, brandId: OTHER_BRAND, now: NOW }),
+    ).rejects.toThrow("renders_paused is on");
+  });
+
+  it("a render without a brand id is refused (its pause switch could not be checked)", async () => {
+    const spend = memorySpendStore();
+    await expect(guardHeygenSpend({ kind: "render", mock: true, store: spend.store, now: NOW })).rejects.toThrow(
+      "A render needs its client, so the pause switch can be checked. Nothing was sent to HeyGen.",
+    );
+    expect(spend.rows).toEqual([]);
   });
 });
 
