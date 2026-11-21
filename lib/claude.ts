@@ -6,6 +6,8 @@ import { z } from "zod";
 import { estimateCostUsd } from "@/lib/ai-prices";
 import {
   brandProfileOutput,
+  clipFaceInput,
+  clipFaceOutput,
   planInput,
   planOutput,
   pronunciationInput,
@@ -26,6 +28,7 @@ import {
   type MockScenario,
 } from "@/lib/claude-mocks";
 import { splitSamples } from "@/lib/brand-input";
+import { mockClipFaceCheck } from "@/lib/clip-checks/face-mock";
 import { isMockClaude, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
 import { loadPrompt } from "@/lib/prompts";
@@ -134,6 +137,17 @@ export const CLAUDE_TASKS = {
     stream: false,
     timeoutMs: 60_000,
   },
+  /** Consent clip: frames go in as images (ClaudeContext.images). */
+  clip_face_check: {
+    model: "main",
+    effort: "low",
+    maxTokens: 4_000,
+    prompt: "clip-face-check.md",
+    input: clipFaceInput,
+    output: clipFaceOutput,
+    stream: false,
+    timeoutMs: 120_000,
+  },
 } as const satisfies Record<string, TaskDef>;
 
 export type ClaudeTaskName = keyof typeof CLAUDE_TASKS;
@@ -157,7 +171,10 @@ export type ClaudeBrand = {
   words_per_second: number;
 };
 
-export type ClaudeContext<T extends ClaudeTaskName> = { brand: ClaudeBrand; input: TaskInput<T> };
+/** A base64 image sent with the prompt (vision tasks only). */
+export type ClaudeImage = { mediaType: "image/jpeg" | "image/png"; data: string };
+
+export type ClaudeContext<T extends ClaudeTaskName> = { brand: ClaudeBrand; input: TaskInput<T>; images?: ClaudeImage[] };
 
 export type UsageRow = {
   brand_id: string | null;
@@ -248,6 +265,19 @@ function jsonFormat(schema: z.ZodType) {
 export function buildClaudeRequest<T extends ClaudeTaskName>(task: T, ctx: ClaudeContext<T>): ClaudeRequest {
   const def: TaskDef = CLAUDE_TASKS[task];
   const input = def.input.parse(ctx.input);
+  const text = `${loadPrompt(def.prompt)}\n\n## Input\n\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``;
+  // Images go before the text (vision tasks); other tasks send plain text.
+  const images = ctx.images ?? [];
+  const content =
+    images.length === 0
+      ? text
+      : [
+          ...images.map((image) => ({
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: image.mediaType, data: image.data },
+          })),
+          { type: "text" as const, text },
+        ];
   return {
     model: claudeModel(def.model),
     max_tokens: def.maxTokens,
@@ -255,12 +285,7 @@ export function buildClaudeRequest<T extends ClaudeTaskName>(task: T, ctx: Claud
       { type: "text", text: loadPrompt("system.md") },
       { type: "text", text: brandContext(ctx.brand), cache_control: { type: "ephemeral" } },
     ],
-    messages: [
-      {
-        role: "user",
-        content: `${loadPrompt(def.prompt)}\n\n## Input\n\n\`\`\`json\n${JSON.stringify(input, null, 2)}\n\`\`\``,
-      },
-    ],
+    messages: [{ role: "user", content }],
     output_config: { effort: def.effort, format: jsonFormat(def.output) },
   };
 }
@@ -443,6 +468,8 @@ function mockAnswer(task: ClaudeTaskName, brand: ClaudeBrand, input: unknown, sc
       return mockScriptRewrite(brand, scriptRewriteInput.parse(input), scenario);
     case "pronunciation_suggest":
       return mockPronunciation(pronunciationInput.parse(input));
+    case "clip_face_check":
+      return mockClipFaceCheck(clipFaceInput.parse(input));
   }
 }
 
