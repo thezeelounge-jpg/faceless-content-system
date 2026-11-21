@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HEYGEN_RETRY_AFTER_MAX_S, createHeygenClient } from "@/lib/heygen";
 import { RENDER } from "@/lib/qa/config";
-import { createPostRender, heygenCallbackUrl, renderVideo } from "@/lib/render";
+import { LOST_RENDER, RENDER_UNKNOWN, createPostRender, heygenCallbackUrl, renderVideo } from "@/lib/render";
 import { BRAND_ID } from "@/tests/helpers/consent-memory";
 import { memorySpendStore } from "@/tests/helpers/spend-memory";
 import { POST_ID, SCRIPT_ID, memoryVideoStore } from "@/tests/helpers/video-memory";
@@ -200,11 +200,13 @@ describe("renderVideo: never twice, pause switches, caps", () => {
     );
     crashOnce.mockRestore();
 
-    await expect(renderVideo(video.id, { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true })).rejects.toThrow(
-      "This video may already be rendering on HeyGen, but we did not save its id. Check the HeyGen dashboard before rendering again.",
-    );
+    // SF3: the retry treats it as "unknown": no second POST, the claim stays, webhook/poll finish it.
+    await expect(renderVideo(video.id, { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true })).resolves.toEqual({
+      status: "unknown",
+    });
     expect(fake.calls).toHaveLength(1);
-    expect(mem.videos[0].error).toContain("may already be rendering");
+    expect(mem.videos[0]).toMatchObject({ status: "rendering", heygen_video_id: null });
+    expect(mem.videos[0].render_started_at).not.toBeNull();
   });
 
   it("10 renders at once: the 11th waits (stays queued, no POST, no spend row) and never errors the post", async () => {
@@ -285,18 +287,46 @@ describe("renderVideo: never twice, pause switches, caps", () => {
     expect(mem.videos[0]).toMatchObject({ status: "failed", render_started_at: null, error: "HeyGen refused the request (invalid_parameter)." });
   });
 
-  it("HeyGen 500 (it may have started): claim KEPT, video failed with the 'check HeyGen' message, a retry never POSTs", async () => {
+  it("SF3: HeyGen 500 after the POST: NOT failed; unknown (rendering, claim kept, no id), post rendering, a retry never POSTs", async () => {
     const video = await queuedPostVideo();
     const fake = fakeFetch([json({}, 500)]);
     const client = liveClient(fake);
-    await expect(renderVideo(video.id, { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true })).rejects.toThrow();
+    await expect(renderVideo(video.id, { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true })).resolves.toEqual({
+      status: "unknown",
+    });
+    expect(mem.videos[0]).toMatchObject({ status: "rendering", heygen_video_id: null, error: RENDER_UNKNOWN });
     expect(mem.videos[0].render_started_at).not.toBeNull();
-    expect(mem.videos[0]).toMatchObject({ status: "failed" });
-    expect(mem.videos[0].error).toContain("Check the HeyGen dashboard");
-    await expect(renderVideo(video.id, { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true })).rejects.toThrow(
-      "Check the HeyGen dashboard",
-    );
+    expect(mem.posts[0]).toMatchObject({ status: "rendering", status_reason: null });
+    await expect(renderVideo(video.id, { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true })).resolves.toEqual({
+      status: "unknown",
+    });
     expect(fake.calls).toHaveLength(1);
+  });
+
+  it("SF3: a POST timeout: unknown state, claim kept, and no second POST on retry", async () => {
+    const video = await queuedPostVideo();
+    const timeout = () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    };
+    const fake = fakeFetch([timeout, json({ data: { video_id: "hg_second_paid" } })]);
+    const client = liveClient(fake);
+    const deps = { videos: mem.store, heygen: client, spend: spend.store, confirmSpend: true };
+    expect(await renderVideo(video.id, deps)).toEqual({ status: "unknown" });
+    expect(mem.videos[0]).toMatchObject({ status: "rendering", heygen_video_id: null, error: RENDER_UNKNOWN });
+    expect(await renderVideo(video.id, deps)).toEqual({ status: "unknown" });
+    expect(await renderVideo(video.id, deps)).toEqual({ status: "unknown" });
+    expect(fake.calls).toHaveLength(1);
+    expect(spend.rows).toHaveLength(1);
+  });
+
+  it("a claim without an id on a video that is no longer rendering (after the window): refuses with 'check HeyGen'", async () => {
+    const video = await queuedPostVideo();
+    await mem.store.updateVideo(video.id, { status: "failed", render_started_at: "2026-11-22T00:00:00Z" });
+    const fake = fakeFetch([]);
+    await expect(
+      renderVideo(video.id, { videos: mem.store, heygen: liveClient(fake), spend: spend.store, confirmSpend: true }),
+    ).rejects.toThrow(LOST_RENDER);
+    expect(fake.calls).toHaveLength(0);
   });
 
   it("the twin's HeyGen consent is not accepted: refused before any HeyGen call", async () => {

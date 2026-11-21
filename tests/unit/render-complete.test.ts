@@ -1,8 +1,18 @@
+import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MOCK_FIXTURE_VIDEO, createHeygenClient } from "@/lib/heygen";
+import { handleHeygenWebhook } from "@/lib/heygen-webhook";
 import { RENDER } from "@/lib/qa/config";
-import { completeRender, createPostRender, pollRenderOnce, pollRenderUntilDone, renderVideo, rollingWordsPerSecond } from "@/lib/render";
+import {
+  UNKNOWN_TIMEOUT,
+  completeRender,
+  createPostRender,
+  pollRenderOnce,
+  pollRenderUntilDone,
+  renderVideo,
+  rollingWordsPerSecond,
+} from "@/lib/render";
 import { BRAND_ID } from "@/tests/helpers/consent-memory";
 import { memorySpendStore } from "@/tests/helpers/spend-memory";
 import { POST_ID, memoryVideoFiles, memoryVideoStore } from "@/tests/helpers/video-memory";
@@ -36,6 +46,75 @@ async function renderingVideo() {
   await renderVideo(video.id, { videos: mem.store, heygen: mockClient(), spend: memorySpendStore().store });
   return (await mem.store.getVideo(video.id))!;
 }
+
+/** SF3: a real-mode POST that timed out (FAKE fetch): the video is left in the unknown state. */
+async function unknownVideo() {
+  await mem.seedReadyTwin();
+  mem.seedApprovedPost();
+  const video = await createPostRender(POST_ID, { videos: mem.store });
+  const fakeFetch = vi.fn(async () => {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  });
+  const live = createHeygenClient({ mock: false, apiKey: "test-key-not-real", fetch: fakeFetch as unknown as typeof fetch });
+  // Throws or answers "unknown" depending on the code under test; the state is what matters.
+  await renderVideo(video.id, { videos: mem.store, heygen: live, spend: memorySpendStore().store, confirmSpend: true }).catch(() => null);
+  expect(fakeFetch).toHaveBeenCalledTimes(1);
+  return (await mem.store.getVideo(video.id))!;
+}
+
+const SECRET = "test-webhook-secret-not-real";
+function signedSuccess(videoId: string, heygenId: string) {
+  const rawBody = JSON.stringify({
+    event_type: "avatar_video.success",
+    event_data: { video_id: heygenId, url: null, callback_id: videoId },
+  });
+  return { rawBody, signature: createHmac("sha256", SECRET).update(rawBody, "utf8").digest("hex"), secret: SECRET };
+}
+
+describe("SF3 + SF5: a render whose POST answer was lost", () => {
+  it("SF3: the webhook for that callback_id saves HeyGen's id and completes it (downloaded, rendered)", async () => {
+    const video = await unknownVideo();
+    const result = await handleHeygenWebhook(signedSuccess(video.id, "hg_late_1"), {
+      videos: mem.store,
+      heygen: mockClient(),
+      files: files.storage,
+      download,
+    });
+    expect(result.status).toBe(200);
+    expect(mem.videos[0]).toMatchObject({ status: "rendered", heygen_video_id: "hg_late_1", raw_path: `raw/${BRAND_ID}/${video.id}.mp4`, error: null });
+    expect(download).toHaveBeenCalledTimes(1);
+  });
+
+  it("SF3: the poll completes it once HeyGen's id is known", async () => {
+    const video = await unknownVideo();
+    await mem.store.updateVideo(video.id, { heygen_video_id: "hg_late_2" });
+    const result = await pollRenderOnce(video.id, { videos: mem.store, heygen: mockClient(), files: files.storage, download });
+    expect(result).toEqual({ done: true, status: "rendered" });
+    expect(mem.videos[0].status).toBe("rendered");
+  });
+
+  it("SF5: before the 30-minute window the poll keeps waiting (still unknown, post untouched)", async () => {
+    const video = await unknownVideo();
+    const started = Date.parse(video.render_started_at!);
+    const now = () => new Date(started + (RENDER.poll_max_s - 1) * 1000);
+    const result = await pollRenderOnce(video.id, { videos: mem.store, heygen: mockClient(), files: files.storage, download, now });
+    expect(result).toEqual({ done: false, status: "unknown" });
+    expect(mem.videos[0]).toMatchObject({ status: "rendering", heygen_video_id: null });
+    expect(mem.posts[0].status).toBe("rendering");
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  it("SF5: once the window has passed with no word: video failed (claim kept), post → team_review with the plain team reason", async () => {
+    const video = await unknownVideo();
+    const started = Date.parse(video.render_started_at!);
+    const now = () => new Date(started + RENDER.poll_max_s * 1000);
+    const result = await pollRenderOnce(video.id, { videos: mem.store, heygen: mockClient(), files: files.storage, download, now });
+    expect(result).toEqual({ done: true, status: "failed" });
+    expect(mem.videos[0]).toMatchObject({ status: "failed", heygen_video_id: null, error: UNKNOWN_TIMEOUT });
+    expect(mem.videos[0].render_started_at).not.toBeNull();
+    expect(mem.posts[0]).toMatchObject({ status: "team_review", status_reason: "The video could not be made. The team will look at it." });
+  });
+});
 
 describe("rollingWordsPerSecond", () => {
   it("averages words/duration over the newest 10 samples, rounded to 2 decimals", () => {

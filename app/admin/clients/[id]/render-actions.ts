@@ -10,7 +10,7 @@ import { heygen } from "@/lib/heygen";
 import { createSpendStore } from "@/lib/heygen-spend-store";
 import type { ActionState } from "@/lib/plain-error";
 import { PlainError } from "@/lib/plain-error";
-import { NEEDS_SPEND_CONFIRM, createPostRender, pollRenderOnce, renderVideo } from "@/lib/render";
+import { NEEDS_SPEND_CONFIRM, RENDER_UNKNOWN, createPostRender, pollRenderOnce, renderVideo } from "@/lib/render";
 import { createVideoFiles, createVideoStore } from "@/lib/video-store";
 import type { renderVideoTask } from "@/trigger/render-video";
 
@@ -48,6 +48,10 @@ export async function makeVideoAction(postId: string, _prev: ActionState, formDa
     const started = await renderVideo(video.id, { videos, heygen: client, spend: createSpendStore(), confirmSpend });
     if (started.status === "waiting") {
       return { status: "error", message: "All 10 render slots are busy. The video is queued: press again in a few minutes." };
+    }
+    if (started.status === "unknown") {
+      revalidatePath(page);
+      return { status: "error", message: RENDER_UNKNOWN };
     }
     await pollRenderOnce(video.id, { videos, heygen: client, files: createVideoFiles() });
     revalidatePath(page);

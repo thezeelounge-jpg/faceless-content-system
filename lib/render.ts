@@ -24,6 +24,10 @@ import type { RenderSample, VideoFiles, VideoRow, VideoStore } from "@/lib/video
 //
 // videos.status: queued → rendering (claimed, POST sent) → rendered (raw MP4
 // in the private bucket) | failed (plain reason in videos.error).
+// The "unknown" state (SF3) is NOT a new status: 'rendering' + render_started_at
+// set + heygen_video_id null (+ RENDER_UNKNOWN in error). Keeping 'rendering'
+// means it still counts toward the 10-at-once cap (HeyGen may be rendering it),
+// claim_render_slot refuses it, and the webhook backfill already matches it.
 
 export type RenderDeps = {
   videos: VideoStore;
@@ -39,7 +43,13 @@ export type RenderStart =
   | { status: "started"; heygenVideoId: string }
   | { status: "already_started"; heygenVideoId: string }
   /** All render slots are busy: try again later (the video stays queued). */
-  | { status: "waiting" };
+  | { status: "waiting" }
+  /**
+   * SF3: the POST may have reached HeyGen (timeout, 5xx, crash) but we have
+   * no HeyGen id. The video stays 'rendering' with its claim (never POSTed
+   * again); the webhook (callback_id) or the poll finishes it.
+   */
+  | { status: "unknown" };
 
 export type RenderOutcome =
   | { ok: true; videoUrl: string | null; durationS: number | null }
@@ -51,6 +61,8 @@ export type CompleteDeps = {
   files: VideoFiles;
   /** Injectable downloader (tests: a fake returning fixture bytes). Defaults to heygen.downloadVideo. */
   download?: (url: string | null) => Promise<Uint8Array>;
+  /** The clock (tests pass a fixed time). Defaults to now. */
+  now?: () => Date;
 };
 
 /** The fixed line every likeness-test render says (about 15 seconds at 2.4 words a second). */
@@ -64,6 +76,16 @@ export const NEEDS_SPEND_CONFIRM =
 /** SF2 for renders: shown when a render may exist on HeyGen but its id was never saved. */
 export const LOST_RENDER =
   "This video may already be rendering on HeyGen, but we did not save its id. Check the HeyGen dashboard before rendering again.";
+
+/** SF3: saved on a video whose POST answer was lost (timeout, 5xx, crash). Admin wording. */
+export const RENDER_UNKNOWN = `HeyGen did not answer clearly, so this video may be rendering. It will not be sent again; we wait up to ${
+  RENDER.poll_max_s / 60
+} minutes for HeyGen's update.`;
+
+/** SF5: the unknown wait ran out with no word from HeyGen. Admin wording; the post goes to the team queue. */
+export const UNKNOWN_TIMEOUT = `HeyGen never confirmed this video within ${
+  RENDER.poll_max_s / 60
+} minutes. Check the HeyGen dashboard before rendering again.`;
 
 /** HeyGen answers that prove nothing was rendered (see lib/twin.ts for the same idea). */
 const HEYGEN_DID_NOT_RENDER: HeygenErrorCode[] = ["not_set_up", "unauthorized", "not_found", "bad_request", "busy"];
@@ -143,6 +165,8 @@ export async function renderVideo(videoId: string, deps: RenderDeps): Promise<Re
   if (!video) throw new PlainError("Video not found.");
   if (video.heygen_video_id) return { status: "already_started", heygenVideoId: video.heygen_video_id };
   if (video.render_started_at) {
+    // SF3: claimed, no id, still 'rendering' → the unknown state: never POST again; webhook/poll finish it.
+    if (video.status === "rendering") return { status: "unknown" };
     await deps.videos.updateVideo(video.id, { error: LOST_RENDER });
     throw new PlainError(LOST_RENDER);
   }
@@ -166,6 +190,7 @@ export async function renderVideo(videoId: string, deps: RenderDeps): Promise<Re
   if (claim === "taken") {
     const now = await deps.videos.getVideo(video.id);
     if (now?.heygen_video_id) return { status: "already_started", heygenVideoId: now.heygen_video_id };
+    if (now?.status === "rendering" && now.render_started_at) return { status: "unknown" };
     throw new PlainError(LOST_RENDER);
   }
 
@@ -187,18 +212,22 @@ export async function renderVideo(videoId: string, deps: RenderDeps): Promise<Re
         }),
     ));
   } catch (error) {
-    if (counts) await releasePlanSlot(video).catch(() => null);
     const guarded = error instanceof SpendGuardError;
     const refused = error instanceof HeygenError && HEYGEN_DID_NOT_RENDER.includes(error.code);
     if (guarded || refused) {
-      // Nothing was rendered: free the claim. Pauses, caps and "busy" wait in the queue; a real refusal fails.
+      // Nothing was rendered: free the claim and the plan slot. Pauses, caps and "busy" wait in the queue; a real refusal fails.
+      if (counts) await releasePlanSlot(video).catch(() => null);
       const waitable = guarded || (error instanceof HeygenError && error.code === "busy");
       await deps.videos.updateVideo(video.id, { status: waitable ? "queued" : "failed", render_started_at: null, error: plain(error) });
-    } else {
-      // A timeout or a 5xx: HeyGen may be rendering. Keep the claim so a retry never pays twice.
-      await deps.videos.updateVideo(video.id, { status: "failed", error: LOST_RENDER }).catch(() => null);
+      throw error;
     }
-    throw error;
+    // SF3: a timeout, a 5xx or anything else after the POST left: HeyGen may be rendering (and charging).
+    // NOT failed: stay 'rendering' with the claim (never POST again) and no id, the "unknown" state.
+    // The webhook (callback_id = our id) or the poll finishes it; after RENDER.poll_max_s the poll
+    // fails it to the team queue (SF5). The plan slot stays reserved until then.
+    await deps.videos.updateVideo(video.id, { error: RENDER_UNKNOWN }).catch(() => null);
+    if (postId) await deps.videos.setPostStatus(postId, "rendering", null).catch(() => null);
+    return { status: "unknown" };
   }
   await deps.videos.updateVideo(video.id, { heygen_video_id: heygenVideoId, error: null });
   if (postId) await deps.videos.setPostStatus(postId, "rendering", null);
@@ -308,7 +337,16 @@ export async function completeRender(
 export async function pollRenderOnce(videoId: string, deps: CompleteDeps): Promise<{ done: boolean; status: string }> {
   const video = await deps.videos.getVideo(videoId);
   if (!video) throw new PlainError("Video not found.");
-  if (video.status !== "rendering" || !video.heygen_video_id) return { done: true, status: video.status };
+  if (video.status !== "rendering") return { done: true, status: video.status };
+  if (!video.heygen_video_id) {
+    // SF3/SF5: the unknown state (claimed, POST answer lost). Only the webhook can tell us HeyGen's id
+    // (callback_id). Wait until RENDER.poll_max_s after the claim, then hand it to the team.
+    const started = video.render_started_at ? Date.parse(video.render_started_at) : NaN;
+    const now = (deps.now ?? (() => new Date()))().getTime();
+    if (Number.isFinite(started) && now - started < RENDER.poll_max_s * 1000) return { done: false, status: "unknown" };
+    if (await failRender(video, UNKNOWN_TIMEOUT, deps.videos)) return { done: true, status: "failed" };
+    return { done: true, status: (await deps.videos.getVideo(video.id))?.status ?? "unknown" };
+  }
 
   const state = await deps.heygen.getVideo(video.heygen_video_id);
   // Docs list only "completed" and "failed"; anything else means still working.

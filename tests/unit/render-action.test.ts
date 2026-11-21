@@ -21,6 +21,12 @@ vi.mock("@trigger.dev/sdk", () => ({
 }));
 vi.mock("@/lib/video-store", () => ({ createVideoStore: () => mem.store, createVideoFiles: () => files.storage }));
 vi.mock("@/lib/heygen-spend-store", () => ({ createSpendStore: () => spend.store }));
+/** Lets one test hand the action a (mock) client whose POST answer is lost. */
+let wrapClient: ((client: import("@/lib/heygen").HeygenClient) => import("@/lib/heygen").HeygenClient) | null = null;
+vi.mock("@/lib/heygen", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/heygen")>();
+  return { ...real, heygen: (opts?: { forPage?: boolean }) => (wrapClient ? wrapClient(real.heygen(opts)) : real.heygen(opts)) };
+});
 
 const { makeVideoAction } = await import("@/app/admin/clients/[id]/render-actions");
 
@@ -69,6 +75,25 @@ describe("makeVideoAction", () => {
     expect(Object.keys(files.files)).toEqual([mem.videos[0].raw_path]);
     expect(mem.posts[0].status).toBe("rendering");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("SF3: the POST answer is lost: the admin sees the plain 'may be rendering' message, the video stays rendering (not 'made')", async () => {
+    const { HeygenError } = await import("@/lib/heygen");
+    const { RENDER_UNKNOWN } = await import("@/lib/render");
+    wrapClient = (client) => ({
+      ...client,
+      createVideo: async () => {
+        throw new HeygenError("failed", "Could not reach HeyGen. Try again later.");
+      },
+    });
+    try {
+      const result = await makeVideoAction(POST_ID, idle, form());
+      expect(result).toEqual({ status: "error", message: RENDER_UNKNOWN });
+      expect(mem.videos[0]).toMatchObject({ status: "rendering", heygen_video_id: null });
+      expect(files.uploads).toHaveLength(0);
+    } finally {
+      wrapClient = null;
+    }
   });
 
   it("not approved: the plain rule comes back", async () => {
