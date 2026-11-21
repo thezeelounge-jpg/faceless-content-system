@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/admin/action-button";
 import { AdminPage } from "@/components/admin/admin-page";
+import { ClearClaimForm } from "@/components/admin/clear-claim-form";
 import { NoteForm } from "@/components/admin/consent-forms";
 import { ConsentUpload } from "@/components/admin/consent-upload";
 import { RecordingGuide } from "@/components/admin/recording-guide";
@@ -167,6 +168,7 @@ async function ConsentDetail({ params }: Pick<PageProps<"/admin/consents/[id]">,
                   {avatar.supported_engines.length ? avatar.supported_engines.join(", ") : "—"}
                 </p>
                 {avatar.error && <p className="text-destructive">{avatar.error}</p>}
+                {avatar.create_started_at && !avatar.heygen_group_id && <ClearClaimForm target="twin" id={avatar.id} />}
               </>
             ) : (
               <p>No twin yet.</p>

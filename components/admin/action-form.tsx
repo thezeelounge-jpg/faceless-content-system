@@ -17,6 +17,7 @@ export function ActionForm({
   pendingLabel,
   hidden = {},
   confirmSpend = false,
+  confirmCheck,
   variant = "default",
   size = "default",
 }: {
@@ -25,6 +26,8 @@ export function ActionForm({
   pendingLabel: string;
   hidden?: Record<string, string>;
   confirmSpend?: boolean;
+  /** Another required "I checked…" box (value "yes"); the Server Action checks it again. */
+  confirmCheck?: { name: string; label: string };
   variant?: "default" | "outline";
   size?: "default" | "sm" | "lg";
 }) {
@@ -38,6 +41,12 @@ export function ActionForm({
         <label className="flex items-start gap-2 text-sm">
           <input type="checkbox" name="confirm_spend" value="yes" required className="mt-1" />
           <span>I agree to spend money: this sends real renders to HeyGen.</span>
+        </label>
+      )}
+      {confirmCheck && (
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" name={confirmCheck.name} value="yes" required className="mt-1" />
+          <span>{confirmCheck.label}</span>
         </label>
       )}
       <Button type="submit" variant={variant} size={size} disabled={pending}>
