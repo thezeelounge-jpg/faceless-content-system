@@ -409,7 +409,7 @@ function createAnthropicClient(): ClaudeClient {
 }
 
 /** Saves one ai_usage row. A failed log never breaks the task; it is reported in the server log. */
-async function logUsageToDatabase(row: UsageRow): Promise<void> {
+export async function logUsageToDatabase(row: UsageRow): Promise<void> {
   try {
     const { error } = await createAdminClient().from("ai_usage").insert(row);
     if (error) throw new Error(error.message);

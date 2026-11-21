@@ -9,7 +9,8 @@
 // - every word of the brand name that appears in the text;
 // - acronyms (2 to 6 capitals) that aren't common ones (CEO, SEO, ...) or
 //   said as a word by the normaliser (NASA, FREE, ...);
-// - minus anything already in the dictionary (approved OR suggested).
+// - minus anything already in the dictionary (approved OR suggested), including
+//   single words of a multi-word entry.
 // Roman Urdu / Hindi words at the start of a sentence can slip through; Gate 3
 // (audio QA) catches those and adds them to the dictionary.
 import { PRONUNCIATION_PREP } from "@/lib/qa/config";
@@ -34,7 +35,8 @@ const WORD = /[\p{L}][\p{L}'’]*/gu;
 
 /** The risky words in `text` the dictionary doesn't know yet, as first written, at most the configured number. */
 export function findRiskyWords(text: string, opts: { brandName: string; known: string[] }): string[] {
-  const known = new Set(opts.known.map((w) => w.trim().toLowerCase()));
+  // A whole entry and each word in it ("Zee Lounge" covers "Zee" and "Lounge").
+  const known = new Set(opts.known.flatMap((w) => [w.trim().toLowerCase(), ...w.trim().toLowerCase().split(/\s+/)]));
   const clean = text.replace(WEB_BITS, " ");
   const found = new Map<string, string>();
   const add = (word: string) => {

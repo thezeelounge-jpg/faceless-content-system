@@ -63,6 +63,8 @@ describe("findRiskyWords", () => {
 
   it("skips words already in the dictionary (any status, any case), common acronyms and words said by rule", () => {
     expect(findRiskyWords("Meet Ayesha and the CEO of NASA today.", { brandName: "", known: ["ayesha"] })).toEqual([]);
+    // Words of a multi-word entry count as known.
+    expect(findRiskyWords("Come to Zee Lounge.", { brandName: "Zee Lounge", known: ["Zee Lounge"] })).toEqual([]);
   });
 
   it("skips sentence starts, days, months, titles, web addresses, handles and hashtags", () => {

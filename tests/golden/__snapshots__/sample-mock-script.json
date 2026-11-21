@@ -1,0 +1,71 @@
+{
+  "brand": "Dr Ayesha Clinic",
+  "post": "Fever: when to worry",
+  "outcome": "script_review",
+  "script": {
+    "version": 1,
+    "qa_status": "passed",
+    "display_text": "When is a child's fever serious? Assalam o alaikum, I'm Dr Ayesha. Let's talk about fever: when to worry. Most parents in Lahore only hear the loud advice. Here is the simple version: start small, stay consistent, and ask for help early. Seedhi baat. Book your online consultation for Rs 2,999 today.",
+    "spoken_text": "When is a child's fever serious? Assalam o alaikum, I'm Doctor aa-ye-sha. Let's talk about fever: when to worry. Most parents in Lahore only hear the loud advice. Here is the simple version: start small, stay consistent, and ask for help early. Seedhi baat. Book your online consultation for two thousand nine hundred and ninety-nine rupees today.",
+    "hook": "When is a child's fever serious?",
+    "body": "Assalam o alaikum, I'm Dr Ayesha. Let's talk about fever: when to worry. Most parents in Lahore only hear the loud advice. Here is the simple version: start small, stay consistent, and ask for help early. Seedhi baat.",
+    "cta": "Book your online consultation for Rs 2,999 today.",
+    "est_seconds": 21.67,
+    "captions": {
+      "instagram": "When is a child's fever serious?\n\nBook your online consultation for Rs 2,999 today.",
+      "tiktok": "When is a child's fever serious? Book your online consultation for Rs 2,999 today.",
+      "linkedin": "When is a child's fever serious?\n\nAssalam o alaikum, I'm Dr Ayesha. Let's talk about fever: when to worry. Most parents in Lahore only hear the loud advice. Here is the simple version: start small, stay consistent, and ask for help early. Seedhi baat.\n\nBook your online consultation for Rs 2,999 today.",
+      "x": "When is a child's fever serious? #doctor #fevermyths #tips"
+    },
+    "hashtags": [
+      "#doctor",
+      "#fevermyths",
+      "#tips",
+      "#reels",
+      "#learn",
+      "#smallbusiness"
+    ],
+    "broll_keywords": [
+      "fever myths",
+      "doctor",
+      "phone screen"
+    ],
+    "edit_plan": {
+      "broll_moments": [
+        {
+          "at_words": "Assalam o alaikum,",
+          "keyword": "fever myths"
+        }
+      ],
+      "emphasis_words": [
+        "fever",
+        "serious?"
+      ]
+    }
+  },
+  "qa_reports": [
+    {
+      "script_id": "script-1",
+      "gate": "script",
+      "passed": true,
+      "score": 8,
+      "issues": [],
+      "auto_fix": null
+    },
+    {
+      "script_id": "script-1",
+      "gate": "pronunciation_prep",
+      "passed": true,
+      "score": null,
+      "issues": [
+        {
+          "code": "new_word",
+          "detail": "\"Lahore\" has no approved pronunciation yet; suggested \"la-ho-re\". Approve it in How to say names.",
+          "at_seconds": null,
+          "severity": "soft"
+        }
+      ],
+      "auto_fix": null
+    }
+  ]
+}

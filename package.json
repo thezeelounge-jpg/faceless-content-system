@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:bundle": "vitest run tests/security/bundle.test.ts",
+    "eval:scripts": "vitest run --config vitest.eval.config.mts",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy",
     "db:push": "supabase db push"
