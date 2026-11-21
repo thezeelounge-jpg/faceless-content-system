@@ -52,6 +52,11 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold">{brand.name}</h2>
+      <p className="text-sm">
+        <Link href={`/admin/clients/${brand.id}/names`} className="underline">
+          How to say names →
+        </Link>
+      </p>
 
       <Card>
         <CardHeader>
