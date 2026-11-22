@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MOCK_FIXTURE_VIDEO } from "@/lib/heygen";
 import { verifyHeygenSignature } from "@/lib/heygen-webhook";
 import { createPostRender, renderVideo } from "@/lib/render";
+import { memoryClaimStore } from "@/tests/helpers/claims-memory";
 import { BRAND_ID } from "@/tests/helpers/consent-memory";
 import { memorySpendStore } from "@/tests/helpers/spend-memory";
 import { POST_ID, memoryVideoFiles, memoryVideoStore } from "@/tests/helpers/video-memory";
@@ -22,6 +23,7 @@ const fixture = (name: string) => ({
 
 let mem: ReturnType<typeof memoryVideoStore>;
 let files: ReturnType<typeof memoryVideoFiles>;
+let spend: ReturnType<typeof memorySpendStore>;
 const trigger = vi.fn();
 const createKey = vi.fn(async (key: string) => `key:${key}`);
 
@@ -50,7 +52,8 @@ beforeEach(async () => {
   mem.seedApprovedPost();
   const video = await createPostRender(POST_ID, { videos: mem.store });
   const { createHeygenClient } = await import("@/lib/heygen");
-  await renderVideo(video.id, { videos: mem.store, heygen: createHeygenClient({ apiKey: "dummy" }), spend: memorySpendStore().store });
+  spend = memorySpendStore();
+  await renderVideo(video.id, { videos: mem.store, heygen: createHeygenClient({ apiKey: "dummy" }), spend: spend.store });
 });
 afterEach(() => {
   process.env = { ...savedEnv };
@@ -207,6 +210,74 @@ describe("POST /api/webhooks/heygen", () => {
     expect(logged).not.toContain("169.254.169.254");
     expect(logged).not.toContain("evil-cdn");
     expect(logged).not.toContain("test-key-not-real");
+  });
+
+  // ---- p4-fix c2: a success that arrives AFTER the claim was cleared ----
+
+  /** The POST answer was lost (no HeyGen id), 40 minutes passed, and an admin cleared the claim. */
+  async function lostThenCleared() {
+    const video = mem.videos[0];
+    Object.assign(video, { heygen_video_id: null, render_started_at: new Date(Date.now() - 40 * 60_000).toISOString(), error: null });
+    expect(await memoryClaimStore(mem).claims.clear("video", video.id, "admin@example.com")).toBe("render");
+    expect(video).toMatchObject({ status: "failed", heygen_video_id: null, render_started_at: null });
+    expect(mem.posts[0].status).toBe("approved");
+    return video;
+  }
+  const spendRowsFor = (videoId: string) => spend.rows.filter((r) => r.video_id === videoId).length;
+
+  it("late success after a clear: HeyGen's id saved, logged, the paid file downloaded; NO new provider_usage row", async () => {
+    const video = await lostThenCleared();
+    const before = spendRowsFor(video.id);
+    expect(before).toBe(1); // the original (mock) render reservation
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { body, sig } = fixture("success");
+    const response = await post(body, sig);
+    expect(response.status).toBe(200);
+    expect(mem.videos[0]).toMatchObject({
+      id: video.id,
+      heygen_video_id: "video_mock_90000000-0000-4000-8000-000000000001",
+      status: "rendered",
+      raw_path: `raw/${BRAND_ID}/${video.id}.mp4`,
+    });
+    expect(files.uploads).toEqual([`raw/${BRAND_ID}/${video.id}.mp4`]);
+    expect(mem.posts[0].status).toBe("rendering");
+    expect(spendRowsFor(video.id)).toBe(before);
+    expect(spend.rows).toHaveLength(1);
+    expect(warn.mock.calls.map((c) => c.join(" "))).toContain(
+      `[webhook] late HeyGen success adopted video=${video.id} heygen=video_mock_90000000-0000-4000-8000-000000000001`,
+    );
+    expect(mem.events[0].processed_at).not.toBeNull();
+  });
+
+  it("late success when a NEW render exists for the post: the new one is kept untouched; only the late id is recorded and logged", async () => {
+    const old = await lostThenCleared();
+    const fresh = await createPostRender(POST_ID, { videos: mem.store });
+    await mem.store.updateVideo(fresh.id, { status: "rendering", render_started_at: new Date().toISOString() });
+    const freshBefore = structuredClone(mem.videos.find((v) => v.id === fresh.id));
+    const before = spend.rows.length;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { body, sig } = fixture("success");
+    expect((await post(body, sig)).status).toBe(200);
+    expect(mem.videos.find((v) => v.id === fresh.id)).toEqual(freshBefore);
+    expect(mem.videos.find((v) => v.id === old.id)).toMatchObject({ status: "failed", heygen_video_id: null });
+    expect(mem.lateHeygenIds.get(old.id)).toBe("video_mock_90000000-0000-4000-8000-000000000001");
+    expect(files.uploads).toEqual([]);
+    expect(spend.rows).toHaveLength(before);
+    expect(warn.mock.calls.map((c) => c.join(" "))).toContain(
+      `[webhook] late HeyGen success recorded (a newer render was kept) video=${old.id} heygen=video_mock_90000000-0000-4000-8000-000000000001`,
+    );
+    expect(mem.events[0].processed_at).not.toBeNull();
+  });
+
+  it("the same late success twice: adopted once, then 'Already handled.' (one download, no spend row)", async () => {
+    await lostThenCleared();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { body, sig } = fixture("success");
+    expect((await post(body, sig)).status).toBe(200);
+    const second = await post(body, sig);
+    expect(await second.json()).toMatchObject({ ok: true, message: "Already handled." });
+    expect(files.uploads).toHaveLength(1);
+    expect(spend.rows).toHaveLength(1);
   });
 
   it("with TRIGGER_SECRET_KEY: success hands the download to the poll-render task (key = event) and answers fast", async () => {

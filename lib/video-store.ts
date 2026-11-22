@@ -1,7 +1,7 @@
 import "server-only";
 import type { AvatarRow } from "@/lib/consent-store-types";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { ClaimResult, VideoFiles, VideoRow, VideoStore } from "@/lib/video-store-types";
+import type { ClaimResult, LateRender, VideoFiles, VideoRow, VideoStore } from "@/lib/video-store-types";
 
 // Supabase versions of VideoStore and VideoFiles. They use the SECRET key,
 // so call them only after requireAdmin(), after a verified webhook signature,
@@ -47,6 +47,11 @@ export function createVideoStore(): VideoStore {
       const { data, error } = await db.rpc("claim_render_slot", { p_video_id: id, p_max: max });
       if (error) fail("claim render slot", error);
       return data as ClaimResult;
+    },
+    async adoptLateRender(id, heygenVideoId) {
+      const { data, error } = await db.rpc("adopt_late_render", { p_video_id: id, p_heygen_video_id: heygenVideoId });
+      if (error) fail("adopt late render", error);
+      return data as LateRender;
     },
     async finishRender(id, patch) {
       const { data, error } = await db.from("videos").update(patch).eq("id", id).eq("status", "rendering").select().maybeSingle();
