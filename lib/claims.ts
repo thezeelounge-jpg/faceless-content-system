@@ -58,7 +58,7 @@ export interface ClaimStore {
  * p4-fix c1: how long a claim must wait before it can be cleared (HeyGen may
  * still be making it). Same as the render wait; the SQL function
  * clear_stuck_claim holds the same number (tests/db/rls.test.ts checks).
- * Twins use it too: a lost twin-create answer has no webhook and no poll.
+ * Twins have their own, longer wait (TWIN_CLAIM_CLEAR_WAIT_S below, p4-b1).
  */
 export const CLAIM_CLEAR_WAIT_S = RENDER.poll_max_s;
 

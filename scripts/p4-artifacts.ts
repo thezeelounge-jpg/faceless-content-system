@@ -24,14 +24,20 @@ import { captionFontsDir, runFfmpeg } from "@/lib/edit-flow";
 import type { Transcript } from "@/lib/stt";
 
 const OUT = path.resolve(process.cwd(), "..", "logs", "p4-artifacts");
-const FRAME_AT_S = 1.6; // the word "3" is being said: big_words shows it highlighted
+const FRAME_AT_S = 1.6; // the "HERE ARE 3" page: big_words shows the emphasis word "3" highlighted
 const BRAND_COLOUR = "#FF5A1F";
 
 async function editOne(input: string, style: CaptionStyleName, name: string) {
   const captionsPath = path.join(OUT, `${name}.ass`);
   await writeFile(
     captionsPath,
-    buildAss({ displayText: script.display_text, transcript: fixture as Transcript, style, brandColour: BRAND_COLOUR }),
+    buildAss({
+      displayText: script.display_text,
+      transcript: fixture as Transcript,
+      style,
+      brandColour: BRAND_COLOUR,
+      emphasisWords: script.edit_plan.emphasis_words,
+    }),
   );
   const output = path.join(OUT, `${name}.mp4`);
   await runFfmpeg(buildEditArgs({ input, output, captionsPath, fontsDir: captionFontsDir() }));
