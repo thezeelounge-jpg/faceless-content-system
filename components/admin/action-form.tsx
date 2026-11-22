@@ -18,6 +18,7 @@ export function ActionForm({
   hidden = {},
   confirmSpend = false,
   confirmCheck,
+  textField,
   variant = "default",
   size = "default",
 }: {
@@ -28,6 +29,8 @@ export function ActionForm({
   confirmSpend?: boolean;
   /** Another required "I checked…" box (value "yes"); the Server Action checks it again. */
   confirmCheck?: { name: string; label: string };
+  /** One required short text box (e.g. a reason); the Server Action checks it again with zod. */
+  textField?: { name: string; label: string; minLength: number; maxLength: number };
   variant?: "default" | "outline";
   size?: "default" | "sm" | "lg";
 }) {
@@ -37,6 +40,19 @@ export function ActionForm({
       {Object.entries(hidden).map(([name, value]) => (
         <input key={name} type="hidden" name={name} value={value} />
       ))}
+      {textField && (
+        <label className="block space-y-1 text-sm">
+          <span>{textField.label}</span>
+          <input
+            type="text"
+            name={textField.name}
+            required
+            minLength={textField.minLength}
+            maxLength={textField.maxLength}
+            className="border-input block w-full rounded-md border px-2 py-1"
+          />
+        </label>
+      )}
       {confirmSpend && (
         <label className="flex items-start gap-2 text-sm">
           <input type="checkbox" name="confirm_spend" value="yes" required className="mt-1" />

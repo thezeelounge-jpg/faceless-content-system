@@ -1576,12 +1576,116 @@ describe("p4-b1: Make video vs late webhook (create_post_render + adopt_late_ren
   });
 });
 
+// p5-a: a script rewrite (a new scripts version from the gates) is saved only while the post is
+// still being scripted (planned / scripting). An admin override inserts anyway, moves the post
+// back to scripting and writes a provider_usage audit row (kind 'script_override'), in one step.
+describe("p5-a: insert_script_version (no rewrites after scripting; audited admin override)", () => {
+  const ROW = (post: string, version: number) =>
+    JSON.stringify({
+      post_id: post, version, hook: "Hook.", body: "Body.", cta: "Call.", display_text: "Hook. Body. Call.", est_seconds: 5,
+      captions: {}, hashtags: ["a"], broll_keywords: ["coffee"], edit_plan: { emphasis_words: [] }, qa_status: "pending", spoken_text: null,
+    });
+  const insert = (post: string, version: number, by: string | null = null, reason: string | null = null) =>
+    db.query<{ result: { outcome: string; script_id: string | null } }>(
+      "select public.insert_script_version($1::jsonb, $2, $3) as result",
+      [ROW(post, version), by, reason],
+    );
+  const newPost = async (status: string) =>
+    (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Rewrite guard', $1) returning id`,
+        [status],
+      )
+    ).rows[0].id;
+  const versions = async (post: string) =>
+    (await db.query<{ version: number }>("select version from public.scripts where post_id = $1 order by version", [post])).rows.map((r) => r.version);
+  const audits = async () =>
+    (await db.query<{ note: string }>("select note from public.provider_usage where kind = 'script_override' order by created_at")).rows;
+  const cleanup = async (post: string) => {
+    await db.query("delete from public.provider_usage where kind = 'script_override'");
+    await db.query("delete from public.videos where post_id = $1", [post]);
+    await db.query("delete from public.posts where id = $1", [post]);
+  };
+
+  it("allowed while the post is planned or scripting (no audit row)", async () => {
+    await asRole("service_role", null, async () => {
+      for (const status of ["planned", "scripting"]) {
+        const post = await newPost(status);
+        const result = (await insert(post, 2)).rows[0].result;
+        expect(result.outcome).toBe("inserted");
+        expect(await versions(post)).toEqual([2]);
+        expect(await audits()).toEqual([]);
+        await cleanup(post);
+      }
+    });
+  });
+
+  it("refused once the post has left scripting (nothing saved, post unchanged)", async () => {
+    await asRole("service_role", null, async () => {
+      for (const status of ["script_review", "approved", "rendering", "team_review", "needs_you", "ready"]) {
+        const post = await newPost(status);
+        expect((await insert(post, 2)).rows[0].result).toEqual({ outcome: "closed", script_id: null });
+        expect(await versions(post)).toEqual([]);
+        expect((await db.query("select status from public.posts where id = $1", [post])).rows).toEqual([{ status }]);
+        await cleanup(post);
+      }
+    });
+  });
+
+  it("admin override: inserts, post back to scripting, one audit row naming the admin, the post status and the reason", async () => {
+    await asRole("service_role", null, async () => {
+      const post = await newPost("team_review");
+      const result = (await insert(post, 3, "admin@example.com", "Client asked for a new angle")).rows[0].result;
+      expect(result.outcome).toBe("overridden");
+      expect(await versions(post)).toEqual([3]);
+      expect((await db.query("select status, status_reason from public.posts where id = $1", [post])).rows).toEqual([
+        { status: "scripting", status_reason: null },
+      ]);
+      const rows = await db.query<{ provider: string; status: string; cost_usd: string; mock: boolean; note: string }>(
+        "select provider, status, cost_usd::text, mock, note from public.provider_usage where kind = 'script_override'",
+      );
+      expect(rows.rows).toHaveLength(1);
+      expect(rows.rows[0]).toMatchObject({ provider: "other", status: "succeeded", cost_usd: "0.0000", mock: false });
+      expect(rows.rows[0].note).toContain("admin@example.com");
+      expect(rows.rows[0].note).toContain("team_review");
+      expect(rows.rows[0].note).toContain("Client asked for a new angle");
+      expect(rows.rows[0].note).toContain(result.script_id!);
+      await cleanup(post);
+    });
+  });
+
+  it("admin override is refused while the post has an active video (no insert, no audit)", async () => {
+    await asRole("service_role", null, async () => {
+      const post = await newPost("rendering");
+      const v1 = (
+        await db.query<{ id: string }>(
+          `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 1, 'Hi.', 'passed') returning id`,
+          [post],
+        )
+      ).rows[0].id;
+      await db.query(`insert into public.videos (brand_id, script_id, kind, status) values ('${BRAND_A}', $1, 'post', 'rendering')`, [v1]);
+      expect((await insert(post, 2, "admin@example.com", "New angle")).rows[0].result).toEqual({ outcome: "has_video", script_id: null });
+      expect(await versions(post)).toEqual([1]);
+      expect(await audits()).toEqual([]);
+      await cleanup(post);
+    });
+  });
+
+  it("customers and logged-out visitors can't call insert_script_version", async () => {
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(insert(POST_A, 9)).rejects.toThrow(/permission denied/);
+      });
+    }
+  });
+});
+
 // p5-a: migrations written to be re-run. 20261122180000 is ALREADY applied on staging and is
 // not edited. Its follow-up 20261122190000 (and 20261122200000) use IF NOT EXISTS /
 // CREATE OR REPLACE / DROP ... IF EXISTS, so applying them again changes nothing. A fresh
 // database gets the whole chain, then each re-runnable file again, and the schema must match.
 describe("p5-a: re-runnable migrations leave the same schema", () => {
-  const RERUNNABLE = ["20261122190000", "20261122200000"];
+  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000"];
   const FILES = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
   const sqlOf = (version: string) => {
     const file = FILES.find((f) => f.startsWith(`${version}_`));

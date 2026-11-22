@@ -1,6 +1,9 @@
 import "server-only";
 import type { PronunciationEntry } from "@/lib/pronunciation/dictionary";
-import type { ScriptQaStore } from "@/lib/qa/script-pipeline";
+import { z } from "zod";
+import { PlainError } from "@/lib/plain-error";
+import { OVERRIDE_HAS_VIDEO } from "@/lib/qa/script-override";
+import { SCRIPT_REWRITE_CLOSED, type ScriptQaStore } from "@/lib/qa/script-pipeline";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 // The QA gates' database reads and writes, with the secret key. Call only
@@ -9,6 +12,22 @@ import { createAdminClient } from "@/lib/supabase/admin";
 /** Postgres "unique_violation": the word is already in the brand's list. */
 const UNIQUE_VIOLATION = "23505";
 
+const scriptVersionAnswer = z.object({
+  outcome: z.enum(["inserted", "overridden", "closed", "has_video", "not_found"]),
+  script_id: z.string().nullable(),
+});
+
+/** The insert_script_version answer → the new script id, or a plain refusal. */
+export function scriptVersionResult(data: unknown): string {
+  const parsed = scriptVersionAnswer.safeParse(data);
+  if (!parsed.success) throw new Error("Could not save script version: unexpected answer");
+  const { outcome, script_id } = parsed.data;
+  if (outcome === "closed") throw new PlainError(SCRIPT_REWRITE_CLOSED);
+  if (outcome === "has_video") throw new PlainError(OVERRIDE_HAS_VIDEO);
+  if (outcome === "not_found" || !script_id) throw new PlainError("Post not found.");
+  return script_id;
+}
+
 export function createQaStore(): ScriptQaStore {
   const db = createAdminClient();
   return {
@@ -16,10 +35,16 @@ export function createQaStore(): ScriptQaStore {
       const { error } = await db.from("qa_reports").insert(row);
       if (error) throw new Error(`Could not save QA report: ${error.message}`);
     },
-    async insertScriptVersion(row) {
-      const { data, error } = await db.from("scripts").insert(row).select("id").single();
+    async insertScriptVersion(row, override) {
+      // p5-a: rpc insert_script_version (post row locked; no rewrite after scripting unless an
+      // audited admin override). Migration 20261122210000.
+      const { data, error } = await db.rpc("insert_script_version", {
+        p_row: row,
+        p_override_by: override?.by ?? null,
+        p_override_reason: override?.reason ?? null,
+      });
       if (error) throw new Error(`Could not save script version: ${error.message}`);
-      return (data as { id: string }).id;
+      return scriptVersionResult(data);
     },
     async updateScript(id, patch) {
       const { error } = await db.from("scripts").update(patch).eq("id", id);

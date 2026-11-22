@@ -64,7 +64,7 @@ vi.mock("@/lib/claude", async (importActual) => {
   return { ...actual, runClaudeTask: (...args: unknown[]) => runClaudeTask(...args) };
 });
 
-const { checkScript, writeScript } = await import("@/app/admin/clients/[id]/actions");
+const { checkScript, rewriteAnyway, writeScript } = await import("@/app/admin/clients/[id]/actions");
 const { runClaudeTask: realRun, ClaudeError } = await vi.importActual<typeof import("@/lib/claude")>("@/lib/claude");
 
 const idle = { status: "idle" as const, message: "" };
@@ -310,5 +310,72 @@ describe("Run checks", () => {
     log.mockRestore();
     expect(state).toEqual({ status: "error", message: "Claude is busy right now. Try again in a few minutes." });
     expect(savePostProblem).toHaveBeenCalledWith(POST_ID, "The checks didn't finish. Press “Run checks” to try again.");
+  });
+});
+
+// p5-a: "Rewrite anyway" (admin override of the no-rewrite-after-scripting rule).
+describe("Rewrite anyway", () => {
+  const form = (fields: Record<string, string>) => {
+    const data = new FormData();
+    for (const [k, v] of Object.entries(fields)) data.set(k, v);
+    return data;
+  };
+  const inTeamQueue = async () => {
+    const script = {
+      post_id: POST_ID, version: 2, est_seconds: 4, qa_status: "team_review", spoken_text: null,
+      hook: "Why do new leads burn out first?", body: "Hello. Ask for help early.", cta: "Book your leadership sprint today.",
+      display_text: "Why do new leads burn out first? Hello. Ask for help early. Book your leadership sprint today.",
+      captions: { instagram: "a", tiktok: "b", linkedin: "c", x: "d" }, hashtags: ["#a", "#b", "#c"], broll_keywords: [],
+      edit_plan: { broll_moments: [], emphasis_words: [] },
+    };
+    const id = await store.insertScriptVersion(script as never);
+    store.posts.set(POST_ID, { status: "team_review", status_reason: "Script QA failed after one rewrite: cta." });
+    const stored = store.scripts.find((s) => s.id === id)!;
+    getScriptForChecks.mockResolvedValue({ script: stored, post: { ...POST, status: "team_review" }, versions: [stored] });
+    return stored;
+  };
+  const good = { reason: "Client wants a softer ending", confirm: "yes" };
+
+  it("checks admin before anything else", async () => {
+    requireAdmin.mockRejectedValue(new Error("NEXT_NOT_FOUND"));
+    await expect(rewriteAnyway("script-9", idle, form(good))).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(getScriptForChecks).not.toHaveBeenCalled();
+    expect(runClaudeTask).not.toHaveBeenCalled();
+  });
+
+  it("needs the confirm box and a reason (nothing saved, no Claude call)", async () => {
+    const script = await inTeamQueue();
+    expect(await rewriteAnyway(script.id, idle, form({ reason: "Client wants a softer ending" }))).toEqual({
+      status: "error",
+      message: "Tick the box to confirm.",
+    });
+    expect((await rewriteAnyway(script.id, idle, form({ reason: "x", confirm: "yes" }))).status).toBe("error");
+    expect((await rewriteAnyway(script.id, idle, form({ reason: "Client wants a softer ending", confirm: "on" }))).status).toBe("error");
+    expect(runClaudeTask).not.toHaveBeenCalled();
+    expect(store.audits).toEqual([]);
+  });
+
+  it("rewrites, audits the admin's email and reason, and runs the checks", async () => {
+    const script = await inTeamQueue();
+    const state = await rewriteAnyway(script.id, idle, form(good));
+    expect(state).toEqual({ status: "ok", message: "Rewritten (version 3). Checked: ready for script review." });
+    expect(store.audits).toEqual([
+      { scriptId: store.scripts[1].id, postId: POST_ID, wasStatus: "team_review", by: "a@x.com", reason: "Client wants a softer ending" },
+    ]);
+  });
+
+  it("refuses an older version, and a post still being scripted", async () => {
+    const script = await inTeamQueue();
+    const newer = { ...script, id: "script-10", version: 3 };
+    getScriptForChecks.mockResolvedValue({ script, post: { ...POST, status: "team_review" }, versions: [script, newer] });
+    expect((await rewriteAnyway(script.id, idle, form(good))).message).toBe(
+      "A newer version of this script exists, so refresh the page and check that one.",
+    );
+    getScriptForChecks.mockResolvedValue({ script, post: { ...POST, status: "scripting" }, versions: [script] });
+    expect(await rewriteAnyway(script.id, idle, form(good))).toEqual({
+      status: "error",
+      message: "This post is still being scripted. Use “Run checks” instead.",
+    });
+    expect(runClaudeTask).not.toHaveBeenCalled();
   });
 });

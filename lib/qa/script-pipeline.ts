@@ -44,10 +44,26 @@ export type QaReportRow = {
 
 export type PostStatus = "script_review" | "approved" | "team_review" | "needs_you";
 
+/** p5-a: a post may get a new script version only while it is in one of these. */
+export const OPEN_POST_STATUSES = ["planned", "scripting"] as const;
+
+/** p5-a: a rewrite was refused because the post has moved on (admin wording). */
+export const SCRIPT_REWRITE_CLOSED =
+  "This post has moved past scripting, so its script can't be rewritten. An admin can use “Rewrite anyway”.";
+
+/** p5-a: who overrides the "no rewrite after scripting" rule, and why (saved on the audit row). */
+export type ScriptOverride = { by: string; reason: string };
+
 export interface ScriptQaStore {
   insertQaReport(row: QaReportRow): Promise<void>;
-  /** Saves a new scripts version and returns its id. */
-  insertScriptVersion(row: Omit<StoredScript, "id">): Promise<string>;
+  /**
+   * Saves a new scripts version and returns its id. p5-a: only while the post is planned or
+   * scripting (rpc insert_script_version, post row locked); otherwise a PlainError
+   * (SCRIPT_REWRITE_CLOSED). With `override` (admin only, after requireAdmin) it saves anyway,
+   * moves the post back to scripting and writes an audit row; refused while the post has an
+   * active video.
+   */
+  insertScriptVersion(row: Omit<StoredScript, "id">, override?: ScriptOverride): Promise<string>;
   updateScript(id: string, patch: Partial<Pick<StoredScript, "qa_status" | "spoken_text">>): Promise<void>;
   updatePost(id: string, patch: { status: PostStatus; status_reason: string | null }): Promise<void>;
   listPronunciations(brandId: string): Promise<PronunciationEntry[]>;
@@ -72,7 +88,7 @@ const SCRIPT_FIELDS = [
   "edit_plan",
 ] as const satisfies readonly (keyof ScriptOutput)[];
 
-function scriptOnly(script: ScriptOutput): ScriptOutput {
+export function scriptOnly(script: ScriptOutput): ScriptOutput {
   return Object.fromEntries(SCRIPT_FIELDS.map((key) => [key, script[key]])) as ScriptOutput;
 }
 
