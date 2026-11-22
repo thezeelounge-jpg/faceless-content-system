@@ -41,7 +41,7 @@ export const CAPTION_LAYOUT = {
 export type CaptionStyle = {
   /** The font's family name inside the file (libass finds it in the fontsdir). */
   font: string;
-  /** The file in assets/fonts/ (OFL, see assets/fonts/README.md). */
+  /** The file in assets/fonts/ (OFL, see assets/fonts/licenses/README.md). */
   font_file: string;
   size: number;
   uppercase: boolean;

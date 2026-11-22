@@ -112,6 +112,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("captionFontsDir (the ffmpeg fontsdir)", () => {
+  it("p4-b1: holds only .ttf files (licences and README live in assets/fonts/licenses/, a sub-folder libass skips)", async () => {
+    const entries = await readdir(captionFontsDir(), { withFileTypes: true });
+    const files = entries.filter((e) => e.isFile()).map((e) => e.name);
+    expect(files.filter((name) => !name.endsWith(".ttf"))).toEqual([]);
+    const licences = await readdir(path.join(captionFontsDir(), "licenses"), { recursive: true });
+    expect(licences.map(String).sort()).toEqual(["README.md", "anton", "anton/OFL.txt", "poppins", "poppins/OFL.txt"]);
+  });
+});
+
 describe("editJobSchema (the task payload)", () => {
   it("accepts a raw path in the videos bucket only, and fills defaults", () => {
     const parsed = editJobSchema.parse({ videoId: VIDEO, rawPath: RAW, displayText: "Hi", editPlan: script.edit_plan });

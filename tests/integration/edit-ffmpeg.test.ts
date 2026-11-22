@@ -89,6 +89,9 @@ describe.skipIf(!FFMPEG)("editor with real ffmpeg", () => {
     expectReel(output, before.duration_s);
     // libass found our bundled font file (not a system fallback).
     expect(stderr).toMatch(pickedOurFont("big_words"));
+    // p4-b1 (QA NICE): libass tries to load every file in the fontsdir; text files there log
+    // "error opening memory font 'readme.md'". Licences live in assets/fonts/licenses/ now.
+    expect(stderr).not.toMatch(/memory font/i);
   });
 
   it("the consent-good fixture (already 9:16) edits too, with the small_box and minimal fonts", async () => {
