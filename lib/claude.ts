@@ -8,6 +8,8 @@ import {
   brandProfileOutput,
   clipFaceInput,
   clipFaceOutput,
+  keyTermInput,
+  keyTermOutput,
   planInput,
   planOutput,
   pronunciationInput,
@@ -29,6 +31,7 @@ import {
 } from "@/lib/claude-mocks";
 import { splitSamples } from "@/lib/brand-input";
 import { mockClipFaceCheck } from "@/lib/clip-checks/face-mock";
+import { mockKeyTermCheck } from "@/lib/qa/key-term-mock";
 import { isMockClaude, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
 import { loadPrompt } from "@/lib/prompts";
@@ -134,6 +137,17 @@ export const CLAUDE_TASKS = {
     prompt: "pronunciation-suggest.md",
     input: pronunciationInput,
     output: pronunciationOutput,
+    stream: false,
+    timeoutMs: 60_000,
+  },
+  /** Gate 3 (p5-a2): a key term heard differently: same sound or a real mispronunciation? */
+  key_term_check: {
+    model: "fast",
+    effort: "low",
+    maxTokens: 4_000,
+    prompt: "key-term-check.md",
+    input: keyTermInput,
+    output: keyTermOutput,
     stream: false,
     timeoutMs: 60_000,
   },
@@ -468,6 +482,8 @@ function mockAnswer(task: ClaudeTaskName, brand: ClaudeBrand, input: unknown, sc
       return mockScriptRewrite(brand, scriptRewriteInput.parse(input), scenario);
     case "pronunciation_suggest":
       return mockPronunciation(pronunciationInput.parse(input));
+    case "key_term_check":
+      return mockKeyTermCheck(keyTermInput.parse(input));
     case "clip_face_check":
       return mockClipFaceCheck(clipFaceInput.parse(input));
   }

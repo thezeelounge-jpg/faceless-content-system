@@ -156,6 +156,8 @@ export function compareTranscript(input: { reference: string; heard: HeardWord[]
     .flatMap((w) => speechTokens(w.text).map((token) => ({ token, start_s: w.start_s })));
   const ops = alignTokens(ref, hyp.map((h) => h.token));
   const mismatches: TermMismatch[] = [];
+  /** One report per place: a word that is two kinds of key term (person + dictionary) is listed once. */
+  const reported = new Set<string>();
 
   for (const term of input.terms) {
     const want = speechTokens(term.written);
@@ -178,19 +180,23 @@ export function compareTranscript(input: { reference: string; heard: HeardWord[]
           if (accepted.has(words(k1 - p, k2 + f).join(""))) matched = true;
         }
       }
-      if (matched) continue;
-      const core = ops.slice(k1, k2 + 1).filter((o) => o.hyp !== null);
+      if (matched || reported.has(`${first}-${last}`)) continue;
+      reported.add(`${first}-${last}`);
+      // What was heard there: the aligned words plus extra words right next to them ("same ear").
+      const from = k1 - before;
+      const to = k2 + after;
+      const core = ops.slice(from, to + 1).filter((o) => o.hyp !== null);
       const nearest =
         core[0] ??
         ops
-          .slice(0, k1)
+          .slice(0, from)
           .reverse()
           .find((o) => o.hyp !== null) ??
-        ops.slice(k2 + 1).find((o) => o.hyp !== null);
+        ops.slice(to + 1).find((o) => o.hyp !== null);
       mismatches.push({
         term,
         expected: want.join(" "),
-        heard: words(k1, k2).join(" "),
+        heard: words(from, to).join(" "),
         at_seconds: nearest && nearest.hyp !== null ? hyp[nearest.hyp].start_s : null,
       });
     }

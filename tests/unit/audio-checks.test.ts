@@ -110,6 +110,22 @@ describe("compareTranscript", () => {
     expect(out.mismatches).toEqual([]);
   });
 
+  it("extra words heard right at the term are part of what was heard (and the time is where they start)", () => {
+    const words = heard("hi i'm same ear from bright smile dental brush twice a day book today");
+    const t = keyTermsFor({ brandName: "Bright Smile Dental", personName: "Sameer", offers: null, cta: "Book today.", entries: [] });
+    const out = compareTranscript({ reference: reference.replace("Ayesha", "Sameer"), heard: words, terms: t });
+    expect(out.mismatches.map((m) => [m.expected, m.heard, m.at_seconds])).toEqual([["sameer", "same ear", words[2].start_s]]);
+  });
+
+  it("one place is reported once, even when the word is two kinds of key term (person + dictionary)", () => {
+    const t = keyTermsFor({
+      brandName: "Bright Smile Dental", personName: "Ayesha Khan", offers: null, cta: "Book today.",
+      entries: [{ written: "Ayesha", say_as: "Aa-ee-sha", status: "approved" }],
+    });
+    const out = compareTranscript({ reference, heard: heard("hi i'm asia from bright smile dental brush twice a day book today"), terms: t });
+    expect(out.mismatches.map((m) => [m.term.kind, m.heard])).toEqual([["person", "asia"]]);
+  });
+
   it("a key term missing from the audio is a mismatch heard as nothing", () => {
     const out = compareTranscript({ reference, heard: heard("hi i'm from bright smile dental brush twice a day book today"), terms });
     expect(out.mismatches.map((m) => [m.expected, m.heard])).toEqual([["ayesha", ""]]);

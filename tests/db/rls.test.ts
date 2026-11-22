@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { RENDER, TWIN_POLL_MAX_S } from "@/lib/qa/config";
+import { AUDIO_QA, RENDER, TWIN_POLL_MAX_S } from "@/lib/qa/config";
 
 // Every migration, in file-name order, exactly as `supabase db push` runs them.
 const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
@@ -597,6 +597,9 @@ describe("SF2: customers read only the safe columns of their own post videos", (
     "edit_run_id",
     "edit_started_at",
     "post_id", // p4-b3 (Q8): server only like every new column
+    "edit_manifest", // p5-a2: what the editor built (Gate 4 checks it)
+    "rerender_of", // p5-a2: a QA re-render points at the video it replaced
+    "qa_fix_note", // p5-a2: the automatic fix that made this video
   ];
   const canSelect = async (role: string, column: string) =>
     (
@@ -1680,12 +1683,103 @@ describe("p5-a: insert_script_version (no rewrites after scripting; audited admi
   });
 });
 
+// p5-a2 (Gate 3 auto-fix): one QA re-render per post video, our cost. Under the same per-post lock
+// as create_post_render / adopt_late_render: the checked video (audio_qa, attempt 1, newest script)
+// becomes failed and ONE new queued video is made: attempt 2, counts_toward_plan = false,
+// rerender_of = the old video, qa_fix_note = the fix. A second re-render is refused ('limit').
+describe("p5-a2: create_qa_rerender (one automatic re-render, never counted)", () => {
+  const rerender = (video: string, note = "Respelled Ayesha → Aa-ee-sha.") =>
+    db.query<{ result: { outcome: string; video_id: string | null } }>("select public.create_qa_rerender($1, 12, $2) as result", [video, note]);
+  const seed = async (status = "audio_qa") => {
+    const post = (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Gate 3', 'audio_qa') returning id`,
+      )
+    ).rows[0].id;
+    const script = (
+      await db.query<{ id: string }>(
+        `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 1, 'Hi.', 'passed') returning id`,
+        [post],
+      )
+    ).rows[0].id;
+    const video = (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, script_id, kind, status, engine, heygen_video_id, ai_label, watermark)
+         values ('${BRAND_A}', $1, 'post', $2, 'avatar_v', 'hg_' || gen_random_uuid(), true, true) returning id`,
+        [script, status],
+      )
+    ).rows[0].id;
+    return { post, script, video };
+  };
+  const row = async (id: string) =>
+    (
+      await db.query<Record<string, unknown>>(
+        `select status, attempt, counts_toward_plan, rerender_of, qa_fix_note, post_id, script_id, engine, spoken_words, ai_label, watermark,
+                heygen_video_id, render_started_at from public.videos where id = $1`,
+        [id],
+      )
+    ).rows[0];
+  const cleanup = async (post: string) => {
+    await db.query("delete from public.videos where post_id = $1", [post]);
+    await db.query("delete from public.posts where id = $1", [post]);
+  };
+
+  it("makes one queued attempt-2 video that never counts; the checked video fails; a second re-render is refused", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, script, video } = await seed();
+      const made = (await rerender(video)).rows[0].result;
+      expect(made.outcome).toBe("created");
+      expect(await row(video)).toMatchObject({ status: "failed", attempt: 1 });
+      expect(await row(made.video_id!)).toEqual({
+        status: "queued", attempt: 2, counts_toward_plan: false, rerender_of: video, qa_fix_note: "Respelled Ayesha → Aa-ee-sha.",
+        post_id: post, script_id: script, engine: "avatar_v", spoken_words: 12, ai_label: true, watermark: true,
+        heygen_video_id: null, render_started_at: null,
+      });
+      // The re-render itself fails Gate 3 → no third render (AUDIO_QA.max_rerenders = 1).
+      await db.query("update public.videos set status = 'audio_qa' where id = $1", [made.video_id]);
+      expect((await rerender(made.video_id!)).rows[0].result).toEqual({ outcome: "limit", video_id: null });
+      expect((await db.query("select count(*)::int as n from public.videos where post_id = $1", [post])).rows).toEqual([{ n: 2 }]);
+      await cleanup(post);
+    });
+  });
+
+  it("refused unless the video is being audio-checked and still says the post's newest script", async () => {
+    await asRole("service_role", null, async () => {
+      for (const status of ["rendered", "editing", "final_qa", "team_review", "failed"]) {
+        const { post, video } = await seed(status);
+        expect((await rerender(video)).rows[0].result).toEqual({ outcome: "not_allowed", video_id: null });
+        expect(await row(video)).toMatchObject({ status });
+        await cleanup(post);
+      }
+      const { post, video } = await seed();
+      await db.query(`insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 2, 'New.', 'passed')`, [post]);
+      expect((await rerender(video)).rows[0].result).toEqual({ outcome: "not_allowed", video_id: null });
+      await cleanup(post);
+      expect((await rerender("90000000-0000-4000-8000-00000000dead")).rows[0].result).toEqual({ outcome: "not_found", video_id: null });
+    });
+  });
+
+  it("takes the per-post render lock; the SQL limit equals AUDIO_QA.max_rerenders", async () => {
+    const src = (await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = 'create_qa_rerender'")).rows[0].src;
+    expect(src).toContain("pg_advisory_xact_lock(hashtext('post_render'), hashtext(");
+    expect(src).toContain(`v_video.attempt > ${AUDIO_QA.max_rerenders}`);
+  });
+
+  it("customers and logged-out visitors can't call create_qa_rerender", async () => {
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(rerender(POST_A)).rejects.toThrow(/permission denied/);
+      });
+    }
+  });
+});
+
 // p5-a: migrations written to be re-run. 20261122180000 is ALREADY applied on staging and is
 // not edited. Its follow-up 20261122190000 (and 20261122200000) use IF NOT EXISTS /
 // CREATE OR REPLACE / DROP ... IF EXISTS, so applying them again changes nothing. A fresh
 // database gets the whole chain, then each re-runnable file again, and the schema must match.
 describe("p5-a: re-runnable migrations leave the same schema", () => {
-  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000"];
+  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000", "20261122220000"];
   const FILES = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
   const sqlOf = (version: string) => {
     const file = FILES.find((f) => f.startsWith(`${version}_`));

@@ -209,7 +209,9 @@ export async function renderVideo(videoId: string, deps: RenderDeps): Promise<Re
     throw new PlainError(LOST_RENDER);
   }
 
-  const counts = video.kind === "post";
+  // p5-a2: our own QA re-render (attempt 2+, create_qa_rerender) reserves no plan slot: the
+  // customer's one slot was reserved by the first render (QA-SPEC "our failures are free").
+  const counts = video.kind === "post" && video.attempt === 1;
   if (counts) await reservePlanSlot(video);
   let heygenVideoId: string;
   try {

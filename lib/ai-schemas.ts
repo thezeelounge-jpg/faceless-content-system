@@ -99,6 +99,40 @@ export const pronunciationOutput = z.object({
   suggestions: z.array(z.object({ written: z.string().min(1), say_as: z.string().min(1) })),
 });
 
+/**
+ * Gate 3 key-term check (p5-a2): a key term the speech-to-text heard differently. Claude (FAST)
+ * decides whether it is the same sound (a spelling variant, common in Roman Urdu / Hinglish) or a
+ * real mispronunciation, and suggests a respelling for the voice when it is wrong.
+ */
+export const keyTermInput = z.object({
+  /** brands.language: en | roman_urdu | hinglish. */
+  language: z.string().min(2).max(20),
+  terms: z
+    .array(
+      z.object({
+        /** The term as written in the script (brand, name, offer, CTA word, dictionary word). */
+        written: z.string().min(1).max(120),
+        /** What speech-to-text heard there ("" = nothing). */
+        heard: z.string().max(200),
+      }),
+    )
+    .min(1)
+    .max(30),
+});
+
+export const keyTermOutput = z.object({
+  /** One per term, same order, `written` and `heard` copied exactly. */
+  judgements: z.array(
+    z.object({
+      written: z.string().min(1),
+      heard: z.string(),
+      verdict: z.enum(["same_sound", "mispronounced"]),
+      /** For "mispronounced": how the voice should be told to say it (letters and hyphens). "" for same_sound. */
+      respelling: z.string(),
+    }),
+  ),
+});
+
 /** Consent clip face check: frames from the clip are sent as images. */
 export const clipFaceInput = z.object({
   clip_name: z.string().min(1).max(300),
@@ -126,3 +160,4 @@ export type PlanOutput = z.infer<typeof planOutput>;
 export type ScriptOutput = z.infer<typeof scriptOutput>;
 export type ScriptQaOutput = z.infer<typeof scriptQaOutput>;
 export type PronunciationOutput = z.infer<typeof pronunciationOutput>;
+export type KeyTermOutput = z.infer<typeof keyTermOutput>;
