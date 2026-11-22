@@ -98,7 +98,8 @@ export interface EditStore {
    * editing under a claim older than EDIT.claim_stale_s. False = refused (another run edits it).
    */
   startEdit(id: string, run: string): Promise<boolean>;
-  saveTranscript(id: string, transcript: Transcript): Promise<void>;
+  /** p5-a: saves only while the row is still 'editing' and claimed by `run`. False = another run owns it now. */
+  saveTranscript(id: string, run: string, transcript: Transcript): Promise<boolean>;
   /** Saves only while the row is still 'editing' and claimed by `run`. False = another run owns it now. */
   finishEdit(
     id: string,
@@ -285,8 +286,27 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
   /** This run lost the claim: it changes nothing it does not own; its own upload (if any) goes. */
   const superseded = async (): Promise<EditOutcome> => {
     console.warn(`[edit] superseded video=${video.id} stage=${stage}`);
-    if (uploadStarted) await removeOurFile();
+    // p5-a (QA SF1): never after a promotion: the row then points at our file.
+    if (uploadStarted && !promoted) await removeOurFile();
     return { status: "superseded" };
+  };
+  /**
+   * p5-a (QA SF1): finishEdit succeeded, so videos.final_path points at our run's file. From
+   * here on nothing may remove it or report "superseded"/"failed": a failing post update is
+   * logged (the video row is already right) and the outcome stands.
+   */
+  let promoted = false;
+  const afterPromotion = async (
+    status: "final_qa" | "team_review",
+    reason: string | null,
+    outcome: EditOutcome,
+  ): Promise<EditOutcome> => {
+    try {
+      await deps.store.setPostStatusForVideo(video.id, status, reason);
+    } catch (error) {
+      logAdminError("[edit] the edit finished but the post status was not saved", { videoId: video.id, status }, error);
+    }
+    return outcome;
   };
   try {
     const rawFile = path.join(workDir, "raw.mp4");
@@ -300,7 +320,8 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     }
     if (!transcript) {
       transcript = transcriptSchema.parse(await (deps.stt ?? getSttProvider()).transcribe({ audioPath: rawFile }));
-      await deps.store.saveTranscript(video.id, transcript);
+      // p5-a: a run that lost the claim while transcribing writes nothing and stops.
+      if (!(await deps.store.saveTranscript(video.id, run, transcript))) return await superseded();
     }
     const captionsFile = path.join(workDir, "captions.ass");
     await writeFile(
@@ -396,20 +417,28 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     if (notApplied.length > 0 || brollProblem) {
       const reason = [notApplied.length > 0 ? missingExtrasMessage(notApplied) : null, brollProblem].filter(Boolean).join(" ");
       const saved = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: finalPath, error: reason });
-      if (!saved) return superseded();
-      await deps.store.setPostStatusForVideo(video.id, "team_review", notApplied.length > 0 ? EXTRAS_TEAM_REASON : brollProblem);
-      return { status: "needs_team", finalPath, notApplied, reason };
+      if (!saved) return await superseded();
+      promoted = true;
+      return await afterPromotion("team_review", notApplied.length > 0 ? EXTRAS_TEAM_REASON : brollProblem, {
+        status: "needs_team",
+        finalPath,
+        notApplied,
+        reason,
+      });
     }
     if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null }))) {
       // Another run took over (our claim went stale): the row, the post and the other run's
       // file are not ours. Remove only our own run-scoped upload.
-      return superseded();
+      return await superseded();
     }
-    await deps.store.setPostStatusForVideo(video.id, "final_qa", null);
-    return { status: "edited", finalPath, notApplied: [] };
+    promoted = true;
+    return await afterPromotion("final_qa", null, { status: "edited", finalPath, notApplied: [] });
   } catch (error) {
     const message = plainMessage(error, stage);
     logAdminError("[edit] failed", { videoId: video.id, stage }, error);
+    // p5-a (QA SF1): defence in depth. afterPromotion never throws, but if anything did after the
+    // promotion, the row already points at our file: never overwrite it or remove the file.
+    if (promoted) return { status: "failed", error: message };
     // p4-b1 (QA SF2): record the failure only while THIS run still owns the claim. If another
     // run took over (and maybe finished: final_qa), its row, post and final file are not ours.
     const owned = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: null, error: message });

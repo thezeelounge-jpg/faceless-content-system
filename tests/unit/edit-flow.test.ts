@@ -59,8 +59,11 @@ function memory(overrides: Partial<EditVideoRow> = {}) {
       Object.assign(row, { status: "editing", error: null, edit_run_id: run, edit_started_at: Date.now() });
       return true;
     },
-    async saveTranscript(_id, transcript) {
+    async saveTranscript(_id, run, transcript) {
+      // p5-a: like finishEdit, only while still 'editing' AND claimed by this run.
+      if (row.status !== "editing" || row.edit_run_id !== run) return false;
       row.transcript = transcript;
+      return true;
     },
     async finishEdit(_id, run, patch) {
       if (row.status !== "editing" || row.edit_run_id !== run) return false;
@@ -503,6 +506,53 @@ describe("runEditJob", () => {
     expect(pathA).not.toBe(pathB);
     expect(m.removed).toEqual([pathA]);
     expect(m.stored.has(pathA)).toBe(false);
+  });
+
+  it("p5-a (QA SF1): the post update throws AFTER finishEdit promoted the run → the file stays and final_path still points at it", async () => {
+    const m = memory();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const setPost = m.store.setPostStatusForVideo.bind(m.store);
+    m.store.setPostStatusForVideo = async (id, status, reason) => {
+      if (status !== "editing") throw new Error("posts update failed: network");
+      return setPost(id, status, reason);
+    };
+    const out = await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toEqual({ status: "edited", finalPath: FINAL, notApplied: [] });
+    expect(m.removed).toEqual([]);
+    expect(m.stored.has(FINAL)).toBe(true);
+    expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, error: null });
+    expect(logged).toHaveBeenCalled();
+  });
+
+  it("p5-a (QA SF1): same for the team_review promotion (b-roll problem) → the file the row points at is never removed", async () => {
+    const m = memory();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    m.store.setPostStatusForVideo = async (_id, status) => {
+      if (status !== "editing") throw new Error("posts update failed");
+    };
+    const out = await runEditJob({ ...job, hook: "Something else entirely." }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toMatchObject({ status: "needs_team", finalPath: FINAL });
+    expect(m.removed).toEqual([]);
+    expect(m.stored.has(FINAL)).toBe(true);
+    expect(m.row).toMatchObject({ status: "team_review", final_path: FINAL });
+  });
+
+  it("p5-a: a run that lost the claim during speech-to-text does not save the transcript (and stops)", async () => {
+    const m = memory();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ffmpeg = vi.fn(okFfmpeg);
+    const stt: SttProvider = {
+      async transcribe() {
+        // While A transcribes, its claim goes stale and run B takes the video over.
+        m.row.edit_run_id = "run_b";
+        return fixture as never;
+      },
+    };
+    const out = await runEditJob(job, { ...m, stt, ffmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toEqual({ status: "superseded" });
+    expect(m.row.transcript).toBeNull();
+    expect(ffmpeg).not.toHaveBeenCalled();
+    expect(m.removed).toEqual([]);
   });
 
   it("an unknown video id is refused", async () => {

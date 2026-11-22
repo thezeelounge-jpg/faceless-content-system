@@ -43,7 +43,7 @@ export async function editForReal(input: RealEditInput) {
   const store: EditStore = {
     getVideo: async () => ({ ...row }),
     startEdit: async () => ((row.status = "editing"), true),
-    saveTranscript: async () => {},
+    saveTranscript: async () => true,
     finishEdit: async (_id, _run, patch) => (Object.assign(row, patch), true),
     setPostStatusForVideo: async () => {},
   };

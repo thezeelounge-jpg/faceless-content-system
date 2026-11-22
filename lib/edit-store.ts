@@ -32,9 +32,18 @@ export function createEditStore(): EditStore {
       if (error) fail("start edit", error);
       return data === true;
     },
-    async saveTranscript(id, transcript) {
-      const { error } = await db.from("videos").update({ transcript }).eq("id", id);
+    async saveTranscript(id, run, transcript) {
+      // p5-a: only while still 'editing' AND claimed by this run (a superseded run writes nothing).
+      const { data, error } = await db
+        .from("videos")
+        .update({ transcript })
+        .eq("id", id)
+        .eq("status", "editing")
+        .eq("edit_run_id", run)
+        .select("id")
+        .maybeSingle();
       if (error) fail("save transcript", error);
+      return data !== null;
     },
     async finishEdit(id, run, patch) {
       // Only while still 'editing' AND claimed by this run: never overwrite another run's result.
