@@ -46,9 +46,26 @@ export const EDIT_OVERLAYS = {
     box_colour: "black@0.55", pad: 12, x: 152, y: 262, chars: 12,
   },
   /** Trial videos only (videos.watermark; PRODUCT.md: the free trial preview is watermarked). */
+  /**
+   * The small corner tag. p4-b3: on a 50% black box like the label (legible on light b-roll);
+   * same size and row as the label; x = the gap from the right edge to the text (box edge at 140).
+   */
   watermark: {
-    text: "TRIAL PREVIEW", font_file: "Poppins-Bold.ttf", size: 44, colour: "white@0.8",
-    border: 3, border_colour: "black@0.6", pad: 3, x: 140, y: 258, chars: 13,
+    text: "TRIAL PREVIEW", font_file: "Poppins-Bold.ttf", size: 34, colour: "white",
+    box_colour: "black@0.5", pad: 12, x: 152, y: 262, chars: 13,
+  },
+  /**
+   * p4-b3: trial videos also get a big, faint "TRIAL PREVIEW" centred in the frame (middle
+   * third, about 70% of the width, 35% opacity), so a screenshot can't crop the corner tag off.
+   * width_em = [min, max] drawn text width per px of font size, MEASURED with the real ffmpeg
+   * + Poppins Bold (tests/integration/edit-extras-ffmpeg.test.ts checks the drawn box);
+   * height_em = a safe upper bound for the drawn height (caps, no descenders).
+   * Measured p4-b3 (ffmpeg 7.1.5): 7.40 em wide, 0.76 em tall incl. the 2 px border, so
+   * size 102 → about 755 px wide (70% of 1080), about 77 px tall.
+   */
+  watermark_centre: {
+    text: "TRIAL PREVIEW", font_file: "Poppins-Bold.ttf", size: 102, colour: "white@0.35",
+    border: 2, border_colour: "black@0.2", width_em: [7.2, 7.6], height_em: 0.85,
   },
 } as const;
 
@@ -129,19 +146,34 @@ function labelFilter(fontsDir: string): string {
   ].join(":");
 }
 
+/** Trial only: the big faint centre mark first, then the corner tag (on its dark box) on top. */
 function watermarkFilter(fontsDir: string): string {
+  const c = EDIT_OVERLAYS.watermark_centre;
+  const centre = [
+    `drawtext=fontfile=${escapeFilterValue(path.join(fontsDir, c.font_file))}`,
+    `text=${escapeFilterValue(c.text)}`,
+    "expansion=none",
+    `fontsize=${c.size}`,
+    `fontcolor=${c.colour}`,
+    `borderw=${c.border}`,
+    `bordercolor=${c.border_colour}`,
+    "x=(w-tw)/2", // centred: w/h = frame size, tw/th = text size
+    "y=(h-th)/2",
+  ].join(":");
   const w = EDIT_OVERLAYS.watermark;
-  return [
+  const tag = [
     `drawtext=fontfile=${escapeFilterValue(path.join(fontsDir, w.font_file))}`,
     `text=${escapeFilterValue(w.text)}`,
     "expansion=none",
     `fontsize=${w.size}`,
     `fontcolor=${w.colour}`,
-    `borderw=${w.border}`,
-    `bordercolor=${w.border_colour}`,
+    "box=1",
+    `boxcolor=${w.box_colour}`,
+    `boxborderw=${w.pad}`,
     `x=w-tw-${w.x}`, // right-aligned: w = frame width, tw = text width
     `y=${w.y}`,
   ].join(":");
+  return `${centre},${tag}`;
 }
 
 export type VideoGraphOptions = {
@@ -259,7 +291,15 @@ export function notYetApplied(extras: EditExtras | undefined, args: string[]): s
     ["music", Boolean(extras.music), () => inputs.includes(extras.music!.path) && graph.includes("sidechaincompress=") && graph.includes("amix=")],
     ["loudness", Boolean(extras.loudness), () => /loudnorm=[^,;]*measured_I=[^,;]*:linear=true/.test(graph)],
     ["ai_label", extras.ai_label === true, () => graph.includes(`:text=${escapeFilterValue(EDIT_OVERLAYS.label.text)}:`)],
-    ["watermark", extras.watermark === true, () => graph.includes(`:text=${escapeFilterValue(EDIT_OVERLAYS.watermark.text)}:`)],
+    // p4-b3: both trial marks (the centre one at x=(w-tw)/2 and the corner tag at x=w-tw-…).
+    [
+      "watermark",
+      extras.watermark === true,
+      () => {
+        const marks = graph.split(/,(?=drawtext=)/).filter((f) => f.includes(`:text=${escapeFilterValue(EDIT_OVERLAYS.watermark.text)}:`));
+        return marks.some((f) => f.includes(":x=(w-tw)/2:")) && marks.some((f) => f.includes(":x=w-tw-"));
+      },
+    ],
     ["faststart", extras.faststart === true, () => args.some((a, i) => a === "-movflags" && args[i + 1] === "+faststart")],
   ];
   return checks.filter(([, asked, applied]) => asked && !applied()).map(([name]) => name);

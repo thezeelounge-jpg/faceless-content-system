@@ -105,9 +105,15 @@ const SUBS = "subtitles=filename=/tmp/job/captions.ass:fontsdir=/app/assets/font
 const LABEL =
   "drawtext=fontfile=/app/assets/fonts/Poppins-SemiBold.ttf:text=AI-generated:expansion=none:fontsize=34:fontcolor=white" +
   ":box=1:boxcolor=black@0.55:boxborderw=12:x=152:y=262";
-const WATERMARK =
-  "drawtext=fontfile=/app/assets/fonts/Poppins-Bold.ttf:text=TRIAL PREVIEW:expansion=none:fontsize=44:fontcolor=white@0.8" +
-  ":borderw=3:bordercolor=black@0.6:x=w-tw-140:y=258";
+// p4-b3: the corner tag sits on a semi-opaque dark box (legible on light b-roll), like the label.
+const WATERMARK_TAG =
+  "drawtext=fontfile=/app/assets/fonts/Poppins-Bold.ttf:text=TRIAL PREVIEW:expansion=none:fontsize=34:fontcolor=white" +
+  ":box=1:boxcolor=black@0.5:boxborderw=12:x=w-tw-152:y=262";
+// p4-b3: plus a big, faint "TRIAL PREVIEW" centred in the frame (about 70% of the width, 35% opacity).
+const WATERMARK_CENTRE =
+  "drawtext=fontfile=/app/assets/fonts/Poppins-Bold.ttf:text=TRIAL PREVIEW:expansion=none:fontsize=102:fontcolor=white@0.35" +
+  ":borderw=2:bordercolor=black@0.2:x=(w-tw)/2:y=(h-th)/2";
+const WATERMARK = `${WATERMARK_CENTRE},${WATERMARK_TAG}`;
 const MEASURED = { input_i: -19.43, input_tp: -6.02, input_lra: 3.1, input_thresh: -29.61, target_offset: 0.05 };
 const FMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
 
@@ -145,6 +151,43 @@ describe("videoFilterGraph: b-roll, label, watermark (p4-b2)", () => {
 
   it("escapes an awkward fonts folder inside drawtext too", () => {
     expect(videoFilterGraph("/tmp/c.ass", "/f;o:nts", { aiLabel: true })).toContain("drawtext=fontfile=/f\\;o\\\\:nts/Poppins-SemiBold.ttf:");
+  });
+
+  it("p4-b3: a semi-opaque dark box (box=1, black@~0.5, padding) behind the AI label AND the corner trial tag", () => {
+    const g = videoFilterGraph("/tmp/job/captions.ass", FONTS, { aiLabel: true, watermark: true });
+    const drawtexts = g.split(/,(?=drawtext=)/).slice(1).map((f) => f.replace(/\[vout\]$/, ""));
+    const label = drawtexts.find((f) => f.includes("text=AI-generated"))!;
+    const tag = drawtexts.find((f) => f.includes("text=TRIAL PREVIEW") && f.includes("x=w-tw-"))!;
+    for (const f of [label, tag]) {
+      expect(f).toContain(":box=1:");
+      const alpha = Number(f.match(/:boxcolor=black@([\d.]+):/)?.[1]);
+      expect(alpha).toBeGreaterThanOrEqual(0.4);
+      expect(alpha).toBeLessThanOrEqual(0.6);
+      expect(Number(f.match(/:boxborderw=(\d+):/)?.[1])).toBeGreaterThanOrEqual(8);
+    }
+  });
+
+  it("p4-b3: the centred trial watermark is big (≈70% of the width), faint (35%) and inside the safe centre box", () => {
+    const c = EDIT_OVERLAYS.watermark_centre;
+    expect(c.colour).toBe("white@0.35");
+    // x/y in the filter centre the text box: (w-tw)/2, (h-th)/2.
+    expect(WATERMARK_CENTRE).toContain(":x=(w-tw)/2:y=(h-th)/2");
+    // Text box from the filter's font size and the MEASURED width per px of font size (real
+    // ffmpeg, tests/integration/edit-extras-ffmpeg.test.ts checks the drawn box against these bounds).
+    const [minW, maxW] = c.width_em.map((em) => em * c.size);
+    const height = c.height_em * c.size;
+    const W = CAPTION_LAYOUT.width;
+    const H = CAPTION_LAYOUT.height;
+    expect(minW).toBeGreaterThanOrEqual(0.62 * W); // about 70% (756 px on 1080)
+    expect(maxW).toBeLessThanOrEqual(0.78 * W);
+    const left = (W - maxW) / 2;
+    const right = (W + maxW) / 2;
+    const top = (H - height) / 2;
+    const bottom = (H + height) / 2;
+    expect(left).toBeGreaterThanOrEqual(CAPTION_LAYOUT.safe.left);
+    expect(right).toBeLessThanOrEqual(W - CAPTION_LAYOUT.safe.right);
+    expect(top).toBeGreaterThanOrEqual(H / 3); // the middle third
+    expect(bottom).toBeLessThanOrEqual((2 * H) / 3);
   });
 
   it("label and watermark sit inside the safe zone, above the caption band, and never overlap", () => {
@@ -238,6 +281,9 @@ describe("buildEditArgs with every extra (p4-b2)", () => {
     const without = (from: string, to = "") => args.map((a) => a.replace(from, to));
     expect(notYetApplied(full.extras, without(`,${LABEL}`))).toEqual(["ai_label"]);
     expect(notYetApplied(full.extras, without(`,${WATERMARK}`))).toEqual(["watermark"]);
+    // p4-b3: both trial marks are needed: the big centre one alone or the corner tag alone is not enough.
+    expect(notYetApplied(full.extras, without(`,${WATERMARK_CENTRE}`))).toEqual(["watermark"]);
+    expect(notYetApplied(full.extras, without(`,${WATERMARK_TAG}`))).toEqual(["watermark"]);
     expect(notYetApplied(full.extras, without("[base][b1]overlay=", "[base][b1]xoverlay="))).toEqual(["broll"]);
     expect(notYetApplied(full.extras, without("sidechaincompress", "acompressor"))).toEqual(["music"]);
     expect(notYetApplied(full.extras, without(":linear=true"))).toEqual(["loudness"]);

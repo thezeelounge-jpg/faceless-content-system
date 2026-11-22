@@ -230,4 +230,39 @@ describe.skipIf(!FFMPEG)("p4-b2 AI label and trial watermark with real ffmpeg", 
     expect(paid).toBeLessThan(1);
     expect(labelSame).toBeLessThan(1);
   });
+
+  it("p4-b3: the big faint centre 'TRIAL PREVIEW' is drawn only on trial videos, ≈70% wide, inside the safe centre box", () => {
+    // Changed pixels (trial vs not) between the corner tag and the caption band.
+    const top = 400;
+    const height = 1150 - top;
+    const a = regionAt(out.both, 1, 0, top, 1080, height);
+    const b = regionAt(out.label, 1, 0, top, 1080, height);
+    let x0 = 1080, x1 = -1, y0 = 1920, y1 = -1, changed = 0;
+    for (let p = 0; p < a.length; p += 3) {
+      const d = Math.max(Math.abs(a[p] - b[p]), Math.abs(a[p + 1] - b[p + 1]), Math.abs(a[p + 2] - b[p + 2]));
+      if (d <= 8) continue;
+      changed += 1;
+      const x = (p / 3) % 1080;
+      const y = top + Math.floor(p / 3 / 1080);
+      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+    }
+    const c = EDIT_OVERLAYS.watermark_centre;
+    const width = x1 - x0 + 1;
+    console.info(`[watermark centre] box x ${x0}-${x1} (${width} px = ${(width / c.size).toFixed(2)} em) y ${y0}-${y1}, ${changed} px changed`);
+    expect(changed).toBeGreaterThan(5000);
+    expect(width).toBeGreaterThanOrEqual(c.width_em[0] * c.size);
+    expect(width).toBeLessThanOrEqual(c.width_em[1] * c.size);
+    expect(width / 1080).toBeGreaterThanOrEqual(0.62);
+    expect(width / 1080).toBeLessThanOrEqual(0.78);
+    expect(x0).toBeGreaterThanOrEqual(140);
+    expect(x1).toBeLessThanOrEqual(1080 - 140);
+    expect(y0).toBeGreaterThanOrEqual(640);
+    expect(y1).toBeLessThanOrEqual(1280);
+    expect(y1 - y0 + 1).toBeLessThanOrEqual(c.height_em * c.size);
+    // Faint: the face shows through (35% white), it is not painted over.
+    const mid = pixelAt(out.both, 1, Math.round((x0 + x1) / 2), Math.round((y0 + y1) / 2));
+    console.info(`[watermark centre] a pixel near the middle: ${JSON.stringify(mid)}`);
+    // Paid videos: nothing in the centre.
+    expect(meanDiff(regionAt(out.label, 1, 140, 900, 800, 120), regionAt(out.none, 1, 140, 900, 800, 120))).toBeLessThan(1);
+  });
 });
