@@ -6,6 +6,7 @@ import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AUDIO_QA, RENDER, TWIN_POLL_MAX_S, VISUAL_QA } from "@/lib/qa/config";
+import { HUMAN_CHECKLIST, HUMAN_REJECT_REASONS } from "@/lib/qa/human-review";
 
 // Every migration, in file-name order, exactly as `supabase db push` runs them.
 const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
@@ -601,6 +602,7 @@ describe("SF2: customers read only the safe columns of their own post videos", (
     "rerender_of", // p5-a2: a QA re-render points at the video it replaced
     "qa_fix_note", // p5-a2: the automatic fix that made this video
     "rerender_gate", // p5-b2: which gate's automatic fix made this video (server only)
+    "delivered_at", // p5-b3: when the video reached the customer (Quality: time to Ready)
   ];
   const canSelect = async (role: string, column: string) =>
     (
@@ -1860,7 +1862,7 @@ describe("p5-a2: create_qa_rerender (one automatic re-render, never counted)", (
 // CREATE OR REPLACE / DROP ... IF EXISTS, so applying them again changes nothing. A fresh
 // database gets the whole chain, then each re-runnable file again, and the schema must match.
 describe("p5-a: re-runnable migrations leave the same schema", () => {
-  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000", "20261122220000", "20261122230000", "20261123000000"];
+  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000", "20261122220000", "20261122230000", "20261123000000", "20261123010000"];
   const FILES = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
   const sqlOf = (version: string) => {
     const file = FILES.find((f) => f.startsWith(`${version}_`));
@@ -2051,5 +2053,174 @@ describe("p5-b2: create_visual_rerender, deliver_post_video, brand_qa_settings",
       await cleanup(post);
     });
     expect((await db.query<{ on: boolean }>("select relrowsecurity as on from pg_class where relname = 'brand_qa_settings'")).rows).toEqual([{ on: true }]);
+  });
+});
+
+// p5-b3 (Gate 6, the admin QA queue). Migration 20261123010000:
+//  - review_queued_video(video, decision, checklist, reason, note, admin): only a post video still in
+//    team_review; approve needs EVERY checklist item ticked and a finished edit (final_path): video +
+//    post → ready, this video is the post's ONE counted video, delivered_at set; reject: video failed
+//    (never counted), post → problem with the reason. Both write a qa_reports row (gate 'human') and ONE
+//    provider_usage audit row (kind 'human_review', cost 0) in the same transaction. A second submit
+//    finds the video no longer in the queue and changes nothing.
+//  - deliver_post_video now also sets delivered_at.
+describe("p5-b3: review_queued_video (Gate 6 approve / reject)", () => {
+  const ALL_TICKED = Object.fromEntries(HUMAN_CHECKLIST.map((item) => [item, true]));
+  const seed = async (status = "team_review", finalPath: string | null = "final/b/v/runs/r1.mp4") => {
+    const post = (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status, status_reason) values ('${BRAND_A}', now(), 'Gate 6', 'team_review', 'First 5 videos') returning id`,
+      )
+    ).rows[0].id;
+    const script = (
+      await db.query<{ id: string }>(`insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 1, 'Hi.', 'passed') returning id`, [post])
+    ).rows[0].id;
+    const video = (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, script_id, kind, status, attempt, final_path) values ('${BRAND_A}', $1, 'post', $2, 2, $3) returning id`,
+        [script, status, finalPath],
+      )
+    ).rows[0].id;
+    return { post, script, video };
+  };
+  const review = (video: string, decision: string, checklist: Record<string, boolean>, reason: string | null = null, note: string | null = null) =>
+    db.query<{ result: { outcome: string } }>("select public.review_queued_video($1, $2, $3, $4, $5, $6) as result", [
+      video,
+      decision,
+      JSON.stringify(checklist),
+      reason,
+      note,
+      "ops@example.com",
+    ]);
+  const videoRow = async (id: string) =>
+    (
+      await db.query<Record<string, unknown>>(
+        "select status, counts_toward_plan, error, delivered_at is not null as delivered from public.videos where id = $1",
+        [id],
+      )
+    ).rows[0];
+  const postRow = async (id: string) => (await db.query<Record<string, unknown>>("select status, status_reason from public.posts where id = $1", [id])).rows[0];
+  const humanReports = async (video: string) =>
+    (await db.query<Record<string, unknown>>("select gate, passed, issues, script_id from public.qa_reports where video_id = $1 and gate = 'human'", [video])).rows;
+  const audits = async () =>
+    (
+      await db.query<{ note: string; provider: string; cost_usd: string; mock: boolean; status: string }>(
+        "select note, provider, cost_usd::text, mock, status from public.provider_usage where kind = 'human_review' order by created_at",
+      )
+    ).rows;
+  const cleanup = async (post: string) => {
+    await db.query("delete from public.videos where post_id = $1", [post]);
+    await db.query("delete from public.posts where id = $1", [post]);
+    await db.query("delete from public.provider_usage where kind = 'human_review'");
+  };
+
+  it("approve with every box ticked: video + post ready, the ONE counted video, delivered_at, a human report, one audit row; a double submit changes nothing", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, script, video } = await seed();
+      const older = (
+        await db.query<{ id: string }>(
+          `insert into public.videos (brand_id, script_id, kind, status, attempt, counts_toward_plan) values ('${BRAND_A}', $1, 'post', 'failed', 1, true) returning id`,
+          [script],
+        )
+      ).rows[0].id;
+      expect((await review(video, "approve", ALL_TICKED)).rows[0].result).toEqual({ outcome: "approved", brand_id: BRAND_A });
+      expect(await videoRow(video)).toEqual({ status: "ready", counts_toward_plan: true, error: null, delivered: true });
+      expect(await videoRow(older)).toMatchObject({ counts_toward_plan: false });
+      expect(await postRow(post)).toEqual({ status: "ready", status_reason: null });
+      expect(await humanReports(video)).toEqual([{ gate: "human", passed: true, issues: [], script_id: script }]);
+      const rows = await audits();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ provider: "other", cost_usd: "0.0000", mock: false, status: "succeeded" });
+      expect(rows[0].note).toContain(video);
+      expect(rows[0].note).toContain("approved by ops@example.com");
+      // Double submit: the video left the queue; nothing more is written.
+      expect((await review(video, "approve", ALL_TICKED)).rows[0].result).toEqual({ outcome: "not_in_queue" });
+      expect(await humanReports(video)).toHaveLength(1);
+      expect(await audits()).toHaveLength(1);
+      await cleanup(post);
+    });
+  });
+
+  it("approve is refused unless every checklist item is ticked, and without a finished edit", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seed();
+      for (const missing of HUMAN_CHECKLIST) {
+        expect((await review(video, "approve", { ...ALL_TICKED, [missing]: false })).rows[0].result).toEqual({ outcome: "checklist_incomplete" });
+      }
+      const withoutFirst = Object.fromEntries(Object.entries(ALL_TICKED).slice(1));
+      expect((await review(video, "approve", withoutFirst)).rows[0].result).toEqual({ outcome: "checklist_incomplete" });
+      expect(await videoRow(video)).toMatchObject({ status: "team_review", counts_toward_plan: false });
+      expect(await humanReports(video)).toEqual([]);
+      await cleanup(post);
+      const raw = await seed("team_review", null);
+      expect((await review(raw.video, "approve", ALL_TICKED)).rows[0].result).toEqual({ outcome: "no_final_file" });
+      expect(await videoRow(raw.video)).toMatchObject({ status: "team_review" });
+      expect(await audits()).toEqual([]);
+      await cleanup(raw.post);
+    });
+  });
+
+  it("reject: video failed and never counted, post → problem with the reason, a failed human report, one audit row; twice → not_in_queue", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seed();
+      expect((await review(video, "reject", {}, "lip_sync", "Mouth drifts at 0:07.")).rows[0].result).toEqual({ outcome: "rejected" });
+      expect(await videoRow(video)).toMatchObject({ status: "failed", counts_toward_plan: false, delivered: false });
+      expect(await postRow(post)).toEqual({ status: "problem", status_reason: "Rejected in the QA queue (lip_sync): Mouth drifts at 0:07." });
+      const reports = await humanReports(video);
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        passed: false,
+        issues: [{ code: "human_lip_sync", detail: "Mouth drifts at 0:07.", at_seconds: null, severity: "hard" }],
+      });
+      expect((await audits())[0].note).toContain("rejected by ops@example.com");
+      expect((await review(video, "reject", {}, "lip_sync", "again")).rows[0].result).toEqual({ outcome: "not_in_queue" });
+      expect(await humanReports(video)).toHaveLength(1);
+      expect(await audits()).toHaveLength(1);
+      await cleanup(post);
+    });
+  });
+
+  it("reject needs a known reason; unknown decisions, videos outside the queue and unknown ids are refused", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seed();
+      expect((await review(video, "reject", {}, "boring")).rows[0].result).toEqual({ outcome: "bad_input" });
+      expect((await review(video, "reject", {}, null)).rows[0].result).toEqual({ outcome: "bad_input" });
+      expect((await review(video, "maybe", ALL_TICKED)).rows[0].result).toEqual({ outcome: "bad_input" });
+      expect(await videoRow(video)).toMatchObject({ status: "team_review" });
+      await cleanup(post);
+      for (const status of ["final_qa", "ready", "failed", "audio_qa"]) {
+        const other = await seed(status);
+        expect((await review(other.video, "approve", ALL_TICKED)).rows[0].result).toEqual({ outcome: "not_in_queue" });
+        expect((await review(other.video, "reject", {}, "other", "x")).rows[0].result).toEqual({ outcome: "not_in_queue" });
+        expect(await videoRow(other.video)).toMatchObject({ status });
+        await cleanup(other.post);
+      }
+      expect((await review("90000000-0000-4000-8000-00000000dead", "approve", ALL_TICKED)).rows[0].result).toEqual({ outcome: "not_found" });
+      expect(await audits()).toEqual([]);
+    });
+  });
+
+  it("the SQL lists match lib/qa/human-review.ts; per-post render lock; deliver_post_video sets delivered_at", async () => {
+    const src = (await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = 'review_queued_video'")).rows[0]?.src;
+    expect(src).toContain("pg_advisory_xact_lock(hashtext('post_render'), hashtext(");
+    expect(HUMAN_CHECKLIST).toEqual(["pronunciation", "lip_sync", "looks_real", "captions", "broll", "music", "label"]);
+    for (const item of HUMAN_CHECKLIST) expect(src).toContain(`'${item}'`);
+    for (const reason of HUMAN_REJECT_REASONS) expect(src).toContain(`'${reason}'`);
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seed("final_qa");
+      await db.query("select public.deliver_post_video($1)", [video]);
+      expect(await videoRow(video)).toMatchObject({ status: "ready", delivered: true });
+      await cleanup(post);
+    });
+  });
+
+  it("customers and logged-out visitors can't call it, nor read the human reports or the audit rows", async () => {
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(review(POST_A, "approve", ALL_TICKED)).rejects.toThrow(/permission denied/);
+        await expect(db.query("select * from public.qa_reports where gate = 'human'")).rejects.toThrow(/permission denied/);
+        await expect(db.query("select * from public.provider_usage where kind = 'human_review'")).rejects.toThrow(/permission denied/);
+      });
+    }
   });
 });
