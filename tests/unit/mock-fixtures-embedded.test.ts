@@ -46,4 +46,16 @@ describe("mock fixtures without tests/ on disk (the cwd is somewhere else)", () 
       expect(heard.words.length).toBeGreaterThan(0);
     }
   });
+
+  it("p5-b2: the Gate 5 visual_qa mock still answers from its embedded fixtures", async () => {
+    const empty = await mkdtemp(path.join(os.tmpdir(), "no-fixtures-"));
+    vi.spyOn(process, "cwd").mockReturnValue(empty);
+    vi.resetModules();
+    const { mockVisualQa, VISUAL_FIXTURE_TEXTS } = await import("@/lib/qa/visual-mock");
+    const out = mockVisualQa({
+      language: "en", display_text: VISUAL_FIXTURE_TEXTS["face-glitch"], caption_style: "big_words",
+      frames: [{ index: 0, at_seconds: 0, kind: "first", caption: "" }],
+    });
+    expect(out).toMatchObject({ face_natural: false, realism_score: 5 });
+  });
 });

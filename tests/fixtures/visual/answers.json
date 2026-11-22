@@ -1,0 +1,25 @@
+{
+  "_about": "MOCK_CLAUDE answers for Gate 5 (visual_qa), p5-b2. Chosen by display_text (by_text); any other text gets 'good'. Embedded by lib/qa/visual-mock.ts (static JSON import). Boxes are pixels of the 1080x1920 frame.",
+  "by_text": {
+    "Hi, I'm Ayesha from Bright Smile Dental. Smile wide and floss every night. Book your free check-up today.": "captions-over-mouth",
+    "Hi, I'm Ayesha from Bright Smile Dental. Rinse after meals and drink water. Book your free check-up today.": "face-glitch",
+    "Hi, I'm Ayesha from Bright Smile Dental. Change your brush every three months. Book your free check-up today.": "face-too-low",
+    "Hi, I'm Ayesha from Bright Smile Dental. Cut down on sugary drinks this week. Book your free check-up today.": "realism-8",
+    "Hi, I'm Ayesha from Bright Smile Dental. Visit us twice a year for cleaning. Book your free check-up today.": "broll-logo"
+  },
+  "answers": {
+    "good": {
+      "realism_score": 9,
+      "face_box": { "top": 420, "bottom": 1100, "left": 300, "right": 780 },
+      "mouth_box": { "top": 900, "bottom": 980, "left": 450, "right": 630 }
+    },
+    "captions-over-mouth": { "captions_cover_mouth_with": ["big_words"], "issue_frame": 1 },
+    "face-glitch": { "fail": ["face_natural", "mouth_area_clean"], "realism_score": 5, "issue_frame": 1 },
+    "face-too-low": {
+      "face_box": { "top": 560, "bottom": 1240, "left": 300, "right": 780 },
+      "mouth_box": { "top": 1040, "bottom": 1120, "left": 450, "right": 630 }
+    },
+    "realism-8": { "realism_score": 8 },
+    "broll-logo": { "fail": ["no_stray_text"], "issue_on": "broll" }
+  }
+}

@@ -41,6 +41,9 @@ export type SeedPostInput = {
   editPlan?: GateContext["script"]["edit_plan"];
   brollKeywords?: string[];
   dictionary?: PronunciationEntry[];
+  /** p5-b2: several posts of one brand (default: the one fixed post/script id). */
+  postId?: string;
+  scriptId?: string;
 };
 
 export function memoryPipeline(opts: { personName?: string; language?: string; maxSeconds?: number; spendCaps?: { render?: number } } = {}) {
@@ -271,11 +274,13 @@ export function memoryPipeline(opts: { personName?: string; language?: string; m
   };
 
   /** A ready twin, an approved post with a passed script whose spoken_text is built from the dictionary. */
+  let twinSeeded = false;
   async function seedPost(input: SeedPostInput) {
-    await v.seedReadyTwin();
+    if (!twinSeeded) await v.seedReadyTwin();
+    twinSeeded = true;
     for (const e of input.dictionary ?? []) pronunciations.push({ ...e, brand_id: BRAND_ID, source: "manual" });
     const spoken = buildSpokenText(input.displayText, entries(BRAND_ID));
-    const { postId, scriptId } = v.seedApprovedPost({ spoken });
+    const { postId, scriptId } = v.seedApprovedPost({ spoken, id: input.postId, scriptId: input.scriptId });
     v.scripts.find((s) => s.id === scriptId)!.display_text = input.displayText;
     scriptExtras.set(scriptId, {
       hook: input.hook,

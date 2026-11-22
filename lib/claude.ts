@@ -19,6 +19,8 @@ import {
   scriptQaInput,
   scriptQaOutput,
   scriptRewriteInput,
+  visualQaInput,
+  visualQaOutput,
 } from "@/lib/ai-schemas";
 import {
   mockBrandProfile,
@@ -32,6 +34,7 @@ import {
 import { splitSamples } from "@/lib/brand-input";
 import { mockClipFaceCheck } from "@/lib/clip-checks/face-mock";
 import { mockKeyTermCheck } from "@/lib/qa/key-term-mock";
+import { mockVisualQa } from "@/lib/qa/visual-mock";
 import { isMockClaude, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
 import { loadPrompt } from "@/lib/prompts";
@@ -161,6 +164,17 @@ export const CLAUDE_TASKS = {
     output: clipFaceOutput,
     stream: false,
     timeoutMs: 120_000,
+  },
+  /** Gate 5 (p5-b2): frames of the finished reel go in as images (ClaudeContext.images); the QA-SPEC rubric comes back. */
+  visual_qa: {
+    model: "main",
+    effort: "medium",
+    maxTokens: 8_000,
+    prompt: "visual-qa.md",
+    input: visualQaInput,
+    output: visualQaOutput,
+    stream: false,
+    timeoutMs: 180_000,
   },
 } as const satisfies Record<string, TaskDef>;
 
@@ -486,6 +500,8 @@ function mockAnswer(task: ClaudeTaskName, brand: ClaudeBrand, input: unknown, sc
       return mockKeyTermCheck(keyTermInput.parse(input));
     case "clip_face_check":
       return mockClipFaceCheck(clipFaceInput.parse(input));
+    case "visual_qa":
+      return mockVisualQa(visualQaInput.parse(input));
   }
 }
 

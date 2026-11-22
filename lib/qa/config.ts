@@ -271,12 +271,15 @@ export const VISUAL_QA = {
   /** Frame extraction (one ffmpeg pass over the final file) is stopped after this long. */
   extract_timeout_s: 120,
   /**
-   * Pixel checks of the AI label and the trial corner tag (luma 0-255 of the drawn box, no AI).
-   * pad strip = the box rows above the text (only the dark box there): its mean must be at most
-   * box_max_luma. text area = the text rows: at least text_min_share of its pixels at least text_min_luma.
+   * Pixel checks of the AI label and the trial corner tag (luma 0-255, no AI). drawtext box=1 darkens
+   * what is under it by the box's alpha (black@0.55 → 0.45 × background + 0.55 × black). pad strip =
+   * the box rows above the text; outside = the background just beside the box, same rows.
+   * Drawn = the pad strip is within box_tolerance of the darkened outside AND at least text_min_share
+   * of the text rows are at least text_min_luma. If the box could darken the background by less than
+   * min_contrast (a near-black frame) the frame is "unknown" (not counted either way).
    * text_width_em = the shortest text width we expect, per px of font size per letter.
    */
-  pixel: { box_max_luma: 130, text_min_luma: 180, text_min_share: 0.02, text_width_em: 0.45 },
+  pixel: { box_tolerance: 14, min_contrast: 25, text_min_luma: 180, text_min_share: 0.02, text_width_em: 0.45 },
 } as const;
 
 /** Gate 6: which videos a person watches before the customer sees them (QA-SPEC "Gate 6: Human review"). */
