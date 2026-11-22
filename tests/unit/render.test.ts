@@ -101,6 +101,18 @@ describe("createPostRender: only an approved script, with a chosen engine and a 
     });
   });
 
+  it("p5-a: the script's QA changes after the app's check → the rpc re-check refuses (plain not-approved), no video", async () => {
+    mem.seedApprovedPost();
+    await mem.seedReadyTwin({ engine: "avatar_v" });
+    const realGetAvatar = mem.store.getReadyAvatar.bind(mem.store);
+    mem.store.getReadyAvatar = async (brandId) => {
+      mem.scripts[0].qa_status = "team_review"; // e.g. a re-run of the checks between check and insert
+      return realGetAvatar(brandId);
+    };
+    await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow(NOT_APPROVED_FOR_VIDEO);
+    expect(mem.videos).toHaveLength(0);
+  });
+
   it("refuses without a chosen engine, or without a ready twin that supports it (never falls back)", async () => {
     mem.seedApprovedPost();
     await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow(
@@ -135,15 +147,18 @@ describe("createPostRender: only an approved script, with a chosen engine and a 
 });
 
 describe("postRenderResult (create_post_render answer from Supabase)", () => {
-  it("maps the answer, a unique violation (second active video) to not_approved, and throws on other errors", () => {
+  it("maps the answer, a unique violation (second active video of the post) to other_script, and throws on other errors", () => {
     const id = "90000000-0000-4000-8000-000000000001";
     expect(postRenderResult({ outcome: "created", video_id: id }, null)).toEqual({ outcome: "created", videoId: id });
     expect(postRenderResult({ outcome: "existing", video_id: id }, null)).toEqual({ outcome: "existing", videoId: id });
     expect(postRenderResult({ outcome: "not_approved", video_id: null }, null)).toEqual({ outcome: "not_approved", videoId: null });
-    expect(postRenderResult(null, { code: "23505", message: "duplicate key value violates unique constraint" })).toEqual({
-      outcome: "not_approved",
-      videoId: null,
-    });
+    // p5-a (QA SF2): the per-post index backstop gets the same plain words as the rpc's other_script.
+    expect(
+      postRenderResult(null, {
+        code: "23505",
+        message: 'duplicate key value violates unique constraint "videos_one_active_post_video_per_post"',
+      }),
+    ).toEqual({ outcome: "other_script", videoId: null });
     expect(() => postRenderResult(null, { code: "42501", message: "permission denied" })).toThrow(/create post render/);
     expect(() => postRenderResult({ outcome: "weird" }, null)).toThrow(/create post render/);
   });

@@ -8,12 +8,13 @@ import { z } from "zod";
 import { logAdminError } from "@/lib/admin-errors";
 import { scriptOutput } from "@/lib/ai-schemas";
 import { getBrollProvider, planBroll, type BrollProvider } from "@/lib/broll";
-import { CAPTION_STYLES, CAPTION_STYLE_NAMES, alignWords, buildAss } from "@/lib/captions";
+import { CAPTION_STYLES, CAPTION_STYLE_NAMES, alignWords, buildAss, groupPages } from "@/lib/captions";
 import { ffprobeBin, ffmpegBin, parseProbe, probeArgs } from "@/lib/clip-checks/media";
 import { buildEditArgs, buildLoudnessMeasureArgs, notYetApplied, type BrollCut, type EditExtras } from "@/lib/edit";
 import { getMusicLibrary, parseLoudnormJson, type MusicLibrary } from "@/lib/music";
 import { PlainError } from "@/lib/plain-error";
-import { EDIT } from "@/lib/qa/config";
+import { EDIT, MUSIC } from "@/lib/qa/config";
+import type { EditManifest } from "@/lib/qa/edit-manifest";
 import { getSttProvider, transcriptSchema, type SttProvider, type Transcript } from "@/lib/stt";
 
 // The edit job (Phase 4, docs/EDITOR-NOTES.md): raw HeyGen MP4 → finished
@@ -71,6 +72,8 @@ export const editJobSchema = z.object({
   cta: z.string().trim().min(1).max(1000),
   /** scripts.broll_keywords: extra cuts when fewer than 2 edit_plan moments fit. */
   brollKeywords: z.array(z.string().min(1)).max(10).default([]),
+  /** p5-b2: b-roll clip ids Gate 5 rejected (stray text/logo): never picked again for this video. */
+  avoidBrollClips: z.array(z.string().min(1).max(200)).max(20).default([]),
 });
 export type EditJob = z.input<typeof editJobSchema>;
 
@@ -98,12 +101,14 @@ export interface EditStore {
    * editing under a claim older than EDIT.claim_stale_s. False = refused (another run edits it).
    */
   startEdit(id: string, run: string): Promise<boolean>;
-  saveTranscript(id: string, transcript: Transcript): Promise<void>;
+  /** p5-a: saves only while the row is still 'editing' and claimed by `run`. False = another run owns it now. */
+  saveTranscript(id: string, run: string, transcript: Transcript): Promise<boolean>;
   /** Saves only while the row is still 'editing' and claimed by `run`. False = another run owns it now. */
   finishEdit(
     id: string,
     run: string,
-    patch: { status: "final_qa" | "team_review"; final_path: string | null; error: string | null },
+    /** p5-a2: edit_manifest = what was built (Gate 4 checks it); only with a final file. */
+    patch: { status: "final_qa" | "team_review"; final_path: string | null; error: string | null; edit_manifest?: EditManifest | null },
   ): Promise<boolean>;
   setPostStatusForVideo(id: string, status: "editing" | "final_qa" | "team_review", reason: string | null): Promise<void>;
 }
@@ -285,8 +290,27 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
   /** This run lost the claim: it changes nothing it does not own; its own upload (if any) goes. */
   const superseded = async (): Promise<EditOutcome> => {
     console.warn(`[edit] superseded video=${video.id} stage=${stage}`);
-    if (uploadStarted) await removeOurFile();
+    // p5-a (QA SF1): never after a promotion: the row then points at our file.
+    if (uploadStarted && !promoted) await removeOurFile();
     return { status: "superseded" };
+  };
+  /**
+   * p5-a (QA SF1): finishEdit succeeded, so videos.final_path points at our run's file. From
+   * here on nothing may remove it or report "superseded"/"failed": a failing post update is
+   * logged (the video row is already right) and the outcome stands.
+   */
+  let promoted = false;
+  const afterPromotion = async (
+    status: "final_qa" | "team_review",
+    reason: string | null,
+    outcome: EditOutcome,
+  ): Promise<EditOutcome> => {
+    try {
+      await deps.store.setPostStatusForVideo(video.id, status, reason);
+    } catch (error) {
+      logAdminError("[edit] the edit finished but the post status was not saved", { videoId: video.id, status }, error);
+    }
+    return outcome;
   };
   try {
     const rawFile = path.join(workDir, "raw.mp4");
@@ -300,7 +324,8 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     }
     if (!transcript) {
       transcript = transcriptSchema.parse(await (deps.stt ?? getSttProvider()).transcribe({ audioPath: rawFile }));
-      await deps.store.saveTranscript(video.id, transcript);
+      // p5-a: a run that lost the claim while transcribing writes nothing and stops.
+      if (!(await deps.store.saveTranscript(video.id, run, transcript))) return await superseded();
     }
     const captionsFile = path.join(workDir, "captions.ass");
     await writeFile(
@@ -340,13 +365,17 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     });
     const provider = deps.broll ?? getBrollProvider();
     const broll: BrollCut[] = [];
+    const brollClips: string[] = [];
     const usedClips = new Set<string>();
+    // p5-b2: clips Gate 5 rejected (stray text/logo) are never picked again for this video.
+    const avoided = new Set(job.avoidBrollClips);
     for (const cut of plan.cuts) {
-      const clips = await provider.search(cut.keyword, { orientation: "portrait", minDuration_s: cut.duration_s });
+      const clips = (await provider.search(cut.keyword, { orientation: "portrait", minDuration_s: cut.duration_s })).filter((c) => !avoided.has(c.id));
       const clip = clips.find((c) => !usedClips.has(c.id)) ?? clips[0];
       if (!clip) continue;
       usedClips.add(clip.id);
       broll.push({ path: clip.file, start_s: cut.start_s, duration_s: cut.duration_s });
+      brollClips.push(clip.id);
     }
     console.info(
       `[edit] broll video=${video.id} cuts=${broll.length} coverage=${plan.coverage_s}s/${plan.max_coverage_s}s skipped=${plan.skipped.map((s) => s.why).join(",") || "none"}`,
@@ -393,23 +422,46 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     // p4-b1 (QA SF3): never final_qa while a requested extra (the AI label above all) is missing
     // from the command ffmpeg actually ran. The file is kept (final_path saved) for the team.
     const notApplied = notYetApplied(extras, args);
+    // p5-a2: what was built, for Gate 4 (the same pages buildAss burned in, the cuts, the bed and its gain).
+    const manifest: EditManifest = {
+      version: 1,
+      raw_duration_s: durationS,
+      format: job.format,
+      caption_style: job.captionStyle,
+      captions: groupPages(alignWords(job.displayText, transcript), job.captionStyle),
+      broll: broll.map((cut, i) => ({ start_s: cut.start_s, duration_s: cut.duration_s, clip: brollClips[i] })),
+      protected: plan.protected,
+      music: { bed_id: bed.id, gain_db: MUSIC.bed_gain_db },
+      ai_label: extras.ai_label === true,
+      watermark: extras.watermark === true,
+      not_applied: notApplied,
+      avoid_clips: job.avoidBrollClips,
+    };
     if (notApplied.length > 0 || brollProblem) {
       const reason = [notApplied.length > 0 ? missingExtrasMessage(notApplied) : null, brollProblem].filter(Boolean).join(" ");
-      const saved = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: finalPath, error: reason });
-      if (!saved) return superseded();
-      await deps.store.setPostStatusForVideo(video.id, "team_review", notApplied.length > 0 ? EXTRAS_TEAM_REASON : brollProblem);
-      return { status: "needs_team", finalPath, notApplied, reason };
+      const saved = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: finalPath, error: reason, edit_manifest: manifest });
+      if (!saved) return await superseded();
+      promoted = true;
+      return await afterPromotion("team_review", notApplied.length > 0 ? EXTRAS_TEAM_REASON : brollProblem, {
+        status: "needs_team",
+        finalPath,
+        notApplied,
+        reason,
+      });
     }
-    if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null }))) {
+    if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null, edit_manifest: manifest }))) {
       // Another run took over (our claim went stale): the row, the post and the other run's
       // file are not ours. Remove only our own run-scoped upload.
-      return superseded();
+      return await superseded();
     }
-    await deps.store.setPostStatusForVideo(video.id, "final_qa", null);
-    return { status: "edited", finalPath, notApplied: [] };
+    promoted = true;
+    return await afterPromotion("final_qa", null, { status: "edited", finalPath, notApplied: [] });
   } catch (error) {
     const message = plainMessage(error, stage);
     logAdminError("[edit] failed", { videoId: video.id, stage }, error);
+    // p5-a (QA SF1): defence in depth. afterPromotion never throws, but if anything did after the
+    // promotion, the row already points at our file: never overwrite it or remove the file.
+    if (promoted) return { status: "failed", error: message };
     // p4-b1 (QA SF2): record the failure only while THIS run still owns the claim. If another
     // run took over (and maybe finished: final_qa), its row, post and final file are not ours.
     const owned = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: null, error: message });

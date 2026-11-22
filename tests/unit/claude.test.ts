@@ -56,7 +56,12 @@ const INPUTS: { [K in ClaudeTaskName]: unknown } = {
   script_qa: { script: SCRIPT, max_seconds: 45 },
   script_rewrite: { script: SCRIPT, issues: [{ code: "hook", detail: "Hook is too long" }], max_seconds: 45, words_per_second: 2.4 },
   pronunciation_suggest: { words: ["Ayesha", "Gulberg"] },
+  key_term_check: { language: "en", terms: [{ written: "Ayesha", heard: "asia" }] },
   clip_face_check: { clip_name: "consent-good.mp4", frame_count: 6 },
+  visual_qa: {
+    language: "en", display_text: "Hi there. Book a call.", caption_style: "big_words",
+    frames: [{ index: 0, at_seconds: 0, kind: "first", caption: "Hi there." }],
+  },
 };
 
 function fakeMessage(overrides: Record<string, unknown> = {}) {
@@ -247,6 +252,8 @@ describe("request rules (CLAUDE.md)", () => {
     expect(CLAUDE_TASKS.plan).toMatchObject({ model: "planner", effort: "medium", stream: true });
     expect(CLAUDE_TASKS.script).toMatchObject({ model: "main", effort: "medium" });
     expect(CLAUDE_TASKS.brand_profile).toMatchObject({ model: "main", effort: "medium" });
+    // p5-b2: Gate 5 is Claude MAIN with image input (QA-SPEC), effort set explicitly.
+    expect(CLAUDE_TASKS.visual_qa).toMatchObject({ model: "main", effort: "medium", prompt: "visual-qa.md", stream: false });
   });
 
   it("loads each task's instructions from a file in /prompts", () => {

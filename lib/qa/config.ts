@@ -124,6 +124,15 @@ export const EDIT = {
   storage_timeout_s: 120,
   storage_max_attempts: 3,
   storage_backoff_ms: 2000,
+  /**
+   * p5-a: "Clean up old edit files" removes a run's final/<brand>/<video>/runs/<run>.mp4 only
+   * when the row does not point at it, the run holds no claim, and the file is older than this.
+   * 6 hours: far beyond a run's life (2 attempts × task_max_duration_s plus retries), so no live
+   * run can still be writing or promoting it. Not a QA threshold (a safety wait).
+   */
+  stray_run_min_age_s: 21_600,
+  /** p5-a: the cleanup looks at this many edited videos per press (newest edits first). */
+  stray_run_videos_per_pass: 200,
 } as const;
 
 /**
@@ -173,6 +182,147 @@ export const LOUDNESS = {
   target_lra: 11,
   tolerance_lu: 1,
   max_true_peak_db: -1,
+} as const;
+
+/**
+ * Gate 3: Audio and pronunciation QA (p5-a2, lib/qa/audio-checks.ts, lib/qa/audio-gate.ts).
+ * Starting values from QA-SPEC; calibrate on the first real videos.
+ */
+export const AUDIO_QA = {
+  /** Highest word error rate allowed, per brands.language (speech-to-text is less reliable in Roman Urdu / Hinglish). */
+  max_wer: { en: 0.08, roman_urdu: 0.15, hinglish: 0.15 },
+  /** Key terms (brand, person, offers, CTA words, dictionary) heard wrong after Claude's same-sound check. */
+  max_key_term_mismatches: 0,
+  /** The longest silence allowed inside speech (word gaps and ffmpeg silencedetect). */
+  max_silence_s: 1.0,
+  /** silencedetect: quieter than this counts as silence. */
+  silence_noise_db: -40,
+  /** The real duration may differ from scripts.est_seconds by at most this share. */
+  duration_tolerance: 0.15,
+  /**
+   * Clipping (ffmpeg astats, whole file): the loudest sample at or above clip_peak_dbfs AND
+   * reached at least clip_min_peak_count times (flat tops). A clean loud voice peaks once or twice.
+   */
+  clip_peak_dbfs: -0.1,
+  clip_min_peak_count: 8,
+  /** One automatic fix per gate: at most this many QA re-renders of a post video (SQL create_qa_rerender holds the same number). */
+  max_rerenders: 1,
+  /** ffmpeg measuring the raw audio is stopped after this long. */
+  measure_timeout_s: 120,
+} as const;
+
+/**
+ * Gate 4: Technical QA (p5-a2, lib/qa/technical-checks.ts, lib/qa/technical-gate.ts). ffprobe +
+ * ffmpeg filters, no AI. The music rule reuses MUSIC.min_voice_over_music_db; b-roll reuses BROLL.
+ */
+export const TECH_QA = {
+  width: 1080,
+  height: 1920,
+  fps: 30,
+  video_codec: "h264",
+  pix_fmt: "yuv420p",
+  audio_codec: "aac",
+  audio_rate: 48000,
+  /** Duration ≤ plan max_seconds_per_video + this. */
+  duration_slack_s: 1,
+  loudness_target_lufs: -14,
+  loudness_tolerance_lu: 1.5,
+  max_true_peak_dbtp: -1,
+  /** blackdetect: a frame darker than this share of full scale is black; reported from black_report_s, fails above max_black_s. */
+  black_pix_th: 0.1,
+  black_report_s: 0.1,
+  max_black_s: 0.5,
+  /** freezedetect: frames closer than freeze_noise_db count as the same; reported from freeze_report_s, fails above max_freeze_s. */
+  freeze_noise_db: -60,
+  freeze_report_s: 0.5,
+  max_freeze_s: 1.5,
+  /** Each caption word starts within this of its speech-to-text timing. */
+  caption_timing_tolerance_s: 0.15,
+  caption_max_lines: 2,
+  /** Captions stay out of the top 12%, bottom 20% and right 12% of the frame. */
+  safe_zone: { top: 0.12, bottom: 0.2, right: 0.12 },
+  /** File size: under this many MB per 60 s of video (proportional). */
+  max_mb_per_60s: 100,
+  /** b-roll cut lengths are compared with this slack (ffmpeg rounds times to milliseconds). */
+  broll_slack_s: 0.01,
+  /** One automatic fix per gate: the edit is rebuilt at most this many times. */
+  max_rebuilds: 1,
+  /** ffmpeg measuring the final file is stopped after this long. */
+  measure_timeout_s: 300,
+} as const;
+
+/**
+ * Gate 5: Visual and realism QA (p5-b2, lib/qa/visual-checks.ts, lib/qa/visual-gate.ts). Claude (MAIN)
+ * with image input on frames sampled from the final video, plus pixel checks without AI.
+ */
+export const VISUAL_QA = {
+  /** QA-SPEC: one frame every 2 s, plus the first and last frames, plus one from each b-roll cut-in. */
+  frame_every_s: 2,
+  /** Never send more frames than this (a 60 s reel needs about 35). */
+  max_frames: 40,
+  /** Frames go to Claude as JPEGs this wide (9:16, so 960 tall); Claude downsizes larger images anyway. */
+  claude_frame_width: 540,
+  /** realism_score (1 to 10, "would a viewer believe this is a real recording?"): this or more passes. */
+  pass_realism_score: 8,
+  /** One automatic fix per gate (a re-edit or a re-render), counted per script (SQL create_visual_rerender holds the same number). */
+  max_fixes: 1,
+  /** Captions over the mouth / unreadable: re-edit with the first of these whose 2-line box starts lower than the current style's. */
+  caption_fix_styles: ["small_box", "minimal"],
+  /** Frame extraction (one ffmpeg pass over the final file) is stopped after this long. */
+  extract_timeout_s: 120,
+  /**
+   * Pixel checks of the AI label and the trial corner tag (luma 0-255, no AI). drawtext box=1 darkens
+   * what is under it by the box's alpha (black@0.55 → 0.45 × background + 0.55 × black). pad strip =
+   * the box rows above the text; outside = the background just beside the box, same rows.
+   * Drawn = the pad strip is within box_tolerance of the darkened outside AND at least text_min_share
+   * of the text rows are at least text_min_luma. If the box could darken the background by less than
+   * min_contrast (a near-black frame) the frame is "unknown" (not counted either way).
+   * text_width_em = the shortest text width we expect, per px of font size per letter.
+   */
+  pixel: { box_tolerance: 14, min_contrast: 25, text_min_luma: 180, text_min_share: 0.02, text_width_em: 0.45 },
+} as const;
+
+/** Gate 6: which videos a person watches before the customer sees them (QA-SPEC "Gate 6: Human review"). */
+export const HUMAN_REVIEW = {
+  /** The first 5 videos of every new brand. */
+  first_videos_per_brand: 5,
+  /** Any video with realism_score below 9 (it passed Gate 5 at 8). */
+  below_realism_score: 9,
+  /** A random 1 in 5 of all other videos (stable per video id, so a retry decides the same). */
+  random_one_in: 5,
+} as const;
+
+/**
+ * p5-b3: Admin → Usage and spend → Quality (QA-SPEC "Metrics"). The targets are QA-SPEC's; the page
+ * marks a metric green or red against them. Read only: nothing here changes a gate.
+ */
+export const QUALITY = {
+  targets: {
+    /** First-time pass rate, per gate: over 85%. */
+    first_pass_min: 0.85,
+    /** Automatic fix success rate: over 70%. */
+    auto_fix_success_min: 0.7,
+    /** Human reject rate: under 5%. */
+    human_reject_max: 0.05,
+    /** Customer redo rate: under 10%. */
+    customer_redo_max: 0.1,
+    /** Time from approval to Ready: under 2 hours. */
+    approval_to_ready_max_h: 2,
+  },
+  /** "Top 5 failure codes this week": how many, and "this week" = the last 7 days of the range. */
+  top_failure_codes: 5,
+  top_failure_days: 7,
+  /** The page's range when none is picked. */
+  default_range_days: 28,
+} as const;
+
+/**
+ * p5-b3: calibration (PROMPTS Phase 5 item 8, read only). The page shows each gate's scores and a
+ * proposed threshold only once this many REAL videos (a non-mock, succeeded HeyGen render) exist.
+ * Proposals are never written: the owner agrees, then a person edits this file.
+ */
+export const CALIBRATION = {
+  min_real_videos: 10,
 } as const;
 
 /**

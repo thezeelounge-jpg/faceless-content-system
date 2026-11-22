@@ -8,7 +8,7 @@ Claude Code: read this before building anything in the pipeline, and before chan
 2. **Our failures are free.** QA failures and re-renders we trigger never count against the customer's plan.
 3. **One automatic fix per gate.** If a gate fails, try one automatic fix. If it fails again, send it to the team QA queue, never to the customer.
 4. **Every gate writes a `qa_reports` row:** gate, passed, score, issues (JSON list of {code, detail, at_seconds}), auto_fix.
-5. **All thresholds live in `lib/qa/config.ts`.** The numbers below are starting values. Calibrate them on the first 20 real videos (Phase 5, step 8).
+5. **All thresholds live in `lib/qa/config.ts`.** The numbers below are starting values. Calibrate them on the first real videos (Phase 5, step 8; see "Calibration" below: we use 10, not 20).
 6. **Development never spends real money by accident.** QA code is tested with `MOCK_HEYGEN=true` and `MOCK_STT=true` against fixture files in `tests/fixtures/`.
 
 ## The gates in order
@@ -143,6 +143,17 @@ The rubric returns JSON:
 | Every video of a managed (done-for-you) brand, until the operator turns this off for that brand | Operator |
 
 The operator checklist in the admin QA queue has one tap per item: pronunciation, lip-sync, looks real, captions, b-roll, music, label. Rejecting a video means picking a reason, which is saved to `qa_reports` with gate `human`.
+
+As built (p5-b4):
+- "Flagged by Gates 3 to 5 after its automatic fix" includes a video that **passed** after its fix: it goes to the queue with the reason "Auto-fixed: …", never straight to the customer. A second failure goes to the queue too.
+- The reject reason and the operator's note are **team only** (table `human_reviews`, shown on the admin client page and in the queue). The customer's post shows only "Taking a little longer. We're fixing it."
+- A reject puts the post back to approved. Nothing is rendered automatically: the team presses Make video again (real renders still need the spend OK, the daily caps and the pause switch). The rejected video never counts.
+
+## Calibration (Phase 5, step 8)
+
+- **10 real videos, not 20.** This spec first said "the first 20 real videos"; PROMPTS.md Phase 5 said 10, and 10 was chosen (`CALIBRATION.min_real_videos` in `lib/qa/config.ts`) so the first look comes sooner. Mock videos never count.
+- The calibration view (Admin → Usage and spend) only **shows** each gate's scores against the current threshold and **proposes** a value with the reason. It never writes.
+- **Thresholds never change without Zee's OK.** A person edits `lib/qa/config.ts` after Zee agrees; the change is committed with the reason.
 
 ## Customer review
 

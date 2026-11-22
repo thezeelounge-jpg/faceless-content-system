@@ -13,6 +13,7 @@
 //   self-serve → needs_you with a plain reason.
 import type { ScriptOutput } from "@/lib/ai-schemas";
 import { ClaudeError, type ClaudeBrand, type ClaudeContext, type ClaudeTaskName, type TaskOutput } from "@/lib/claude";
+import { PlainError } from "@/lib/plain-error";
 import { buildSpokenText, type PronunciationEntry } from "@/lib/pronunciation/dictionary";
 import { unspeakableCharacters } from "@/lib/pronunciation/normalise";
 import { findRiskyWords } from "@/lib/pronunciation/risky-words";
@@ -44,12 +45,46 @@ export type QaReportRow = {
 
 export type PostStatus = "script_review" | "approved" | "team_review" | "needs_you";
 
+/** p5-b1: the finish_script_checks answer. */
+export type FinishChecksOutcome = "done" | "stale" | "moved_on" | "not_found";
+
+/** p5-a: a post may get a new script version only while it is in one of these. */
+export const OPEN_POST_STATUSES = ["planned", "scripting"] as const;
+export const isOpenPostStatus = (status: string) => (OPEN_POST_STATUSES as readonly string[]).includes(status);
+
+/** p5-a: a rewrite was refused because the post has moved on (admin wording). */
+export const SCRIPT_REWRITE_CLOSED =
+  "This post has moved past scripting, so its script can't be rewritten. An admin can use “Rewrite anyway”.";
+
+/** p5-a: who overrides the "no rewrite after scripting" rule, and why (saved on the audit row). */
+export type ScriptOverride = { by: string; reason: string };
+
 export interface ScriptQaStore {
   insertQaReport(row: QaReportRow): Promise<void>;
-  /** Saves a new scripts version and returns its id. */
-  insertScriptVersion(row: Omit<StoredScript, "id">): Promise<string>;
+  /**
+   * Saves a new scripts version and returns its id. p5-a: only while the post is planned or
+   * scripting (rpc insert_script_version, post row locked); otherwise a PlainError
+   * (SCRIPT_REWRITE_CLOSED). With `override` (admin only, after requireAdmin) it saves anyway,
+   * moves the post back to scripting and writes an audit row; refused while the post has an
+   * active video.
+   */
+  insertScriptVersion(row: Omit<StoredScript, "id">, override?: ScriptOverride): Promise<string>;
   updateScript(id: string, patch: Partial<Pick<StoredScript, "qa_status" | "spoken_text">>): Promise<void>;
-  updatePost(id: string, patch: { status: PostStatus; status_reason: string | null }): Promise<void>;
+  /**
+   * p5-b1 (Rowan 7): the checks' verdict for one script (rpc finish_script_checks, post row
+   * locked). Only the post's LATEST version may set its qa_status (when given) and move the post
+   * (and only while it is planned / scripting). 'stale' = a newer version exists: nothing written.
+   */
+  finishChecks(
+    scriptId: string,
+    patch: { qa_status: QaStatus | null; status: PostStatus; status_reason: string | null },
+  ): Promise<FinishChecksOutcome>;
+  /**
+   * p5-b1 (Rowan 5): the facts insert_script_version decides on, read cheaply BEFORE a Claude
+   * rewrite (the post's status; whether it has an active post video = kind post, not failed or
+   * skipped). null = no such post. The rpc still decides (post row locked); this only saves a call.
+   */
+  getRewriteState(postId: string): Promise<{ status: string; hasActiveVideo: boolean } | null>;
   listPronunciations(brandId: string): Promise<PronunciationEntry[]>;
   /** Saves new status 'suggested', source 'qa' rows; words already in the list are skipped. */
   insertSuggestedPronunciations(brandId: string, rows: { written: string; say_as: string }[]): Promise<void>;
@@ -72,7 +107,7 @@ const SCRIPT_FIELDS = [
   "edit_plan",
 ] as const satisfies readonly (keyof ScriptOutput)[];
 
-function scriptOnly(script: ScriptOutput): ScriptOutput {
+export function scriptOnly(script: ScriptOutput): ScriptOutput {
   return Object.fromEntries(SCRIPT_FIELDS.map((key) => [key, script[key]])) as ScriptOutput;
 }
 
@@ -173,6 +208,12 @@ export async function runGate1(args: GateArgs): Promise<Gate1Result> {
 
   const rewritesLeft = SCRIPT_QA.max_rewrites - (args.script.version - 1);
   if (rewritesLeft <= 0) return { passed: false, script: args.script, issues: first.issues };
+
+  // p5-b1 (Rowan 5): the database would refuse the new version once the post has left scripting
+  // (rpc insert_script_version 'closed'): refuse now, before paying for the Claude rewrite.
+  const state = await args.store.getRewriteState(args.script.post_id);
+  if (!state) throw new PlainError("Post not found.");
+  if (!isOpenPostStatus(state.status)) throw new PlainError(SCRIPT_REWRITE_CLOSED);
 
   // Version 1 stays "pending" until the rewrite is saved: if the rewrite
   // throws (busy, timeout, bad output), "Run checks" can simply try again
@@ -288,7 +329,8 @@ export async function runGate2(args: {
 // ---------------------------------------------------------------------------
 
 export type ScriptChecksResult = {
-  outcome: PostStatus;
+  /** p5-b1: 'superseded' = a newer script version exists; this run's verdict moved nothing. */
+  outcome: PostStatus | "superseded";
   script: StoredScript;
 };
 
@@ -319,7 +361,9 @@ export async function runScriptChecks(args: {
   if (!gate2.passed) return fail(args, script, gate2.issues, "Pronunciation prep failed");
 
   const status = postStatusAfterChecks(args.brand);
-  await args.store.updatePost(args.postId, { status, status_reason: null });
+  // p5-b1 (Rowan 7): only the post's latest version may move it on (rpc finish_script_checks).
+  const finished = await args.store.finishChecks(script.id, { qa_status: null, status, status_reason: null });
+  if (finished === "stale") return { outcome: "superseded", script };
   return { outcome: status, script };
 }
 
@@ -330,7 +374,8 @@ async function fail(
   teamNote: string,
 ): Promise<ScriptChecksResult> {
   const route = routeFailedScript(args.brand, issues, teamNote);
-  await args.store.updateScript(script.id, { qa_status: route.qa_status });
-  await args.store.updatePost(args.postId, { status: route.post_status, status_reason: route.reason });
+  // p5-b1 (Rowan 7): a newer version exists → nothing is written (not this row, not the post).
+  const finished = await args.store.finishChecks(script.id, { qa_status: route.qa_status, status: route.post_status, status_reason: route.reason });
+  if (finished === "stale") return { outcome: "superseded", script };
   return { outcome: route.post_status, script: { ...script, qa_status: route.qa_status } };
 }

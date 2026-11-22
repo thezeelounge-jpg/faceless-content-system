@@ -20,7 +20,8 @@ import {
   savePostProblem,
 } from "@/lib/posts";
 import { canRunChecks, latestScript } from "@/lib/qa/can-run-checks";
-import { runScriptChecks, type PostStatus } from "@/lib/qa/script-pipeline";
+import { rewriteAnywayInput, rewriteScriptAnyway } from "@/lib/qa/script-override";
+import { runScriptChecks, type ScriptChecksResult } from "@/lib/qa/script-pipeline";
 import { createQaStore } from "@/lib/qa/store";
 import { maxSecondsFor, writeScriptForPost } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -76,11 +77,13 @@ export async function planNextFourWeeks(brandId: string, _prev: ActionState): Pr
 }
 
 /** One sentence for where the post went after the checks. */
-const CHECK_OUTCOME: Record<PostStatus, string> = {
+const CHECK_OUTCOME: Record<ScriptChecksResult["outcome"], string> = {
   script_review: "Checked: ready for script review.",
   approved: "Checked and approved.",
   team_review: "It failed the checks after one rewrite and is in the team queue.",
   needs_you: "It failed the checks after one rewrite; the client sees “Needs you”.",
+  // p5-b1 (Rowan 7): a newer version of the script exists; it is checked on its own.
+  superseded: "A newer version of this script exists, so this check changed nothing. Reload the page.",
 };
 
 /** "Write script" for one planned post: Claude (MAIN) writes it, our code checks the length, we save version 1, then Gates 1 and 2 run. */
@@ -174,6 +177,43 @@ export async function checkScript(scriptId: string, _prev: ActionState): Promise
       status: "error",
       message: plainAdminMessage(error, "Couldn't run the checks. Please try again in a minute."),
     };
+  }
+}
+
+/**
+ * p5-a "Rewrite anyway": the admin override of "no rewrite once the post has left scripting".
+ * requireAdmin first; zod checks the reason + confirm box before any Claude call. The database
+ * saves the new version, moves the post back to scripting and writes the audit row (who, why)
+ * in one transaction (rpc insert_script_version); then Gates 1 and 2 run as usual.
+ */
+export async function rewriteAnyway(scriptId: string, _prev: ActionState, formData: FormData): Promise<ActionState> {
+  const admin = await requireAdmin();
+  const input = rewriteAnywayInput.safeParse({ reason: formData.get("reason") ?? "", confirm: formData.get("confirm") ?? "" });
+  if (!input.success) return { status: "error", message: input.error.issues[0]?.message ?? "Check the form." };
+  try {
+    const found = await getScriptForChecks(scriptId);
+    if (!found) return { status: "error", message: "Script not found." };
+    const { script, post, versions } = found;
+    if (latestScript(versions)?.id !== script.id) return { status: "error", message: STALE_VERSION };
+    const brand = await getBrand(post.brand_id);
+    if (!brand) return NOT_FOUND;
+    const maxSeconds = maxSecondsFor(await getOwnerPlan(brand.owner_id));
+    const checks = await rewriteScriptAnyway({
+      brand,
+      postId: post.id,
+      postStatus: post.status,
+      script,
+      adminEmail: admin.email || "unknown admin",
+      reason: input.data.reason,
+      maxSeconds,
+      run: runClaudeTask,
+      store: createQaStore(),
+    });
+    revalidatePath(`/admin/clients/${brand.id}`);
+    return { status: "ok", message: `Rewritten (version ${checks.script.version}). ${CHECK_OUTCOME[checks.outcome]}` };
+  } catch (error) {
+    logAdminError("[admin] rewrite anyway failed", { scriptId }, error);
+    return { status: "error", message: plainAdminMessage(error, "Couldn't rewrite the script. Please try again in a minute.") };
   }
 }
 

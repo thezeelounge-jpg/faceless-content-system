@@ -31,10 +31,11 @@ const postRenderAnswer = z.object({
 /**
  * The create_post_render rpc answer (p4-b1). A unique violation (23505) means
  * a second active video for the POST was refused by the index
- * videos_one_active_post_video_per_post (p4-b3): the same plain refusal as 'not_approved'.
+ * videos_one_active_post_video_per_post (p4-b3, the backstop behind the rpc's own
+ * check): p5-a (QA SF2) gives it the same plain refusal as the rpc's 'other_script'.
  */
 export function postRenderResult(data: unknown, error: { code?: string; message: string } | null): PostRenderOutcome {
-  if (error?.code === "23505") return { outcome: "not_approved", videoId: null };
+  if (error?.code === "23505") return { outcome: "other_script", videoId: null };
   if (error) fail("create post render", error);
   const parsed = postRenderAnswer.safeParse(data);
   if (!parsed.success) fail("create post render", { message: "unexpected answer" });

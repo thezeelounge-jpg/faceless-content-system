@@ -14,6 +14,8 @@
     "test:staging": "vitest run --config vitest.staging.config.mts",
     "eval:scripts": "vitest run --config vitest.eval.config.mts",
     "fixtures": "bash scripts/make-fixtures.sh",
+    "fixtures:broll": "bash scripts/make-broll-fixtures.sh",
+    "prompts:bundle": "node scripts/make-prompts-bundle.mjs",
     "p4:artifacts": "vitest run --config vitest.artifacts.config.mts",
     "trigger:dev": "trigger dev",
     "trigger:deploy": "trigger deploy",

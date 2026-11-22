@@ -1,4 +1,5 @@
 import "server-only";
+import type { CleanupStore, CleanupVideo, RunFileStorage } from "@/lib/edit-cleanup";
 import type { EditFiles, EditStore, EditVideoRow } from "@/lib/edit-flow";
 import { EDIT } from "@/lib/qa/config";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -32,9 +33,18 @@ export function createEditStore(): EditStore {
       if (error) fail("start edit", error);
       return data === true;
     },
-    async saveTranscript(id, transcript) {
-      const { error } = await db.from("videos").update({ transcript }).eq("id", id);
+    async saveTranscript(id, run, transcript) {
+      // p5-a: only while still 'editing' AND claimed by this run (a superseded run writes nothing).
+      const { data, error } = await db
+        .from("videos")
+        .update({ transcript })
+        .eq("id", id)
+        .eq("status", "editing")
+        .eq("edit_run_id", run)
+        .select("id")
+        .maybeSingle();
       if (error) fail("save transcript", error);
+      return data !== null;
     },
     async finishEdit(id, run, patch) {
       // Only while still 'editing' AND claimed by this run: never overwrite another run's result.
@@ -145,12 +155,58 @@ async function withStorageRetry<T>(
   }
 }
 
-/** The PRIVATE videos bucket (raw/ in, final/ out). Every call: timeout + bounded retry (EDIT in lib/qa/config.ts). */
-export function createEditFiles(
-  bucket: EditBucket = createAdminClient().storage.from(VIDEO_BUCKET),
+/** p5-a: the cleanup's reads (lib/edit-cleanup.ts). Server only, after requireAdmin. */
+export function createCleanupStore(): CleanupStore {
+  const db = createAdminClient();
+  const columns = "id, brand_id, status, final_path, edit_run_id";
+  return {
+    async listEditedVideos(limit) {
+      const { data, error } = await db
+        .from("videos")
+        .select(columns)
+        .eq("kind", "post")
+        .not("edit_run_id", "is", null)
+        .order("edit_started_at", { ascending: false })
+        .limit(limit);
+      if (error) fail("list edited videos", error);
+      return (data ?? []) as CleanupVideo[];
+    },
+    async getVideo(id) {
+      const { data, error } = await db.from("videos").select(columns).eq("id", id).maybeSingle();
+      if (error) fail("load video", error);
+      return (data as CleanupVideo | null) ?? null;
+    },
+  };
+}
+
+/** The bucket calls the cleanup uses (Supabase storage-js; tests pass a fake). */
+export type CleanupBucket = {
+  list(
+    path: string,
+    options: { limit: number },
+  ): PromiseLike<StorageAnswer<{ name: string; updated_at?: string | null; created_at?: string | null }[]>>;
+  remove(paths: string[]): PromiseLike<StorageAnswer<unknown>>;
+};
+
+/** p5-a: list + remove in the PRIVATE videos bucket, each with the edit task's timeout + bounded retry. */
+export function createRunFileStorage(
+  bucket: CleanupBucket = createAdminClient().storage.from(VIDEO_BUCKET),
   overrides: Partial<StorageRetryOptions> = {},
-): EditFiles {
-  const options: StorageRetryOptions = {
+): RunFileStorage {
+  const options = retryOptions(overrides);
+  return {
+    async list(folder) {
+      const files = await withStorageRetry("list run files", () => bucket.list(folder, { limit: 1000 }), options);
+      return files.map((f) => ({ name: f.name, updated_at: f.updated_at ?? f.created_at ?? null }));
+    },
+    async remove(path) {
+      await withStorageRetry("remove run file", () => bucket.remove([path]), options);
+    },
+  };
+}
+
+function retryOptions(overrides: Partial<StorageRetryOptions>): StorageRetryOptions {
+  return {
     timeoutMs: EDIT.storage_timeout_s * 1000,
     maxAttempts: EDIT.storage_max_attempts,
     backoffMs: EDIT.storage_backoff_ms,
@@ -158,6 +214,14 @@ export function createEditFiles(
     random: Math.random,
     ...overrides,
   };
+}
+
+/** The PRIVATE videos bucket (raw/ in, final/ out). Every call: timeout + bounded retry (EDIT in lib/qa/config.ts). */
+export function createEditFiles(
+  bucket: EditBucket = createAdminClient().storage.from(VIDEO_BUCKET),
+  overrides: Partial<StorageRetryOptions> = {},
+): EditFiles {
+  const options = retryOptions(overrides);
   return {
     async download(path) {
       const data = await withStorageRetry("download raw video", (signal) => bucket.download(path, undefined, { signal }), options);

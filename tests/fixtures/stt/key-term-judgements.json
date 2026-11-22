@@ -1,0 +1,12 @@
+{
+  "note": "MOCK answers for the key_term_check Claude task (MOCK_CLAUDE). Matched on written + heard (any case). A pair not listed here is judged 'mispronounced' (fail safe) with a mock respelling.",
+  "judgements": [
+    { "written": "Ayesha", "heard": "aisha", "verdict": "same_sound", "respelling": "" },
+    { "written": "Ayesha", "heard": "aaisha", "verdict": "same_sound", "respelling": "" },
+    { "written": "Ayesha", "heard": "asia", "verdict": "mispronounced", "respelling": "Aa-ee-sha" },
+    { "written": "InshaAllah", "heard": "inshallah", "verdict": "same_sound", "respelling": "" },
+    { "written": "Bohat", "heard": "bahut", "verdict": "same_sound", "respelling": "" },
+    { "written": "Sameer", "heard": "summer", "verdict": "mispronounced", "respelling": "Sa-meer" },
+    { "written": "Sameer", "heard": "same ear", "verdict": "mispronounced", "respelling": "Sa-meer" }
+  ]
+}

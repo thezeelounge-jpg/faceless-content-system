@@ -1,4 +1,7 @@
 import { AdminPage } from "@/components/admin/admin-page";
+import { ActionForm } from "@/components/admin/action-form";
+import { EDIT } from "@/lib/qa/config";
+import { cleanupEditFilesAction } from "../edit-cleanup-actions";
 import { ResumeRenders } from "@/components/admin/resume-renders";
 import { StuckClaims } from "@/components/admin/stuck-claims";
 import { EnvStatusList, MockModeList } from "@/components/env-status";
@@ -70,6 +73,26 @@ export default function SettingsPage() {
           </CardHeader>
           <CardContent>
             <StuckClaims />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Old edit files</CardTitle>
+            <CardDescription>
+              Removes leftover edit files from runs that stopped half-way. Never a file a video uses, never one still being
+              edited, and only files older than {EDIT.stray_run_min_age_s / 3600} hours.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ActionForm
+              action={cleanupEditFilesAction}
+              label="Clean up old edit files"
+              pendingLabel="Cleaning up…"
+              confirmCheck={{ name: "confirm_cleanup", label: "Remove old edit files that no video uses." }}
+              variant="outline"
+              size="sm"
+            />
           </CardContent>
         </Card>
 

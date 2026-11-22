@@ -1,0 +1,9 @@
+{
+  "note": "MOCK speech-to-text picks a transcript by the text the voice was asked to say (expectedText = spoken_text, any case). First rule whose 'contains' is in the text wins; no match = sample-transcript.json. Deterministic: the first render of the Gate 3 test script mishears the name; the re-render with the respelling hears it right.",
+  "rules": [
+    { "contains": "aa-ee-sha from bright smile dental", "file": "gate3-ayesha-fixed.json" },
+    { "contains": "ayesha from bright smile dental", "file": "gate3-ayesha-misheard.json" },
+    { "contains": "sa-meer from bright smile dental", "file": "gate3-sameer-still-wrong.json" },
+    { "contains": "sameer from bright smile dental", "file": "gate3-sameer-misheard.json" }
+  ]
+}

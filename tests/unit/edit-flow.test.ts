@@ -22,7 +22,8 @@ import {
 import { BROLL_NOT_SET_UP } from "@/lib/broll";
 import { notYetApplied } from "@/lib/edit";
 import { LOUDNORM_SILENT, MUSIC_NOT_SET_UP, fixtureMusicLibrary } from "@/lib/music";
-import { EDIT } from "@/lib/qa/config";
+import { EDIT, MUSIC } from "@/lib/qa/config";
+import { editManifestSchema } from "@/lib/qa/edit-manifest";
 import { NO_STT_PROVIDER, type SttProvider } from "@/lib/stt";
 
 // lib/edit-flow.ts with fakes: no Supabase, no real ffmpeg (that is in
@@ -59,8 +60,11 @@ function memory(overrides: Partial<EditVideoRow> = {}) {
       Object.assign(row, { status: "editing", error: null, edit_run_id: run, edit_started_at: Date.now() });
       return true;
     },
-    async saveTranscript(_id, transcript) {
+    async saveTranscript(_id, run, transcript) {
+      // p5-a: like finishEdit, only while still 'editing' AND claimed by this run.
+      if (row.status !== "editing" || row.edit_run_id !== run) return false;
       row.transcript = transcript;
+      return true;
     },
     async finishEdit(_id, run, patch) {
       if (row.status !== "editing" || row.edit_run_id !== run) return false;
@@ -176,6 +180,25 @@ describe("runEditJob", () => {
     expect(await readdir(tmpRoot)).toEqual([]); // temp files cleaned up
   });
 
+  it("p5-a2: the finished edit saves what it built (videos.edit_manifest) for Gate 4", async () => {
+    const m = memory();
+    await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir(), music: fixtureMusicLibrary() });
+    const manifest = editManifestSchema.parse((m.row as Record<string, unknown>).edit_manifest);
+    expect(manifest).toMatchObject({
+      version: 1, raw_duration_s: 6, format: "talking", caption_style: "big_words",
+      music: { bed_id: expect.stringMatching(/^bed-/), gain_db: MUSIC.bed_gain_db },
+      ai_label: true, // the row's ai_label (on by default) wins over the payload's false
+      watermark: false, not_applied: [],
+    });
+    expect(manifest.captions.length).toBeGreaterThan(1);
+    expect(manifest.captions.every((page) => page.lines.length <= 2)).toBe(true);
+    const words = manifest.captions.flatMap((page) => page.lines.flat());
+    expect(words.map((w) => w.text).join(" ")).toBe(script.display_text);
+    expect(words[0]).toMatchObject({ text: "Stop", source: "matched", stt_indexes: [0], start_s: fixture.words[0].start_s });
+    expect(manifest.broll).toEqual([expect.objectContaining({ duration_s: expect.any(Number), clip: expect.any(String) })]);
+    expect(manifest.protected).toEqual({ hook_end_s: expect.any(Number), cta_start_s: expect.any(Number) });
+  });
+
   it("uses the mock speech-to-text when no transcript is given, and saves it on the row", async () => {
     const m = memory();
     await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
@@ -260,6 +283,23 @@ describe("runEditJob", () => {
     const graph = seenArgs[seenArgs.indexOf("-filter_complex") + 1];
     expect(graph).toContain("[base][b1]overlay=enable='between(t,2.72,4.22)':eof_action=pass[v1]");
     expect(graph).toContain("[v1]subtitles="); // captions on top of the b-roll
+  });
+
+  it("p5-b2 (Gate 5 re-edit): avoidBrollClips swaps the clip Gate 5 rejected; the manifest records the avoid list and the caption style", async () => {
+    const m = memory();
+    await runEditJob({ ...job, avoidBrollClips: ["cafe-green"], captionStyle: "small_box" }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    const inputs = seenArgs.flatMap((a, i) => (a === "-i" ? [seenArgs[i + 1]] : []));
+    expect(inputs.some((f) => f.endsWith("cafe-green.mp4"))).toBe(false);
+    const manifest = editManifestSchema.parse((m.row as Record<string, unknown>).edit_manifest);
+    expect(manifest).toMatchObject({ caption_style: "small_box", avoid_clips: ["cafe-green"] });
+    expect(manifest.broll.every((c) => c.clip !== "cafe-green")).toBe(true);
+  });
+
+  it("p5-b2: a cut whose only clips are all avoided is dropped (never the rejected clip again)", async () => {
+    const m = memory();
+    const broll = { search: vi.fn(async (keyword: string) => [{ id: "only", keyword, file: "/tmp/only.mp4", width: 540, height: 960, duration_s: 4, source: "mock" as const }]) };
+    await runEditJob({ ...job, avoidBrollClips: ["only"] }, { ...m, broll, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(seenArgs).not.toContain("/tmp/only.mp4");
   });
 
   it("p4-b2: the music bed (mock set) is looped under the voice and ducked by it", async () => {
@@ -503,6 +543,53 @@ describe("runEditJob", () => {
     expect(pathA).not.toBe(pathB);
     expect(m.removed).toEqual([pathA]);
     expect(m.stored.has(pathA)).toBe(false);
+  });
+
+  it("p5-a (QA SF1): the post update throws AFTER finishEdit promoted the run → the file stays and final_path still points at it", async () => {
+    const m = memory();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const setPost = m.store.setPostStatusForVideo.bind(m.store);
+    m.store.setPostStatusForVideo = async (id, status, reason) => {
+      if (status !== "editing") throw new Error("posts update failed: network");
+      return setPost(id, status, reason);
+    };
+    const out = await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toEqual({ status: "edited", finalPath: FINAL, notApplied: [] });
+    expect(m.removed).toEqual([]);
+    expect(m.stored.has(FINAL)).toBe(true);
+    expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, error: null });
+    expect(logged).toHaveBeenCalled();
+  });
+
+  it("p5-a (QA SF1): same for the team_review promotion (b-roll problem) → the file the row points at is never removed", async () => {
+    const m = memory();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    m.store.setPostStatusForVideo = async (_id, status) => {
+      if (status !== "editing") throw new Error("posts update failed");
+    };
+    const out = await runEditJob({ ...job, hook: "Something else entirely." }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toMatchObject({ status: "needs_team", finalPath: FINAL });
+    expect(m.removed).toEqual([]);
+    expect(m.stored.has(FINAL)).toBe(true);
+    expect(m.row).toMatchObject({ status: "team_review", final_path: FINAL });
+  });
+
+  it("p5-a: a run that lost the claim during speech-to-text does not save the transcript (and stops)", async () => {
+    const m = memory();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ffmpeg = vi.fn(okFfmpeg);
+    const stt: SttProvider = {
+      async transcribe() {
+        // While A transcribes, its claim goes stale and run B takes the video over.
+        m.row.edit_run_id = "run_b";
+        return fixture as never;
+      },
+    };
+    const out = await runEditJob(job, { ...m, stt, ffmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toEqual({ status: "superseded" });
+    expect(m.row.transcript).toBeNull();
+    expect(ffmpeg).not.toHaveBeenCalled();
+    expect(m.removed).toEqual([]);
   });
 
   it("an unknown video id is refused", async () => {

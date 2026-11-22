@@ -8,6 +8,8 @@ import {
   brandProfileOutput,
   clipFaceInput,
   clipFaceOutput,
+  keyTermInput,
+  keyTermOutput,
   planInput,
   planOutput,
   pronunciationInput,
@@ -17,6 +19,8 @@ import {
   scriptQaInput,
   scriptQaOutput,
   scriptRewriteInput,
+  visualQaInput,
+  visualQaOutput,
 } from "@/lib/ai-schemas";
 import {
   mockBrandProfile,
@@ -29,6 +33,8 @@ import {
 } from "@/lib/claude-mocks";
 import { splitSamples } from "@/lib/brand-input";
 import { mockClipFaceCheck } from "@/lib/clip-checks/face-mock";
+import { mockKeyTermCheck } from "@/lib/qa/key-term-mock";
+import { mockVisualQa } from "@/lib/qa/visual-mock";
 import { isMockClaude, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
 import { loadPrompt } from "@/lib/prompts";
@@ -137,6 +143,17 @@ export const CLAUDE_TASKS = {
     stream: false,
     timeoutMs: 60_000,
   },
+  /** Gate 3 (p5-a2): a key term heard differently: same sound or a real mispronunciation? */
+  key_term_check: {
+    model: "fast",
+    effort: "low",
+    maxTokens: 4_000,
+    prompt: "key-term-check.md",
+    input: keyTermInput,
+    output: keyTermOutput,
+    stream: false,
+    timeoutMs: 60_000,
+  },
   /** Consent clip: frames go in as images (ClaudeContext.images). */
   clip_face_check: {
     model: "main",
@@ -147,6 +164,17 @@ export const CLAUDE_TASKS = {
     output: clipFaceOutput,
     stream: false,
     timeoutMs: 120_000,
+  },
+  /** Gate 5 (p5-b2): frames of the finished reel go in as images (ClaudeContext.images); the QA-SPEC rubric comes back. */
+  visual_qa: {
+    model: "main",
+    effort: "medium",
+    maxTokens: 8_000,
+    prompt: "visual-qa.md",
+    input: visualQaInput,
+    output: visualQaOutput,
+    stream: false,
+    timeoutMs: 180_000,
   },
 } as const satisfies Record<string, TaskDef>;
 
@@ -468,8 +496,12 @@ function mockAnswer(task: ClaudeTaskName, brand: ClaudeBrand, input: unknown, sc
       return mockScriptRewrite(brand, scriptRewriteInput.parse(input), scenario);
     case "pronunciation_suggest":
       return mockPronunciation(pronunciationInput.parse(input));
+    case "key_term_check":
+      return mockKeyTermCheck(keyTermInput.parse(input));
     case "clip_face_check":
       return mockClipFaceCheck(clipFaceInput.parse(input));
+    case "visual_qa":
+      return mockVisualQa(visualQaInput.parse(input));
   }
 }
 

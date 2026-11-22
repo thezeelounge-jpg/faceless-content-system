@@ -44,24 +44,10 @@ ls -l "$OUT"/consent-*.mp4 "$OUT"/consent-*.mov
 # triangle tones): no download, no stock footage, no real music, so the files
 # are ours (CC0). The catalogue JSON files next to them are written by hand.
 # ---------------------------------------------------------------------------
-mkdir -p "$OUT/broll" "$OUT/music"
+mkdir -p "$OUT/music"
 
-# B-roll: <name> <colour> <size> <seconds> <box x> <box y>. A flat colour with
-# one white box (a different place per clip), portrait, no sound. Sizes are
-# deliberately mixed (smaller than 1080x1920, and one odd ratio) so the
-# editor's scale + crop is exercised. The centre is always the flat colour,
-# which the integration test samples.
-broll() {
-  "$FFMPEG" -hide_banner -loglevel error -y \
-    -f lavfi -i "color=c=$2:s=$3:r=30:d=$4" \
-    -vf "drawbox=x=$5:y=$6:w=iw/5:h=ih/8:color=white:t=fill" \
-    -c:v libx264 -preset veryslow -crf 40 -pix_fmt yuv420p -g 300 -an -movflags +faststart \
-    "$OUT/broll/$1.mp4"
-}
-broll cafe-green    0x1E8C3A 720x1280  3.5 iw/10 ih/10
-broll cafe-blue     0x1F4FD8 1080x1920 3.2 iw*7/10 ih/10
-broll phone-magenta 0xC2187A 540x960   4   iw/10 ih*8/10
-broll city-orange   0xE8730C 640x1136  3   iw*7/10 ih*8/10
+# B-roll clips (moving white box on a flat colour): their own script since p5-b1.
+FFMPEG="$FFMPEG" bash scripts/make-broll-fixtures.sh
 
 # Music beds: gentle chords (3 tones each), one chord per section with a
 # soft swell that starts and ends at silence, so the bed loops without a
