@@ -182,22 +182,23 @@ export function planBroll(input: PlanBrollInput): BrollPlan {
       continue;
     }
     const prev = plan.cuts.at(-1);
+    // Shorten the previous cut so the face shows again before this one, if it stays long enough.
+    let prevDuration = prev?.duration_s ?? 0;
     if (prev && start < prev.start_s + prev.duration_s + BROLL.min_gap_s - EPS) {
-      // Shorten the previous cut so the face shows again before this one, if it stays long enough.
-      const shorter = ms(start - BROLL.min_gap_s - prev.start_s);
-      if (shorter < BROLL.min_cut_s - EPS) {
+      prevDuration = ms(start - BROLL.min_gap_s - prev.start_s);
+      if (prevDuration < BROLL.min_cut_s - EPS) {
         skip("overlap");
         continue;
       }
-      prev.duration_s = shorter;
     }
     const room = windowEnd - start;
-    const left = maxCoverage - used();
+    const left = maxCoverage - (used() - (prev?.duration_s ?? 0) + prevDuration);
     const duration = ms(Math.min(BROLL.target_cut_s, BROLL.max_cut_s, room, left));
     if (duration < BROLL.min_cut_s - EPS) {
       skip(room < BROLL.min_cut_s - EPS ? "no_room" : "coverage");
-      continue;
+      continue; // the previous cut keeps its full length
     }
+    if (prev) prev.duration_s = prevDuration;
     plan.cuts.push({ start_s: ms(start), duration_s: duration, keyword: moment.keyword, at_words: moment.at_words });
   }
 

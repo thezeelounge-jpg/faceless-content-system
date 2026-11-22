@@ -63,6 +63,91 @@ export function probe(file: string): ProbeSummary {
   };
 }
 
+/** The flat "face" colour of the talking-head test input (same as tests/fixtures/consent-good.mp4). */
+export const FACE_RGB: [number, number, number] = [0xd8, 0xb4, 0x9a];
+
+/**
+ * A small TALKING-HEAD stand-in (p4-b2): 540x960 at 25 fps (so the editor must
+ * scale, crop and change fps) in the flat face colour, with a 44.1 kHz voice.
+ * "speech": a 180 Hz tone with a syllable wobble and a 0.4 s pause every 2 s
+ * (so ducking has gaps to release in). "peaky": a quiet tone with short
+ * near-full-scale clicks every second: low loudness, high peaks, so loudnorm
+ * must raise it a lot while keeping the true peak down.
+ */
+export function makeTalkingInput(file: string, seconds: number, voice: "speech" | "peaky" = "speech"): void {
+  const audio =
+    voice === "speech"
+      ? "0.4*sin(2*PI*180*t)*(0.6+0.4*sin(2*PI*5*t))*lt(mod(t\\,2)\\,1.6)"
+      : "0.03*sin(2*PI*180*t)+0.97*lt(mod(t\\,1)\\,0.004)*sin(2*PI*1000*t)";
+  execFileSync(
+    "ffmpeg",
+    [
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", `color=c=0xD8B49A:s=540x960:r=25:d=${seconds}`,
+      "-f", "lavfi", "-i", `aevalsrc=${audio}:s=44100:d=${seconds}`,
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest",
+      file,
+    ],
+    { stdio: "pipe" },
+  );
+}
+
+/** EBU R128 integrated loudness (LUFS) and true peak (dBTP) of a file's audio, or of a filtergraph run. */
+export function measureLoudness(args: string[]): { i: number; tp: number } {
+  const r = spawnSync("ffmpeg", ["-nostdin", "-hide_banner", "-nostats", ...args], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`ffmpeg failed: ${r.stderr.slice(-600)}`);
+  const summary = r.stderr.split("Summary:").at(-1) ?? "";
+  const i = summary.match(/I:\s+(-?[\d.]+|-inf)\s+LUFS/)?.[1];
+  const tp = summary.match(/True peak:\s+Peak:\s+(-?[\d.]+|-inf)\s+dBFS/)?.[1];
+  const num = (v: string | undefined) => (v === undefined ? NaN : v === "-inf" ? -Infinity : Number(v));
+  return { i: num(i), tp: num(tp) };
+}
+
+export const loudnessOfFile = (file: string) =>
+  measureLoudness(["-i", file, "-map", "0:a:0", "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"]);
+
+/** Raw RGB bytes of a w x h region of the frame at `atS` seconds. */
+export function regionAt(file: string, atS: number, x: number, y: number, w = 1, h = 1): Buffer {
+  return execFileSync(
+    "ffmpeg",
+    [
+      "-nostdin", "-hide_banner", "-loglevel", "error",
+      "-ss", String(atS), "-i", file, "-frames:v", "1",
+      "-vf", `crop=${w}:${h}:${x}:${y}`, "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
+    ],
+    { maxBuffer: 64 * 1024 * 1024 },
+  );
+}
+
+/** The colour at (x, y): a 2x2 crop at even coordinates (a 1x1 crop of 4:2:0 video fails). */
+export const pixelAt = (file: string, atS: number, x: number, y: number): [number, number, number] => {
+  const b = regionAt(file, atS, x - (x % 2), y - (y % 2), 2, 2);
+  return [b[0], b[1], b[2]];
+};
+
+/** Mean absolute difference (0-255) between the same region of two frames. */
+export function meanDiff(a: Buffer, b: Buffer): number {
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) sum += Math.abs(a[i] - (b[i] ?? 0));
+  return sum / a.length;
+}
+
+/** Top-level MP4 box types in file order (ftyp, moov, mdat, ...), read from the bytes. */
+export function topLevelBoxes(bytes: Buffer): string[] {
+  const types: string[] = [];
+  let at = 0;
+  while (at + 8 <= bytes.length) {
+    let size = bytes.readUInt32BE(at);
+    const type = bytes.toString("latin1", at + 4, at + 8);
+    if (size === 1) size = Number(bytes.readBigUInt64BE(at + 8)); // 64-bit "largesize"
+    else if (size === 0) size = bytes.length - at; // runs to the end of the file
+    if (size < 8) throw new Error(`bad MP4 box size at ${at}`);
+    types.push(type);
+    at += size;
+  }
+  return types;
+}
+
 /** One frame (PNG) at `atS` seconds, for before/after pictures. */
 export function grabFrame(file: string, atS: number, png: string): void {
   execFileSync(

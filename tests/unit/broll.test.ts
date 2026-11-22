@@ -175,6 +175,18 @@ describe("planBroll", () => {
     expect(plan.skipped).toEqual([{ at_words: "cafe owners", why: "overlap" }]);
   });
 
+  it("the previous cut is shortened only when the next one then really fits (else it keeps its length)", () => {
+    // 0.4 s a word: "Alpha" 0.8 s (cut 0.8 → 3.3), "eta" 3.2 s, the CTA ("Bye") 4.0 s.
+    // Shortening Alpha to make room would work (1.9 s), but eta has only 0.8 s before the CTA.
+    const words = timed("Hook now. Alpha beta gamma delta epsilon zeta eta theta. Bye bye now.");
+    const plan = planBroll({
+      words, durationS: words.at(-1)!.end_s, format: "story", hook: "Hook now.", cta: "Bye bye now.", keywords: [],
+      moments: [{ at_words: "Alpha", keyword: "a" }, { at_words: "eta", keyword: "b" }],
+    });
+    expect(plan.cuts).toEqual([{ start_s: 0.8, duration_s: 2.5, keyword: "a", at_words: "Alpha" }]);
+    expect(plan.skipped).toEqual([{ at_words: "eta", why: "no_room" }]);
+  });
+
   it("unknown at_words are skipped (not_found), the rest still placed", () => {
     const plan = planBroll({ ...base, moments: [{ at_words: "purple elephants", keyword: "x" }, MOMENTS[2]], keywords: [] });
     expect(plan.skipped).toEqual([{ at_words: "purple elephants", why: "not_found" }]);
