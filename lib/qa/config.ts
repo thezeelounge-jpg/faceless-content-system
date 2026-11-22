@@ -75,6 +75,16 @@ export const RENDER = {
 } as const;
 
 /**
+ * The editor (Phase 4, lib/edit-flow.ts). Not a quality gate; the time limits
+ * of one edit. A 60 s reel encodes in about real time on 4 vCPUs (large-1x);
+ * the limit leaves room for a slow machine. The task's maxDuration is longer.
+ */
+export const EDIT = {
+  /** ffmpeg is stopped after this long. */
+  ffmpeg_timeout_s: 900,
+} as const;
+
+/**
  * brands.words_per_second: the rolling average of the last 10 real post
  * renders (words in spoken_text / real duration). Samples outside these
  * bounds are ignored as absurd (a broken duration, an empty script).

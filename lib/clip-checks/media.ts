@@ -8,8 +8,10 @@ import { CLIP_CHECKS } from "@/lib/qa/config";
 // the programs are started with execFile (no shell), so a strange file name
 // cannot run commands. Paths must be absolute, so none can look like an option.
 
-const ffmpegBin = () => readEnv("FFMPEG_PATH") ?? "ffmpeg";
-const ffprobeBin = () => readEnv("FFPROBE_PATH") ?? "ffprobe";
+// The Trigger.dev ffmpeg build extension sets FFMPEG_PATH / FFPROBE_PATH.
+// Also used by the editor (lib/edit-flow.ts).
+export const ffmpegBin = () => readEnv("FFMPEG_PATH") ?? "ffmpeg";
+export const ffprobeBin = () => readEnv("FFPROBE_PATH") ?? "ffprobe";
 
 const TOOL_TIMEOUT_MS = 5 * 60_000;
 
