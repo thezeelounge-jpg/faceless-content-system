@@ -60,6 +60,8 @@ export type CaptionStyle = {
   /** The word being said in the brand colour. */
   highlight_active_word: boolean;
   max_chars_per_line: number;
+  /** At most this many words on one line (p4-b1: big_words 3). Unset = only the letter limit. */
+  max_words_per_line?: number;
   max_words_per_page: number;
   /** Average letter width as a share of the font size (rough, used for layout checks). */
   char_width_em: number;
@@ -69,9 +71,14 @@ export type CaptionStyle = {
 /** The 3 caption styles. Change looks here and nowhere else. */
 export const CAPTION_STYLES: Record<CaptionStyleName, CaptionStyle> = {
   big_words: {
-    font: "Anton", font_file: "Anton-Regular.ttf", size: 96, uppercase: true, primary: "#FFFFFF",
-    outline_colour: "#000000", outline_alpha: 0, back_colour: "#000000", border_style: 1, outline: 6, shadow: 0,
-    highlight_active_word: true, max_chars_per_line: 15, max_words_per_page: 6, char_width_em: 0.52, line_height: 1.2,
+    // p4-b1 (Rowan 5d): bigger (104 px) and bolder. Anton has one weight, so "bolder" is a
+    // thicker 8 px outline plus a 3 px drop shadow, not libass's synthetic bold (it smears
+    // letter shapes). 1-3 words per line, 2 lines (6 words) per page; 14 letters still fit
+    // the 800 px between the side margins (14 × 104 × 0.52 ≈ 757 px).
+    font: "Anton", font_file: "Anton-Regular.ttf", size: 104, uppercase: true, primary: "#FFFFFF",
+    outline_colour: "#000000", outline_alpha: 0, back_colour: "#000000", border_style: 1, outline: 8, shadow: 3,
+    highlight_active_word: true, max_chars_per_line: 14, max_words_per_line: 3, max_words_per_page: 6, char_width_em: 0.52,
+    line_height: 1.2,
   },
   small_box: {
     // Opaque box: libass draws one box per line and the two overlap; a
@@ -314,7 +321,9 @@ export function groupPages(words: CaptionWord[], styleName: CaptionStyleName): C
   };
   words.forEach((w, i) => {
     let line = lines[lines.length - 1];
-    if (line.length > 0 && lineLength(line, style) + 1 + shown(w, style).length > style.max_chars_per_line) {
+    const tooLong = lineLength(line, style) + 1 + shown(w, style).length > style.max_chars_per_line;
+    const tooManyWords = style.max_words_per_line !== undefined && line.length >= style.max_words_per_line;
+    if (line.length > 0 && (tooLong || tooManyWords)) {
       if (lines.length === 2) flush();
       else lines.push([]);
       line = lines[lines.length - 1];
@@ -415,7 +424,25 @@ export type BuildAssInput = {
   style?: CaptionStyleName;
   /** The brand colour (#RRGGBB) for the active word in big_words. */
   brandColour?: string | null;
+  /**
+   * The script's edit_plan.emphasis_words (p4-b1). big_words only: on a page that holds an
+   * emphasis word, the emphasis word(s) stay coloured for the whole page; pages without one
+   * colour the word being spoken. Other styles ignore it.
+   */
+  emphasisWords?: string[];
 };
+
+/** The compare-forms of every word in the emphasis list ("free call" → "free", "call"). */
+function emphasisSet(list: string[] | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const phrase of list ?? []) {
+    for (const token of phrase.split(/\s+/)) {
+      const norm = normalizeToken(token);
+      if (norm) out.add(norm);
+    }
+  }
+  return out;
+}
 
 export function buildAss(input: BuildAssInput): string {
   const name = input.style ?? DEFAULT_CAPTION_STYLE;
@@ -457,30 +484,37 @@ export function buildAss(input: BuildAssInput): string {
     events.push(`Dialogue: 0,${assTime(start)},${assTime(end)},${name},,0,0,0,,${text}`);
   };
 
+  const emphasis = emphasisSet(input.emphasisWords);
   for (const page of pages) {
     const prefix = page.scale < 1 ? `{\\fscx${Math.round(page.scale * 100)}\\fscy${Math.round(page.scale * 100)}}` : "";
-    const render = (active: CaptionWord | null) =>
+    const render = (coloured: (w: CaptionWord) => boolean) =>
       prefix +
       page.lines
         .map((line) =>
           line
             .map((w) => {
               const text = escapeAssText(shown(w, style));
-              return w === active ? `{\\c&H${highlight}&}${text}{\\c&H${primary}&}` : text;
+              return coloured(w) ? `{\\c&H${highlight}&}${text}{\\c&H${primary}&}` : text;
             })
             .join(" "),
         )
         .join("\\N");
 
     if (!style.highlight_active_word) {
-      dialogue(page.start_s, page.end_s, render(null));
+      dialogue(page.start_s, page.end_s, render(() => false));
       continue;
     }
     const all = page.lines.flat();
+    // p4-b1 (Rowan 5d) key word rule: the edit plan's emphasis word(s) on this page, else the spoken word.
+    const keys = all.filter((w) => emphasis.has(normalizeToken(w.text)));
+    if (keys.length > 0) {
+      dialogue(page.start_s, page.end_s, render((w) => keys.includes(w)));
+      continue;
+    }
     all.forEach((w, k) => {
       const start = k === 0 ? page.start_s : w.start_s;
       const end = k === all.length - 1 ? page.end_s : all[k + 1].start_s;
-      dialogue(start, end, render(w));
+      dialogue(start, end, render((x) => x === w));
     });
   }
 

@@ -216,7 +216,13 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     const captionsFile = path.join(workDir, "captions.ass");
     await writeFile(
       captionsFile,
-      buildAss({ displayText: job.displayText, transcript, style: job.captionStyle, brandColour: job.brandColour }),
+      buildAss({
+        displayText: job.displayText,
+        transcript,
+        style: job.captionStyle,
+        brandColour: job.brandColour,
+        emphasisWords: job.editPlan.emphasis_words,
+      }),
       "utf8",
     );
 

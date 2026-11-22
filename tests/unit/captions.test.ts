@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import script from "@/tests/fixtures/stt/sample-script.json";
 import fixture from "@/tests/fixtures/stt/sample-transcript.json";
@@ -281,8 +283,9 @@ describe("buildAss", () => {
   it("big_words: one event per word, the active word in the brand colour", () => {
     const { events } = parseAss(buildAss({ displayText: script.display_text, transcript, brandColour: "#FF5A1F" }));
     expect(events).toHaveLength(script.display_text.split(" ").length);
-    expect(events[0].text).toBe("{\\c&H1F5AFF&}STOP{\\c&HFFFFFF&} SCROLLING!");
-    expect(events[1].text).toBe("STOP {\\c&H1F5AFF&}SCROLLING!{\\c&HFFFFFF&}");
+    // p4-b1: at 104 px "STOP SCROLLING!" (15 letters) no longer fits one line, so it breaks.
+    expect(events[0].text).toBe("{\\c&H1F5AFF&}STOP{\\c&HFFFFFF&}\\NSCROLLING!");
+    expect(events[1].text).toBe("STOP\\N{\\c&H1F5AFF&}SCROLLING!{\\c&HFFFFFF&}");
   });
 
   it("big_words: each word's event starts within 150 ms of its speech-to-text word", () => {
@@ -306,6 +309,77 @@ describe("buildAss", () => {
       expect(events.some((e) => e.text.includes("\\N"))).toBe(true);
       expect(events.some((e) => e.text.includes("\\c&H"))).toBe(false); // no highlight
     }
+  });
+
+  it("p4-b1 5d: small_box and minimal output is UNCHANGED (byte-identical to the files recorded before the big_words change)", () => {
+    const texts = [script.display_text, "Supercalifragilisticexpialidocious works", "Hi"];
+    for (const style of ["small_box", "minimal"] as const) {
+      const golden = readFileSync(path.join(process.cwd(), `tests/fixtures/captions/${style}.golden.ass`), "utf8");
+      const now = texts.map((displayText) =>
+        buildAss({ displayText, transcript, style, brandColour: "#FF5A1F", emphasisWords: script.edit_plan.emphasis_words }),
+      );
+      expect(now.join("\n;-----\n")).toBe(golden);
+    }
+  });
+
+  it("p4-b1 5d: big_words is bigger and bolder: 90-110 px, a thicker outline than part A (6 px)", () => {
+    const s = CAPTION_STYLES.big_words;
+    expect(s.size).toBeGreaterThanOrEqual(90);
+    expect(s.size).toBeLessThanOrEqual(110);
+    expect(s.size).toBeGreaterThan(96);
+    expect(s.outline).toBeGreaterThan(6);
+  });
+
+  it("p4-b1 5d: big_words lines hold 1-3 words, pages at most 2 lines", () => {
+    const long =
+      "Here are 3 quick tips to grow your café on WhatsApp and keep every regular coming back for more coffee every single week.";
+    const shortWords = "I am so so so glad we did it at last.";
+    for (const text of [script.display_text, long, shortWords, "Hi"]) {
+      for (const page of groupPages(alignWords(text, transcript), "big_words")) {
+        expect(page.lines.length).toBeLessThanOrEqual(2);
+        for (const line of page.lines) {
+          expect(line.length).toBeGreaterThanOrEqual(1);
+          expect(line.length).toBeLessThanOrEqual(3);
+        }
+      }
+    }
+  });
+
+  it("p4-b1 5d: the key word is highlighted: a page with an edit_plan emphasis word keeps THAT word coloured; other pages colour the spoken word", () => {
+    const ass = buildAss({
+      displayText: script.display_text,
+      transcript,
+      brandColour: "#FF5A1F",
+      emphasisWords: script.edit_plan.emphasis_words, // ["3", "WhatsApp", "free"]
+    });
+    const texts = parseAss(ass).events.map((e) => e.text);
+    const on = (w: string) => `{\\c&H1F5AFF&}${w}{\\c&HFFFFFF&}`;
+    // "Stop scrolling!" has no emphasis word → the spoken word is coloured, one event per word.
+    expect(texts[0]).toBe(`${on("STOP")}\\NSCROLLING!`);
+    expect(texts[1]).toBe(`STOP\\N${on("SCROLLING!")}`);
+    // Every event that shows "3" colours "3" and nothing else.
+    const plain = (t: string) => t.replace(/\{[^}]*\}/g, "").split(/\\N| /);
+    const withThree = texts.filter((t) => plain(t).includes("3"));
+    expect(withThree.length).toBeGreaterThan(0);
+    for (const t of withThree) {
+      expect(t).toContain(on("3"));
+      expect(t.match(/\\c&H1F5AFF&/g)).toHaveLength(1);
+    }
+    // WhatsApp and FREE are coloured wherever they show.
+    for (const word of ["WHATSAPP.", "FREE"]) {
+      const shown = texts.filter((t) => t.includes(word));
+      expect(shown.length).toBeGreaterThan(0);
+      for (const t of shown) expect(t).toContain(on(word));
+    }
+  });
+
+  it("p4-b1 5d: without emphasis words, big_words colours the spoken word (part A behaviour)", () => {
+    const { events } = parseAss(buildAss({ displayText: "Grow your cafe", transcript: words([["grow", 0, 0.4], ["your", 0.4, 0.7], ["cafe", 0.7, 1.2]]) }));
+    expect(events.map((e) => e.text)).toEqual([
+      "{\\c&H00D4FF&}GROW{\\c&HFFFFFF&} YOUR CAFE",
+      "GROW {\\c&H00D4FF&}YOUR{\\c&HFFFFFF&} CAFE",
+      "GROW YOUR {\\c&H00D4FF&}CAFE{\\c&HFFFFFF&}",
+    ]);
   });
 
   it("an invalid brand colour falls back to the default highlight", () => {

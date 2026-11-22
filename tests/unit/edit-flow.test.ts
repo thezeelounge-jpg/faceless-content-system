@@ -156,7 +156,8 @@ describe("runEditJob", () => {
     const m = memory();
     await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
     expect(m.row.transcript).toEqual(fixture);
-    expect(seenAss).toContain("{\\c&H1F5AFF&}STOP{\\c&HFFFFFF&} SCROLLING!");
+    expect(seenAss).toContain("{\\c&H1F5AFF&}STOP{\\c&HFFFFFF&}\\NSCROLLING!"); // p4-b1: 104 px, so one word per line here
+    expect(seenAss).toContain("{\\c&H1F5AFF&}3{\\c&HFFFFFF&}"); // the edit plan's emphasis word
   });
 
   it("uses the transcript from the payload, or the one already on the row, without calling speech-to-text", async () => {
