@@ -13,6 +13,8 @@ Built in p5-a2 (22 Nov 2026). Rules come from `docs/QA-SPEC.md`; every number li
 | `technical-qa`: Gate 4 failed once | `lib/qa/technical-gate.ts` | `edit-video` again (`edit-<video>-rebuild-1`) |
 | Gate 4 passed | — | nothing yet: video + post stay `final_qa` = ready for Gate 5 (5b) |
 | a second failure, or one a fix can't help | — | nothing: video + post `team_review` with a plain team reason |
+| p5-b1: `audio-qa` / `technical-qa` failed for good (crash after the last retry, or a refusal) | `onFailure` → `gateCrashed` | nothing: a video still in `audio_qa` / `final_qa` + its post → `team_review` (`GATE_CRASH_REASONS`); safe to repeat |
+| p5-b1: after every `edit-video` run (and a refused retry) | `resyncAfterEdit` (`syncAfterEdit`) | a post stuck in `editing` while its video is promoted (`final_path`, `final_qa` / `team_review`) is moved on; `technical-qa` with the SAME key as above (`edit_run_id`), so Gate 4 never starts twice |
 
 Statuses: video and post `rendering → audio_qa → editing → final_qa`; failures after the one automatic fix → `team_review`, never `needs_you`. Tasks trigger each other by id (`trigger/next-step.ts`), so no task file imports another. New tasks: `trigger/audio-qa.ts`, `trigger/technical-qa.ts` (both `medium-1x`). **trigger.config.ts is unchanged.**
 
@@ -47,8 +49,8 @@ The editor now saves `videos.edit_manifest` (`lib/qa/edit-manifest.ts`): caption
 
 ## What is mocked
 
-- `MOCK_STT`: transcripts from `tests/fixtures/stt/`, picked by the spoken text (`by-text.json`); otherwise `sample-transcript.json`.
-- `MOCK_CLAUDE`: `key_term_check` answers from `tests/fixtures/stt/key-term-judgements.json` (unknown pair → mispronounced).
+- `MOCK_STT`: transcripts from `tests/fixtures/stt/`, picked by the spoken text (`by-text.json`); otherwise `sample-transcript.json`. p5-b1: embedded as static JSON imports in `lib/stt.ts` (bundled; works in a Trigger build with no `tests/` folder). A new keyed file must be added to `KEYED_TRANSCRIPTS` too.
+- `MOCK_CLAUDE`: `key_term_check` answers from `tests/fixtures/stt/key-term-judgements.json` (unknown pair → mispronounced), embedded the same way (`lib/qa/key-term-mock.ts`).
 - `MOCK_HEYGEN`: the re-render uses the mock client (fixture answers, provider_usage row with `mock = true`, cost 0, never counted toward the daily cap).
 - Tests inject the audio measurements (Gate 3) and ffprobe/ffmpeg output (Gate 4); `tests/integration/technical-gate-ffmpeg.test.ts` runs the real local ffmpeg (about 6 s).
 - **Known mock artefact:** the MOCK_PEXELS b-roll clips are flat colours, so in a local mock run a b-roll cut longer than 1.5 s is a real freeze and Gate 4 sends it back once, then to the team. Real stock clips move. The integration test uses a moving clip.
