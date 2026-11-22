@@ -10,6 +10,7 @@ import {
   faceZoneIssues,
   framePlan,
   humanReviewReasons,
+  HUMAN_REVIEW_TEXT,
   nextCaptionStyle,
   overlayRegions,
   overlayDrawn,
@@ -203,7 +204,13 @@ describe("classifyFix: ONE automatic fix per QA-SPEC (captions/b-roll → re-edi
 });
 
 describe("human review (QA-SPEC Gate 6): which passed videos the team watches first", () => {
-  const base = { priorPosts: 5, realism: 9, managed: false, teamReviewsEveryVideo: true, sampled: false };
+  const base = { priorPosts: 5, realism: 9, managed: false, teamReviewsEveryVideo: true, sampled: false, autoFixed: false };
+  it("p5-b4 (QA-SPEC Gate 6): a video that passed only after an automatic fix (Gates 3-5) → queue, reason auto_fixed", () => {
+    expect(humanReviewReasons({ ...base, autoFixed: true })).toEqual(["auto_fixed"]);
+    expect(humanReviewReasons({ ...base, autoFixed: true, sampled: true })).toEqual(["auto_fixed"]);
+    expect(humanReviewReasons({ ...base, autoFixed: true, priorPosts: 0 })).toEqual(["first_videos", "auto_fixed"]);
+    expect(HUMAN_REVIEW_TEXT.auto_fixed).toMatch(/^Auto-fixed: /);
+  });
   it("a brand's first 5 videos (0–4 earlier posts passed) → queue; the 6th → nobody", () => {
     for (let prior = 0; prior < HUMAN_REVIEW.first_videos_per_brand; prior++) {
       expect(humanReviewReasons({ ...base, priorPosts: prior })).toEqual(["first_videos"]);

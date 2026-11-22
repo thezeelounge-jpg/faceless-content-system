@@ -207,7 +207,7 @@ describe("p5-b2: render → Gate 3 → edit → Gate 4 → Gate 5 → ready (moc
 });
 
 describe("Phase 5 Done-when (Gate 5)", () => {
-  it("(a) a video with captions over the mouth fails Gate 5 and is fixed automatically: report #1 failed (captions over the mouth), ONE re-edit with the lower caption style, report #2 passed, the fix never counted", async () => {
+  it("(a) a video with captions over the mouth fails Gate 5 and is fixed automatically: report #1 failed (captions over the mouth), ONE re-edit with the lower caption style, report #2 passed, then the QA queue (auto-fixed); not counted until delivered", async () => {
     const w = world();
     const { postId, videoId, log } = await w.post(VISUAL_FIXTURE_TEXTS["captions-over-mouth"]);
     expect(log).toEqual(["audio-qa", "edit-video", "technical-qa", "visual-qa", "edit-video", "technical-qa", "visual-qa"]);
@@ -219,10 +219,13 @@ describe("Phase 5 Done-when (Gate 5)", () => {
     // Exactly one re-edit, with the fixed caption position; the second edit's manifest says so.
     expect(w.editPayloads.map((j) => j.captionStyle ?? "big_words")).toEqual(["big_words", "small_box"]);
     expect(editManifestSchema.parse(w.p.extra(w.p.video(videoId)!).edit_manifest).caption_style).toBe("small_box");
-    // One video row (no re-render); delivered; the re-edit adds nothing to the plan: the post counts once.
+    // One video row (no re-render). p5-b4 (QA-SPEC Gate 6): it passed only after an automatic fix, so a
+    // person watches it first: QA queue with the auto-fixed reason, NOT counted until delivered
+    // (Gate 6 approve = rpc review_queued_video, tests/db/rls.test.ts p5-b4 usage walk).
     expect(w.videosOf(postId)).toHaveLength(1);
-    expect(w.p.video(videoId)).toMatchObject({ status: "ready", counts_toward_plan: true });
-    expect(w.counted(postId)).toBe(1);
+    expect(w.p.video(videoId)).toMatchObject({ status: "team_review", counts_toward_plan: false });
+    expect(w.postRow(postId)).toMatchObject({ status: "team_review", status_reason: HUMAN_REVIEW_TEXT.auto_fixed });
+    expect(w.counted(postId)).toBe(0);
   });
 
   it("(b) a forced double failure lands in the QA queue, not with the customer, and doesn't count against the plan", async () => {
@@ -314,7 +317,7 @@ describe("p5-b2: a forced failure at every video gate ends in the right status a
 });
 
 describe("p5-b2: the usage rule across Gates 3, 4, 5 and the queue", () => {
-  it("Gate 3 re-render then delivered: the re-render is the post's ONE counted video, the failed first render never counts", async () => {
+  it("Gate 3 re-render then passes: the failed first render never counts; the auto-fixed re-render waits in the QA queue, not counted until delivered", async () => {
     const w = world({ hear: "stt" });
     const p = w.p;
     const { postId } = await p.seedPost({ displayText: GOOD, hook: HOOK, cta: CTA });
@@ -323,11 +326,13 @@ describe("p5-b2: the usage rule across Gates 3, 4, 5 and the queue", () => {
     expect(log).toEqual(["audio-qa", "poll-render", "audio-qa", "edit-video", "technical-qa", "visual-qa"]);
     expect(w.videosOf(postId).map((x) => [x.attempt, x.status, x.counts_toward_plan])).toEqual([
       [1, "failed", false],
-      [2, "ready", true],
+      [2, "team_review", false],
     ]);
+    expect(w.postRow(postId)).toMatchObject({ status: "team_review", status_reason: HUMAN_REVIEW_TEXT.auto_fixed });
+    expect(w.counted(postId)).toBe(0);
   });
 
-  it("Gate 4 rebuild then delivered → counted once; a QA-queue video (first 5 / managed) → not counted (yet)", async () => {
+  it("Gate 4 rebuild then passes → QA queue (auto-fixed), not counted yet; a QA-queue video (first 5 / managed) → not counted (yet)", async () => {
     // A rebuild: the first technical check fails, the rebuilt edit passes.
     const w = world();
     let probes = 0;
@@ -350,8 +355,8 @@ describe("p5-b2: the usage rule across Gates 3, 4, 5 and the queue", () => {
       store: p.store, files: p.files, run, render: p.render, tmpRoot, sample: () => false,
       frames: async (_f, m) => fakeFrames(m, { aiLabel: m.ai_label, watermark: m.watermark }),
     });
-    expect(g5.outcome.status).toBe("ready");
-    expect(w.counted(postId)).toBe(1);
+    expect(g5.outcome).toMatchObject({ status: "queued", reasons: ["auto_fixed"] });
+    expect(w.counted(postId)).toBe(0);
 
     // The queue path: a managed brand's video passes everything and waits for the team, uncounted.
     const m = world({ managed: true });

@@ -287,13 +287,14 @@ export function classifyFix(issues: QaIssue[], manifest: EditManifest): VisualFi
   return { kind: "reedit", captionStyle, avoidClips, note: `Gate 5: re-edited once: ${parts.join("; ")}.` };
 }
 
-export type HumanReviewReason = "first_videos" | "realism_margin" | "managed" | "random";
+export type HumanReviewReason = "first_videos" | "realism_margin" | "managed" | "auto_fixed" | "random";
 
 /** Team wording for posts.status_reason / videos.error (the QA queue shows it). */
 export const HUMAN_REVIEW_TEXT: Record<HumanReviewReason, string> = {
   first_videos: `One of this brand's first ${HUMAN_REVIEW.first_videos_per_brand} videos: the team watches it before the customer.`,
   realism_margin: `Realism score under ${HUMAN_REVIEW.below_realism_score}: the team watches it before the customer.`,
   managed: "Done-for-you brand: the team watches every video before the customer.",
+  auto_fixed: "Auto-fixed: it passed only after one automatic fix, so the team watches it before the customer.",
   random: `Picked at random (1 in ${HUMAN_REVIEW.random_one_in}): the team watches it before the customer.`,
 };
 
@@ -305,11 +306,14 @@ export function humanReviewReasons(input: {
   managed: boolean;
   teamReviewsEveryVideo: boolean;
   sampled: boolean;
+  /** p5-b4 (QA-SPEC Gate 6 "any video flagged by Gates 3 to 5 after its automatic fix"): it passed only after a fix. */
+  autoFixed: boolean;
 }): HumanReviewReason[] {
   const reasons: HumanReviewReason[] = [];
   if (input.priorPosts < HUMAN_REVIEW.first_videos_per_brand) reasons.push("first_videos");
   if (input.realism < HUMAN_REVIEW.below_realism_score) reasons.push("realism_margin");
   if (input.managed && input.teamReviewsEveryVideo) reasons.push("managed");
+  if (input.autoFixed) reasons.push("auto_fixed");
   if (reasons.length === 0 && input.sampled) reasons.push("random");
   return reasons;
 }

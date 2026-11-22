@@ -143,6 +143,18 @@ export async function sampleFrames(
 
 const hard = (code: string, detail: string): QaIssue => ({ code, detail, at_seconds: null, severity: "hard" });
 
+/**
+ * p5-b4 (QA-SPEC Gate 6): did this script's video pass Gate 5 only after an automatic fix? Any failed
+ * Gate 3 (→ one re-render), Gate 4 (→ one rebuild) or Gate 5 (→ one re-edit / re-render) report for
+ * the script means yes. Per script on purpose: a re-render is a new video row of the same script. A
+ * video re-made after a Gate 6 reject of the same script also counts (a person watches the redo).
+ */
+async function passedAfterAutoFix(scriptId: string, visualFailures: number, store: PipelineStore): Promise<boolean> {
+  if (visualFailures > 0) return true;
+  if ((await store.countFailedScriptReports(scriptId, "audio")) > 0) return true;
+  return (await store.countFailedScriptReports(scriptId, "technical")) > 0;
+}
+
 export async function runVisualGate(videoId: string, deps: VisualGateDeps): Promise<VisualGateOutcome> {
   const ctx = await deps.store.getGateContext(videoId);
   if (!ctx) throw new PlainError("Video not found.");
@@ -215,6 +227,7 @@ export async function runVisualGate(videoId: string, deps: VisualGateDeps): Prom
       managed: brand.is_managed,
       teamReviewsEveryVideo: brand.is_managed ? await deps.store.teamReviewsEveryVideo(video.brand_id) : false,
       sampled: (deps.sample ?? sampledForReview)(video.id),
+      autoFixed: await passedAfterAutoFix(script.id, failedBefore, deps.store),
     });
     if (reasons.length > 0) {
       const out = await toTeam(reasons.map((r) => HUMAN_REVIEW_TEXT[r]).join(" "));
