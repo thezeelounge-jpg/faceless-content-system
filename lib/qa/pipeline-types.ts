@@ -28,6 +28,8 @@ export type PipelineVideo = {
   edit_manifest: unknown;
   /** The automatic fix that made this video (a Gate 3 re-render), or null. */
   qa_fix_note: string | null;
+  /** p5-b1: the edit run that holds (or last held) the edit claim (= the edit-video Trigger run id). */
+  edit_run_id: string | null;
 };
 
 export type PipelineScript = {

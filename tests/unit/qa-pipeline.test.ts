@@ -6,7 +6,17 @@ import { runClaudeTask, type ClaudeContext, type ClaudeTaskName } from "@/lib/cl
 import { captionFontsDir, runEditJob, type FfmpegRunner } from "@/lib/edit-flow";
 import { fixtureMusicLibrary } from "@/lib/music";
 import type { AudioGateDeps, AudioMeasure } from "@/lib/qa/audio-gate";
-import { afterEdit, afterEditTask, afterPoll, afterRender, editJobFor, GATE_CRASH_REASONS, gateCrashed } from "@/lib/qa/pipeline";
+import {
+  afterEdit,
+  afterEditTask,
+  afterPoll,
+  afterRender,
+  editJobFor,
+  GATE_CRASH_REASONS,
+  gateCrashed,
+  RESYNC_TEAM_REASON,
+  resyncAfterEdit,
+} from "@/lib/qa/pipeline";
 import type { TechnicalGateDeps } from "@/lib/qa/technical-gate";
 import { memoryPipeline } from "@/tests/helpers/pipeline-memory";
 
@@ -223,6 +233,60 @@ describe("forced failures end in the team queue, never with the customer, never 
   it("p5-b1 (QA SF1): a crash for a video that does not exist changes nothing", async () => {
     const { p } = pipeline();
     expect(await gateCrashed("audio", "90000000-0000-4000-8000-00000000dead", new Error("x"), p.store)).toBe(false);
+  });
+
+  it("p5-b1 (Rowan 4): a post stuck in 'editing' after the edit was promoted is re-synced, and Gate 4 starts once (run twice)", async () => {
+    const { p, gate3, edit } = pipeline();
+    const { postId } = await p.seedPost({ ...AYESHA, dictionary: [{ written: "Ayesha", say_as: "Aa-ee-sha", status: "approved" }] });
+    const videoId = await p.makeVideo(postId);
+    const r1 = await afterRender(videoId, gate3);
+    // The edit finished and was promoted, but the post update failed (afterPromotion only logs it).
+    const realSet = p.editStore.setPostStatusForVideo;
+    p.editStore.setPostStatusForVideo = async (id, status, reason) => {
+      if (status !== "editing") throw new Error("database is busy");
+      return realSet(id, status, reason);
+    };
+    expect((await edit((r1.next as { payload: Parameters<typeof runEditJob>[0] }).payload)).status).toBe("edited");
+    expect(p.video(videoId)?.status).toBe("final_qa");
+    expect(p.v.posts[0].status).toBe("editing"); // stuck
+
+    // A starter that, like Trigger.dev's global idempotency keys, starts each key once.
+    const started: string[] = [];
+    const startOnce = (next: { key: string } | null) => {
+      if (next && !started.includes(next.key)) started.push(next.key);
+    };
+    const first = await resyncAfterEdit(videoId, p.store);
+    expect(first.moved).toBe(true);
+    expect(p.v.posts[0]).toMatchObject({ status: "final_qa", status_reason: null });
+    // Same key edit-video uses for this edit run (afterEditTask), so the two never both start Gate 4.
+    expect(first.next).toEqual(afterEditTask({ status: "edited" }, videoId, "run_1"));
+    startOnce(first.next);
+
+    const second = await resyncAfterEdit(videoId, p.store);
+    expect(second.moved).toBe(false);
+    expect(second.next?.key).toBe(first.next?.key);
+    startOnce(second.next);
+    startOnce(afterEditTask({ status: "edited" }, videoId, "run_1"));
+    expect(started).toEqual([`technical-qa-${videoId}-run_1`]);
+    expect(p.v.posts[0]).toMatchObject({ status: "final_qa", status_reason: null });
+  });
+
+  it("p5-b1 (Rowan 4): re-sync leaves alone a post that is not stuck, a video with no final file, and a team_review edit starts no Gate 4", async () => {
+    const { p, gate3, edit } = pipeline();
+    const { postId } = await p.seedPost({ ...AYESHA, dictionary: [{ written: "Ayesha", say_as: "Aa-ee-sha", status: "approved" }] });
+    const videoId = await p.makeVideo(postId);
+    // Rendered, not edited: no final file → nothing.
+    expect(await resyncAfterEdit(videoId, p.store)).toEqual({ moved: false, next: null });
+    const r1 = await afterRender(videoId, gate3);
+    await edit((r1.next as { payload: Parameters<typeof runEditJob>[0] }).payload);
+    // Post already final_qa (the normal path): no move.
+    expect((await resyncAfterEdit(videoId, p.store)).moved).toBe(false);
+    // The edit went to the team (video team_review, file kept) but the post stayed in editing.
+    p.video(videoId)!.status = "team_review";
+    p.v.posts[0].status = "editing";
+    const out = await resyncAfterEdit(videoId, p.store);
+    expect(out).toEqual({ moved: true, next: null });
+    expect(p.v.posts[0]).toMatchObject({ status: "team_review", status_reason: RESYNC_TEAM_REASON });
   });
 
   it("a finished likeness test or a failed poll starts nothing", () => {

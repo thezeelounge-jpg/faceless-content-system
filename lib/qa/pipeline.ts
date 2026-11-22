@@ -101,6 +101,32 @@ export async function gateCrashed(
   return true;
 }
 
+export const RESYNC_TEAM_REASON = "The edit finished but needs a look from the team.";
+
+/**
+ * p5-b1 (Rowan 4): the edit was saved and promoted (videos.final_path set, video final_qa or
+ * team_review) but the post update after it failed (lib/edit-flow.ts afterPromotion only logs it),
+ * so the post is stuck in 'editing'. Moves the post to the status the video implies and, for a
+ * final_qa video, hands back Gate 4 with the SAME key edit-video uses for that edit run
+ * (`technical-qa-<video>-<edit run>`, global idempotency key): Gate 4 never starts twice.
+ * Idempotent: once the post is not in 'editing' it is not touched again.
+ */
+export async function resyncAfterEdit(videoId: string, store: PipelineStore): Promise<{ moved: boolean; next: NextTask | null }> {
+  const ctx = await store.getGateContext(videoId);
+  if (!ctx) return { moved: false, next: null };
+  const { video, post } = ctx;
+  if (video.kind !== "post" || !video.final_path || (video.status !== "final_qa" && video.status !== "team_review")) {
+    return { moved: false, next: null };
+  }
+  let moved = false;
+  if (post.status === "editing") {
+    await store.setPostStatus(post.id, video.status, video.status === "team_review" ? RESYNC_TEAM_REASON : null);
+    moved = true;
+  }
+  const next = video.status === "final_qa" && video.edit_run_id ? afterEditTask({ status: "edited" }, video.id, video.edit_run_id) : null;
+  return { moved, next };
+}
+
 /** poll-render finished: a post render that is now 'rendered' goes to Gate 3. */
 export function afterPoll(result: { done: boolean; status: string }, video: { id: string; kind: string } | null): NextTask | null {
   if (!result.done || result.status !== "rendered" || !video || video.kind !== "post") return null;

@@ -21,6 +21,7 @@ const { technicalQaTask, technicalQaPayload, TECHNICAL_QA_TASK, technicalQaFaile
 const { createPipelineStore } = await import("@/lib/qa/pipeline-store");
 const { GATE_CRASH_REASONS } = await import("@/lib/qa/pipeline");
 const { startNext } = await import("@/trigger/next-step");
+const { syncAfterEdit } = await import("@/trigger/edit-video");
 
 const ID = "90000000-0000-4000-8000-000000000001";
 
@@ -58,6 +59,35 @@ describe("startNext", () => {
   it("nothing next → nothing triggered", async () => {
     await startNext(null);
     expect(sdk.trigger).not.toHaveBeenCalled();
+  });
+});
+
+describe("p5-b1 (Rowan 4): edit-video re-syncs a post stuck in editing after a promoted edit", () => {
+  const stuck = () => {
+    const setPostStatus = vi.fn(async () => {});
+    vi.mocked(createPipelineStore).mockReturnValue({
+      getGateContext: vi.fn(async () => ({
+        video: { id: ID, kind: "post", status: "final_qa", final_path: "final/b/v/runs/run_1.mp4", edit_run_id: "run_1", post_id: "post-1" },
+        post: { id: "post-1", status: "editing" },
+      })),
+      setPostStatus,
+    } as never);
+    return setPostStatus;
+  };
+
+  it("an 'edited' outcome: the post moves to final_qa and Gate 4 is triggered ONCE, with the edit run's key", async () => {
+    const setPostStatus = stuck();
+    await syncAfterEdit(ID, { taskId: "technical-qa", payload: { videoId: ID }, key: `technical-qa-${ID}-run_1` });
+    expect(setPostStatus).toHaveBeenCalledWith("post-1", "final_qa", null);
+    expect(sdk.trigger).toHaveBeenCalledTimes(1);
+    expect(sdk.trigger).toHaveBeenCalledWith("technical-qa", { videoId: ID }, { idempotencyKey: `ik:global:technical-qa-${ID}-run_1` });
+  });
+
+  it("a retry refused because the edit already finished (no next of its own) still re-syncs and starts Gate 4 with the same key", async () => {
+    const setPostStatus = stuck();
+    await syncAfterEdit(ID, null);
+    expect(setPostStatus).toHaveBeenCalledWith("post-1", "final_qa", null);
+    expect(sdk.trigger).toHaveBeenCalledWith("technical-qa", { videoId: ID }, { idempotencyKey: `ik:global:technical-qa-${ID}-run_1` });
   });
 });
 

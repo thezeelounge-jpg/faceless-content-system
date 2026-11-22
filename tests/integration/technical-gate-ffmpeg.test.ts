@@ -75,7 +75,7 @@ function oneVideo(finalPath: string) {
     video: {
       id: REAL_VIDEO, brand_id: REAL_BRAND, post_id: POST, script_id: SCRIPT, kind: "post", status: "final_qa", attempt: 1,
       raw_path: REAL_RAW, final_path: finalPath, duration_s: 10, transcript: TRANSCRIPT, ai_label: true, watermark: false,
-      counts_toward_plan: false, edit_manifest: manifest, qa_fix_note: null,
+      counts_toward_plan: false, edit_manifest: manifest, qa_fix_note: null, edit_run_id: null,
     },
     script: { id: SCRIPT, post_id: POST, display_text: DISPLAY, spoken_text: DISPLAY, hook: HOOK, cta: CTA, est_seconds: 10, edit_plan: EDIT_PLAN, broll_keywords: [] },
     post: { id: POST, status: "final_qa", format: "story" },

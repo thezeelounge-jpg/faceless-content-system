@@ -89,7 +89,7 @@ export function memoryPipeline(opts: { personName?: string; language?: string; m
           id: row.id, brand_id: row.brand_id, post_id: e.post_id, script_id: script.id, kind: row.kind, status: row.status,
           attempt: row.attempt, raw_path: row.raw_path, final_path: e.final_path, duration_s: row.duration_s, transcript: e.transcript,
           ai_label: e.ai_label, watermark: e.watermark, counts_toward_plan: row.counts_toward_plan, edit_manifest: e.edit_manifest,
-          qa_fix_note: e.qa_fix_note,
+          qa_fix_note: e.qa_fix_note, edit_run_id: e.edit_run_id,
         },
         script: { id: script.id, post_id: script.post_id, display_text: script.display_text ?? "", spoken_text: script.spoken_text ?? "", ...sx },
         post: { id: post.id, status: post.status, format: postFormat.get(post.id) ?? "talking" },

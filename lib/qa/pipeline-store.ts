@@ -30,7 +30,7 @@ const likeExact = (text: string) => text.replace(/[\\%_]/g, (c) => `\\${c}`);
 const UNIQUE_VIOLATION = "23505";
 
 const VIDEO_COLUMNS =
-  "id, brand_id, post_id, script_id, avatar_id, kind, status, attempt, raw_path, final_path, duration_s, transcript, ai_label, watermark, counts_toward_plan, edit_manifest, qa_fix_note";
+  "id, brand_id, post_id, script_id, avatar_id, kind, status, attempt, raw_path, final_path, duration_s, transcript, ai_label, watermark, counts_toward_plan, edit_manifest, qa_fix_note, edit_run_id";
 const BRAND_COLUMNS =
   "id, owner_id, name, niche, audience, offers, tone, sound_answers, samples, banned_words, language, profile_md, pillars, words_per_second, is_managed, autopilot_level";
 
