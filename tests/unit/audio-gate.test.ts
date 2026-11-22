@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runClaudeTask, type ClaudeContext, type ClaudeTaskName } from "@/lib/claude";
-import { PlainError } from "@/lib/plain-error";
+import { createHeygenClient } from "@/lib/heygen";
 import { runAudioGate, type AudioGateDeps, type AudioMeasure } from "@/lib/qa/audio-gate";
-import { NEEDS_SPEND_CONFIRM } from "@/lib/render";
+import { NEEDS_SPEND_CONFIRM, renderVideo } from "@/lib/render";
 import type { SttProvider } from "@/lib/stt";
 import { memoryPipeline } from "@/tests/helpers/pipeline-memory";
 import misheard from "@/tests/fixtures/stt/gate3-ayesha-misheard.json";
@@ -205,20 +205,72 @@ describe("Gate 3 failures go to the team, never to the customer", () => {
     expect(p.extras.get((out as { videoId: string }).videoId)?.qa_fix_note).toBe("Re-rendered once (silence).");
   });
 
-  it("real HeyGen without the admin's OK: the re-render is queued, nothing is sent, Make video picks it up (with the spend tick)", async () => {
-    const { p, deps } = setup();
-    const { postId } = await p.seedPost(AYESHA);
-    const first = await p.makeVideo(postId);
-    const render = vi.fn(async () => {
-      throw new PlainError(NEEDS_SPEND_CONFIRM);
+});
+
+// p5-b1 (QA SF4 + Rowan 1): the real render path, not an injected error. A REAL (mock: false) HeyGen
+// client whose fetch always rejects: if anything reached the network, the stub would be called.
+describe("Gate 3 re-render with real HeyGen (no network: the fetch stub always rejects)", () => {
+  function realSetup() {
+    const s = setup();
+    const fetchStub = vi.fn(async () => {
+      throw new Error("network is not allowed in tests");
     });
-    const out = await runAudioGate(first, deps({ render }));
+    const real = createHeygenClient({ mock: false, apiKey: undefined, fetch: fetchStub as unknown as typeof fetch });
+    const realRender = (id: string, confirmSpend?: boolean) =>
+      renderVideo(id, { videos: s.p.v.store, heygen: real, spend: s.p.spend.store, ...(confirmSpend ? { confirmSpend } : {}) });
+    return { ...s, fetchStub, realRender };
+  }
+
+  /** Mock first render → Gate 3 (misheard name) → the automatic re-render through the REAL renderVideo. */
+  async function blockedRerender(r: ReturnType<typeof realSetup>) {
+    const { postId } = await r.p.seedPost(AYESHA);
+    const first = await r.p.makeVideo(postId);
+    planSlots.reserve.mockClear();
+    const out = await runAudioGate(first, r.deps({ render: (id) => r.realRender(id) }));
+    return { out, second: r.p.v.videos[1] };
+  }
+
+  it("without the admin's OK: rerender_blocked, the attempt-2 video stays queued (not counted), no spend row, no fetch", async () => {
+    const r = realSetup();
+    const { out, second } = await blockedRerender(r);
     expect(out.status).toBe("rerender_blocked");
-    const second = p.v.videos[1];
-    expect(second).toMatchObject({ status: "queued", attempt: 2, counts_toward_plan: false, heygen_video_id: null });
+    expect(second).toMatchObject({ status: "queued", attempt: 2, counts_toward_plan: false, heygen_video_id: null, render_started_at: null });
     // approved: "Make video" returns this queued re-render (createPostRender 'existing') and asks for "I agree to spend".
-    expect(p.v.posts[0].status).toBe("approved");
-    expect(p.v.posts[0].status_reason).toContain("A real render needs an admin's OK");
-    expect(p.spend.rows.filter((r) => r.video_id === second.id)).toEqual([]);
+    expect(r.p.v.posts[0].status).toBe("approved");
+    expect(r.p.v.posts[0].status_reason).toContain(NEEDS_SPEND_CONFIRM);
+    expect(r.p.v.posts[0].status_reason).toContain("A real render needs an admin's OK");
+    expect(r.p.spend.rows.filter((row) => row.video_id === second.id)).toEqual([]);
+    expect(planSlots.reserve).not.toHaveBeenCalled();
+    expect(r.fetchStub).not.toHaveBeenCalled();
+  });
+
+  it("Rowan 1: the admin confirms, but renders are paused → the spend guard refuses: still queued, no spend row, no fetch", async () => {
+    const r = realSetup();
+    const { second } = await blockedRerender(r);
+    r.p.spend.settings.rendersPaused = true;
+    await expect(r.realRender(second.id, true)).rejects.toThrow(/paused/i);
+    expect(r.p.video(second.id)).toMatchObject({ status: "queued", heygen_video_id: null, render_started_at: null, counts_toward_plan: false });
+    expect(r.p.spend.rows.filter((row) => row.video_id === second.id)).toEqual([]);
+    expect(planSlots.reserve).not.toHaveBeenCalled();
+    expect(r.fetchStub).not.toHaveBeenCalled();
+  });
+
+  it("Rowan 1: the admin confirms, but a REAL (non-mock) render already used today's cap → refused, renders paused, no fetch", async () => {
+    const r = realSetup();
+    const { second } = await blockedRerender(r);
+    r.p.spend.settings.caps = { render: 1 };
+    r.p.spend.seed("render", new Date().toISOString(), 1);
+    const rowsBefore = r.p.spend.rows.length;
+    await expect(r.realRender(second.id, true)).rejects.toThrow();
+    expect(r.p.spend.settings.rendersPaused).toBe(true);
+    expect(r.p.spend.rows).toHaveLength(rowsBefore);
+    expect(r.p.video(second.id)).toMatchObject({ status: "queued", heygen_video_id: null, render_started_at: null });
+    expect(r.fetchStub).not.toHaveBeenCalled();
+  });
+
+  it("Rowan 1: the mock first render's spend row is a mock row and never counts toward that cap", async () => {
+    const r = realSetup();
+    await blockedRerender(r);
+    expect(r.p.spend.rows.filter((row) => row.kind === "render").every((row) => row.mock)).toBe(true);
   });
 });
