@@ -11,7 +11,10 @@ Built in p5-a2 (22 Nov 2026). Rules come from `docs/QA-SPEC.md`; every number li
 | Gate 3 failed once (fixable) | respell + `create_qa_rerender` + `renderVideo` | `poll-render` for the new video (`render-video` when all 10 slots were busy) |
 | `edit-video` reached `final_qa` | `lib/edit-flow.ts` | `technical-qa` (`technical-qa-<video>-<edit run>`) |
 | `technical-qa`: Gate 4 failed once | `lib/qa/technical-gate.ts` | `edit-video` again (`edit-<video>-rebuild-1`) |
-| Gate 4 passed | — | nothing yet: video + post stay `final_qa` = ready for Gate 5 (5b) |
+| Gate 4 passed | — | `visual-qa` (`visual-qa-<video>-<edit run>`), p5-b2 |
+| `visual-qa`: Gate 5 passed | `lib/qa/visual-gate.ts` | nothing: delivered (`ready`, counted) or the QA queue (`team_review`, not counted) |
+| Gate 5 failed once (captions / b-roll) | re-edit | `edit-video` (`edit-<video>-visual-1`) → Gate 4 → Gate 5 again |
+| Gate 5 failed once (face / realism) | `create_visual_rerender` + `renderVideo` | `poll-render` for the new video (`render-video` when all slots are busy) → Gates 3, 4, 5 |
 | a second failure, or one a fix can't help | — | nothing: video + post `team_review` with a plain team reason |
 | p5-b1: `audio-qa` / `technical-qa` failed for good (crash after the last retry, or a refusal) | `onFailure` → `gateCrashed` | nothing: a video still in `audio_qa` / `final_qa` + its post → `team_review` (`GATE_CRASH_REASONS`); safe to repeat |
 | p5-b1: after every `edit-video` run (and a refused retry) | `resyncAfterEdit` (`syncAfterEdit`) | a post stuck in `editing` while its video is promoted (`final_path`, `final_qa` / `team_review`) is moved on; `technical-qa` with the SAME key as above (`edit_run_id`), so Gate 4 never starts twice |
@@ -47,14 +50,29 @@ The editor now saves `videos.edit_manifest` (`lib/qa/edit-manifest.ts`): caption
 
 **Auto-fix (once):** the video goes back to `audio_qa` and the edit is rebuilt. All edit settings come from code, so the rebuild re-runs the editor; a problem in the code fails again and goes to the team. An edit made before p5-a2 has no manifest (`no_manifest`) and is rebuilt.
 
+## Gate 5: visual and realism (p5-b2, `lib/qa/visual-checks.ts`, `lib/qa/visual-gate.ts`, task `trigger/visual-qa.ts`)
+
+Started by `technical-qa` when Gate 4 passed (key `visual-qa-<video>-<edit run>`); the video and post stay `final_qa` while it runs.
+
+1. **Frames** (one ffmpeg pass over the final file): one every 2 s, the first and the last, one in the middle of each b-roll cut (`framePlan`, at most `VISUAL_QA.max_frames`). Each frame twice: a 540 px JPEG for Claude and a full-width gray strip (y 240–320) for the pixel checks.
+2. **Claude MAIN** task `visual_qa` (prompt `prompts/visual-qa.md`, effort medium, images + zod rubric `visualQaOutput`): the QA-SPEC fields, `realism_score`, the face and mouth boxes, issues with a frame index (→ `at_seconds`). Each frame goes with its time, kind and the caption line on screen. If Claude can't answer: hard `visual_judge_failed` → team (fail safe).
+3. **No AI:** the AI label (when `ai_label`) and the small trial tag (only and always when `watermark`) must really be drawn: the box rows above the text must be the background beside the box darkened by the drawtext alpha, and the text rows must hold bright letters (`overlayDrawn`: drawn / absent / unknown; a near-black frame is "unknown" and counts neither way; if no frame could be checked: a soft `*_unverified` note). The face box must end above `CAPTION_LAYOUT.face_zone.bottom` (1150): below it → hard `face_zone_estimate` with a plain team reason ("the face-zone estimate is wrong"), never auto-fixed (trial: says whether it reaches the TRIAL PREVIEW strip).
+4. ONE `qa_reports` row (gate `visual`, score = realism, `auto_fix` = the fix that made this video).
+5. **Passed** → QA-SPEC Gate 6 rules (`humanReviewReasons`): one of the brand's first 5 posts to pass Gate 5, realism under 9, a managed brand while `brand_qa_settings.team_reviews_every_video` is on (no row = on), else a stable random 1 in 5 (`sampledForReview`, by video id). Any → video + post `team_review` (the QA queue) with the reason (`HUMAN_REVIEW_TEXT`). None → rpc `deliver_post_video`: video + post `ready`, and this video is the post's ONE counted video (`counts_toward_plan = true`, every other video of the post false); `confirmPlanSlot` (stub until Phase 7).
+6. **Failed**, and the script has not used its one Gate 5 fix (failed `visual` reports counted per SCRIPT, so a re-render shares the budget): `classifyFix`: face/realism problem → re-render once (rpc `create_visual_rerender`: attempt + 1, `counts_toward_plan = false`, `rerender_gate = 'visual'`, through `renderVideo`; real HeyGen waits for the admin's spend OK exactly like Gate 3); captions over the face / unreadable → re-edit once with the next lower caption style (`VISUAL_QA.caption_fix_styles`: big_words → small_box → minimal); stray text in a b-roll frame → re-edit with that clip avoided (`avoidBrollClips`, kept in the manifest's `avoid_clips`). Re-edit = video back to `audio_qa`, post `editing`, `edit-video` key `edit-<video>-visual-1`; `editJobFor` takes the caption style and avoided clips from the manifest, so a later Gate 4 rebuild keeps the fix. Anything else (face zone, label/tag pixels, stray text on the face, Claude unavailable, no lower caption style) or a second failure → `team_review` with the reason.
+7. Crash after the last retry → `onFailure` → `gateCrashed("visual")`: a video still in `final_qa` + its post → `team_review`.
+
+**Usage rule:** `counts_toward_plan` is set ONLY by `deliver_post_video`. Failed attempts, QA re-renders, re-edits and videos waiting in the QA queue never count (a queue video counts when Gate 6 delivers it, step 3). Migration `20261123000000` (re-runnable): `videos.rerender_gate`, table `brand_qa_settings` (server only), rpcs `create_visual_rerender`, `deliver_post_video` (both under the per-post render lock, service_role only).
+
 ## What is mocked
 
 - `MOCK_STT`: transcripts from `tests/fixtures/stt/`, picked by the spoken text (`by-text.json`); otherwise `sample-transcript.json`. p5-b1: embedded as static JSON imports in `lib/stt.ts` (bundled; works in a Trigger build with no `tests/` folder). A new keyed file must be added to `KEYED_TRANSCRIPTS` too.
 - `MOCK_CLAUDE`: `key_term_check` answers from `tests/fixtures/stt/key-term-judgements.json` (unknown pair → mispronounced), embedded the same way (`lib/qa/key-term-mock.ts`).
+- `MOCK_CLAUDE` (Gate 5): `visual_qa` answers from `tests/fixtures/visual/answers.json` (embedded), picked by display text; any other text → a good answer (realism 9). "captions-over-mouth" covers the mouth only for the caption styles it lists, so the re-edit really changes the answer. Tests inject the frames (`tests/helpers/visual-frames.ts`); `tests/integration/visual-gate-ffmpeg.test.ts` runs the real sampler and pixel checks on real edits.
 - `MOCK_HEYGEN`: the re-render uses the mock client (fixture answers, provider_usage row with `mock = true`, cost 0, never counted toward the daily cap).
 - Tests inject the audio measurements (Gate 3) and ffprobe/ffmpeg output (Gate 4); `tests/integration/technical-gate-ffmpeg.test.ts` runs the real local ffmpeg (about 6 s).
 - **Known mock artefact:** the MOCK_PEXELS b-roll clips are flat colours, so in a local mock run a b-roll cut longer than 1.5 s is a real freeze and Gate 4 sends it back once, then to the team. Real stock clips move. The integration test uses a moving clip.
 
 ## Tests
 
-`tests/unit/audio-checks.test.ts`, `key-term-check.test.ts`, `audio-gate.test.ts` (incl. the Done-when), `technical-checks.test.ts`, `technical-gate.test.ts`, `qa-pipeline.test.ts`, `qa-tasks.test.ts`, `pipeline-store.test.ts`; `tests/db/rls.test.ts` (create_qa_rerender, new server-only columns); `tests/integration/technical-gate-ffmpeg.test.ts`.
+p5-b2: `visual-checks.test.ts`, `visual-mock.test.ts`, `visual-gate.test.ts`, `qa-pipeline-gate5.test.ts` (full mocked pipeline + Done-when), `tests/integration/visual-gate-ffmpeg.test.ts`. Earlier: `tests/unit/audio-checks.test.ts`, `key-term-check.test.ts`, `audio-gate.test.ts` (incl. the Done-when), `technical-checks.test.ts`, `technical-gate.test.ts`, `qa-pipeline.test.ts`, `qa-tasks.test.ts`, `pipeline-store.test.ts`; `tests/db/rls.test.ts` (create_qa_rerender, new server-only columns); `tests/integration/technical-gate-ffmpeg.test.ts`.
