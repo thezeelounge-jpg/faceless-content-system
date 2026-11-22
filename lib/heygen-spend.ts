@@ -1,4 +1,6 @@
+import { z } from "zod";
 import { parseAdminEmails } from "@/lib/admin";
+import { redact } from "@/lib/admin-errors";
 import { HEYGEN_DAILY_CAP_DEFAULTS } from "@/lib/config";
 import { adminRecipients } from "@/lib/email-recipients";
 import { PlainError } from "@/lib/plain-error";
@@ -17,7 +19,9 @@ import { PlainError } from "@/lib/plain-error";
 // money). Mock rows are still written (cost 0, note 'mock', provider_usage.mock
 // = true) but do NOT count (decision (a), p3-fix2).
 // When the cap is hit (SF4): renders_paused → true and one mocked alert email
-// per admin, once per kind per Karachi day; the call is refused.
+// per admin, once per kind per Karachi day; the call is refused. The only
+// supported way back is Admin → Settings → "Resume renders" (resumeRenders,
+// rpc resume_renders: flag off + audit row in one transaction, p4-fix e).
 // This is provider spend (provider_usage), NOT the customer's plan slots (usage_ledger).
 
 export type SpendKind = "create_twin" | "render";
@@ -47,6 +51,12 @@ export interface SpendStore {
    * Returns how many NEW rows were written.
    */
   queueCapAlert(alert: { dedupeKey: string; recipients: string[]; subject: string; body: string }): Promise<number>;
+  /**
+   * p4-fix e: rpc resume_renders. renders_paused → false AND one audit row
+   * (provider_usage kind 'renders_resumed', cost 0, never counted) in one
+   * transaction. 'not_paused' = nothing written. The ONLY supported lift path.
+   */
+  resumeRenders(adminEmail: string): Promise<"resumed" | "not_paused">;
 }
 
 export class SpendGuardError extends PlainError {
@@ -115,6 +125,12 @@ export async function guardHeygenSpend(opts: GuardOptions): Promise<string> {
   return id;
 }
 
+/** A short error detail for a server log: secrets redacted, URLs removed. */
+function safeDetail(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  return redact(text).replace(/\bhttps?:\/\/\S+/gi, "[url]").slice(0, 200);
+}
+
 /** "2026-11-22": the Asia/Karachi calendar day of `now`. */
 export function karachiDay(now: Date): string {
   return new Date(karachiDayStart(now).getTime() + KARACHI_OFFSET_MS).toISOString().slice(0, 10);
@@ -129,7 +145,13 @@ export function karachiDay(now: Date): string {
 async function onCapReached(opts: GuardOptions, cap: number): Promise<void> {
   const day = karachiDay(opts.now ?? new Date());
   const words = KIND_WORDS[opts.kind];
-  await opts.store.pauseRenders().catch((error) => console.error("[spend] could not set renders_paused", error));
+  // p4-fix e: never swallowed. One clear line (redacted: no URL, no key); the caller still refuses this call.
+  await opts.store.pauseRenders().catch((error: unknown) =>
+    console.error(
+      `[spend] PAUSE FAILED: the daily HeyGen cap for ${opts.kind} was hit but renders_paused could not be set. This call was refused; check app_settings now.`,
+      { kind: opts.kind, day, error: safeDetail(error) },
+    ),
+  );
   await opts.store
     .queueCapAlert({
       dedupeKey: `spend_cap:${opts.kind}:${day}`,
@@ -138,11 +160,32 @@ async function onCapReached(opts: GuardOptions, cap: number): Promise<void> {
       body: [
         `Today (${day}, Karachi time) the app reached its HeyGen limit for ${words}: ${cap} a day.`,
         "Nothing more was sent to HeyGen. All HeyGen work is now paused (renders_paused is on).",
-        "To restart: check today's provider_usage rows in Supabase, then set renders_paused to false in app_settings,",
-        "and raise heygen_daily_caps only if Zee agreed to the extra spend.",
+        "To restart: check today's HeyGen spend, then use Admin → Settings → Resume renders (logged).",
+        "Raise heygen_daily_caps only if Zee agreed to the extra spend.",
       ].join("\n"),
     })
     .catch((error) => console.error("[spend] could not queue the cap alert", error));
+}
+
+// ---------------------------------------------------------------------------
+// Resume renders (p4-fix e): the only supported way to lift renders_paused.
+// ---------------------------------------------------------------------------
+
+export const resumeRendersSchema = z.object({ confirmCheckedSpend: z.literal(true) });
+
+export const NEEDS_SPEND_CHECK = "Tick “I checked today's HeyGen spend” first. Nothing was changed.";
+export const RENDERS_RESUMED = "Renders are running again (this is logged).";
+export const NOT_PAUSED = "Renders are not paused. Nothing was changed.";
+
+/** Lifts renders_paused after the admin confirmed they checked today's spend. Returns a plain sentence. */
+export async function resumeRenders(
+  input: z.infer<typeof resumeRendersSchema>,
+  deps: { store: SpendStore; adminEmail: string },
+): Promise<string> {
+  if (!resumeRendersSchema.safeParse(input).success) throw new PlainError(NEEDS_SPEND_CHECK);
+  const result = await deps.store.resumeRenders(deps.adminEmail);
+  if (result === "not_paused") throw new PlainError(NOT_PAUSED);
+  return RENDERS_RESUMED;
 }
 
 /** guardHeygenSpend, then the call, then the row is marked succeeded or failed. */

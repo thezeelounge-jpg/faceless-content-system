@@ -113,6 +113,32 @@ describe("SF4: daily cap hit → admins alerted once, renders paused", () => {
     expect(spend.alerts[0].body).toContain("renders_paused");
   });
 
+  it("p4-fix e: if setting renders_paused fails, one clear server log line (no URL, no secret); the call is still refused", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    spend.store.pauseRenders = async () => {
+      throw new Error("[spend] pause renders: fetch failed https://abc.supabase.co/rest/v1/app_settings apikey=sb_secret_abcdef123456");
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = await hit(spend);
+    expect(error).toBeInstanceOf(SpendGuardError);
+    const lines = errors.mock.calls.map((args) => args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" "));
+    const pauseLines = lines.filter((l) => l.includes("renders_paused"));
+    expect(pauseLines).toHaveLength(1);
+    expect(pauseLines[0]).toContain(
+      "[spend] PAUSE FAILED: the daily HeyGen cap for render was hit but renders_paused could not be set. This call was refused; check app_settings now.",
+    );
+    expect(pauseLines[0]).not.toMatch(/supabase\.co|sb_secret|https?:\/\//);
+  });
+
+  it("p4-fix e: the alert tells admins to use Settings → Resume renders (not a manual Supabase edit)", async () => {
+    const spend = memorySpendStore();
+    spend.seed("render", "2026-11-22T05:00:00.000Z", 3);
+    await hit(spend);
+    expect(spend.alerts[0].body).toContain("Admin → Settings → Resume renders");
+    expect(spend.alerts[0].body).not.toContain("set renders_paused to false");
+  });
+
   it("admins only: the client is never emailed (only ADMIN_EMAILS addresses)", async () => {
     const spend = memorySpendStore();
     spend.seed("render", "2026-11-22T05:00:00.000Z", 3);

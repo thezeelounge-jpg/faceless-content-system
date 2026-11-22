@@ -975,6 +975,65 @@ describe("adopt_late_render (late HeyGen webhook, p4-fix c2)", () => {
     ).rows[0].id;
 });
 
+// p4-fix e: the only supported way to lift renders_paused. Flag off + audit
+// row (provider_usage kind 'renders_resumed') in ONE transaction.
+describe("resume_renders (audited un-pause, p4-fix e)", () => {
+  const resume = () => db.query<{ result: string }>("select public.resume_renders('admin@example.com') as result");
+  const paused = async () =>
+    (await db.query<{ value: unknown }>("select value from public.app_settings where key = 'renders_paused'")).rows[0]?.value;
+  const audits = () =>
+    db.query<{ kind: string; status: string; cost: number; mock: boolean; note: string }>(
+      "select kind, status, cost_usd::float as cost, mock, note from public.provider_usage where kind = 'renders_resumed'",
+    );
+
+  it("paused → false, and exactly one audit row (cost 0, not mock, admin email in note)", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec("update public.app_settings set value = 'true'::jsonb where key = 'renders_paused'");
+      expect((await resume()).rows[0].result).toBe("resumed");
+      expect(await paused()).toBe(false);
+      expect((await audits()).rows).toEqual([
+        {
+          kind: "renders_resumed",
+          status: "succeeded",
+          cost: 0,
+          mock: false,
+          note: "renders resumed by admin@example.com after checking today's HeyGen spend",
+        },
+      ]);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("not paused: 'not_paused', nothing written", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec("update public.app_settings set value = 'false'::jsonb where key = 'renders_paused'");
+      expect((await resume()).rows[0].result).toBe("not_paused");
+      expect((await audits()).rows).toEqual([]);
+    });
+  });
+
+  it("renders_resumed rows never count toward a daily cap", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec(`insert into public.provider_usage (provider, kind, status) values ('heygen', 'renders_resumed', 'succeeded')`);
+      const since = new Date(Date.now() - 60_000).toISOString();
+      for (const kind of ["render", "create_twin"]) {
+        const id = await db.query<{ id: string | null }>("select public.reserve_heygen_spend($1, $2::timestamptz, 1, null, null, null) as id", [kind, since]);
+        expect([kind, id.rows[0].id]).not.toEqual([kind, null]);
+      }
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("customers and logged-out visitors can't call it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(resume()).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(resume()).rejects.toThrow(/permission denied/);
+    });
+  });
+});
+
 describe("webhook_events (HeyGen webhooks)", () => {
   it("one row per event_key: a repeat is ignored by on conflict do nothing", async () => {
     await asRole("service_role", null, async () => {
@@ -1098,7 +1157,14 @@ describe("table privileges for anon and authenticated", () => {
     );
     const names = fns.rows.map((f) => f.name).sort();
     expect(names).toEqual(
-      expect.arrayContaining(["claim_render_slot", "clear_stuck_claim", "reserve_heygen_spend", "save_brand_version"]),
+      expect.arrayContaining([
+        "adopt_late_render",
+        "claim_render_slot",
+        "clear_stuck_claim",
+        "reserve_heygen_spend",
+        "resume_renders",
+        "save_brand_version",
+      ]),
     );
     const seen: Record<string, { anon: boolean; authenticated: boolean; service_role: boolean }> = {};
     for (const { sig, name } of fns.rows) {
