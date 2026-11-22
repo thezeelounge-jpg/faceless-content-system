@@ -293,6 +293,30 @@ export const HUMAN_REVIEW = {
 } as const;
 
 /**
+ * p5-b3: Admin → Usage and spend → Quality (QA-SPEC "Metrics"). The targets are QA-SPEC's; the page
+ * marks a metric green or red against them. Read only: nothing here changes a gate.
+ */
+export const QUALITY = {
+  targets: {
+    /** First-time pass rate, per gate: over 85%. */
+    first_pass_min: 0.85,
+    /** Automatic fix success rate: over 70%. */
+    auto_fix_success_min: 0.7,
+    /** Human reject rate: under 5%. */
+    human_reject_max: 0.05,
+    /** Customer redo rate: under 10%. */
+    customer_redo_max: 0.1,
+    /** Time from approval to Ready: under 2 hours. */
+    approval_to_ready_max_h: 2,
+  },
+  /** "Top 5 failure codes this week": how many, and "this week" = the last 7 days of the range. */
+  top_failure_codes: 5,
+  top_failure_days: 7,
+  /** The page's range when none is picked. */
+  default_range_days: 28,
+} as const;
+
+/**
  * brands.words_per_second: the rolling average of the last 10 real post
  * renders (words in spoken_text / real duration). Samples outside these
  * bounds are ignored as absurd (a broken duration, an empty script).
