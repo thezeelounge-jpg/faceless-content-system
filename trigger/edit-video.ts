@@ -3,14 +3,17 @@ import { editJobSchema, runEditJob, runFfmpeg } from "../lib/edit-flow";
 import { createEditFiles, createEditStore } from "../lib/edit-store";
 import { PlainError } from "../lib/plain-error";
 import { EDIT } from "../lib/qa/config";
+import { afterEditTask } from "../lib/qa/pipeline";
+import { startNext } from "./next-step";
 
 // The editor (Phase 4): raw HeyGen MP4 → 1080x1920, 30 fps reel with
 // word-by-word captions. All logic lives in lib/edit-flow.ts (runEditJob),
 // which saves the result or a plain error on the video row itself.
 //
-// Not started automatically yet: Phase 5's pipeline (after Gate 3) will
-// trigger it with idempotency key `edit-<video id>-<attempt>` (scope global),
-// so a double click or a retry of the caller never makes two edits.
+// Started by the QA pipeline (p5-a2, lib/qa/pipeline.ts): audio-qa after Gate 3 passes
+// (key `edit-<video id>-1`) and technical-qa for the one rebuild (`edit-<video id>-rebuild-1`),
+// both global idempotency keys, so a retry of the caller never makes two edits.
+// When the edit reaches final_qa it starts Gate 4 (technical-qa).
 // Needs ffmpeg with libass (`subtitles` filter): trigger.config.ts adds the
 // ffmpeg build extension and copies assets/fonts (additionalFiles).
 // Check on the first deploy that the apt ffmpeg has the subtitles filter.
@@ -46,6 +49,8 @@ export const editVideoTask = schemaTask({
         runToken: ctx.run.id,
       });
       logger.log("Edit finished", { videoId: payload.videoId, status: outcome.status });
+      // p5-a2: an edit that reached final_qa goes to Gate 4 (technical-qa), one key per edit run.
+      await startNext(afterEditTask(outcome, payload.videoId, ctx.run.id));
       return outcome;
     } catch (error) {
       // "This video can't be edited: ..." won't fix itself.
