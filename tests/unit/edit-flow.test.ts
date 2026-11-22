@@ -6,6 +6,7 @@ import script from "@/tests/fixtures/stt/sample-script.json";
 import fixture from "@/tests/fixtures/stt/sample-transcript.json";
 import {
   EDIT_ERRORS,
+  EXTRAS_TEAM_REASON,
   TEAM_EDIT_REASON,
   captionFontsDir,
   editJobSchema,
@@ -160,10 +161,27 @@ describe("runEditJob", () => {
     expect(stt.transcribe).not.toHaveBeenCalled();
   });
 
-  it("lists the part B extras it could not apply yet (AI label)", async () => {
+  // p4-b1 (QA SF3), a PERMANENT guard: a video that asked for the AI label never reaches
+  // final_qa without it. Today the label is not drawn yet, so it goes to the team; once
+  // p4-b2 draws it, notApplied is empty and final_qa is allowed. Same for any requested extra.
+  it("AI label on but not applied → NEVER final_qa: team_review with a plain team reason", async () => {
     const m = memory();
     const out = await runEditJob({ ...job, aiLabel: true }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
-    expect(out).toEqual({ status: "edited", finalPath: FINAL, notApplied: ["ai_label"] });
+    const labelMissing = out.status === "edited" ? out.notApplied.includes("ai_label") : true;
+    expect(m.row.status === "final_qa" && labelMissing).toBe(false);
+    if (labelMissing) {
+      expect(out).toEqual({ status: "needs_team", finalPath: FINAL, notApplied: ["ai_label"] });
+      expect(m.row).toMatchObject({ status: "team_review", final_path: FINAL, error: "AI label not added yet." });
+      expect(m.postStatuses.at(-1)).toEqual({ status: "team_review", reason: EXTRAS_TEAM_REASON });
+    }
+  });
+
+  it("the trial watermark asked for but not applied → team_review too (both extras named)", async () => {
+    const m = memory();
+    const out = await runEditJob({ ...job, aiLabel: true, watermark: true }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(m.row.status).not.toBe("final_qa");
+    expect(out).toEqual({ status: "needs_team", finalPath: FINAL, notApplied: ["ai_label", "watermark"] });
+    expect(m.row.error).toBe("AI label not added yet. Trial watermark not added yet.");
   });
 
   it("ffmpeg failure: plain error on the row, no final file anywhere, post to the team", async () => {

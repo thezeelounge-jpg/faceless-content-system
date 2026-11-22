@@ -19,16 +19,20 @@ import { getSttProvider, transcriptSchema, type SttProvider, type Transcript } f
 //
 //  1. Check the video row: a post render, status rendered / audio_qa / editing
 //     (a retry), and the raw path in the payload is the row's own raw_path.
-//  2. Status → editing (video and post).
+//  2. Claim the edit for this run (rpc start_edit, p4-b1: another run is
+//     refused while the claim is fresh). Status → editing (video and post).
 //  3. Download the raw MP4 from the PRIVATE videos bucket into a fresh temp folder.
 //  4. Transcript: from the payload, else the one saved on the row (Gate 3
 //     will save it in Phase 5), else speech-to-text (MOCK in this phase),
 //     which is then saved to videos.transcript.
 //  5. Captions (.ass) from display_text + transcript (lib/captions.ts).
 //  6. ffmpeg with the args from lib/edit.ts (execFile, no shell, time limit).
-//  7. Upload to final/<brand>/<video>.mp4; status → final_qa (Gate 4 is next).
+//  7. Upload to final/<brand>/<video>.mp4; status → final_qa (Gate 4 is next),
+//     but only if every requested extra was applied; otherwise team_review
+//     with a plain reason (p4-b1 publish guard: e.g. "AI label not added yet.").
 //  On any failure: a plain error on the row, status team_review (video and
 //  post), no final file left in storage, the temp folder always deleted.
+//  All saves are only for the run that owns the claim (p4-b1).
 //  Store, storage, ffmpeg and speech-to-text are injected; tests use fakes.
 
 export const editJobSchema = z.object({
@@ -105,6 +109,8 @@ export type EditDeps = {
 export type EditOutcome =
   | { status: "edited"; finalPath: string; notApplied: string[] }
   | { status: "failed"; error: string }
+  /** p4-b1 (QA SF3): edited, but a requested extra was not applied → team_review, never final_qa. */
+  | { status: "needs_team"; finalPath: string; notApplied: string[] }
   /** p4-b1: another run took over this video's edit; this run changed nothing it does not own. */
   | { status: "superseded" };
 
@@ -118,6 +124,25 @@ export const EDIT_ERRORS = {
 } as const;
 
 export const TEAM_EDIT_REASON = "The edit failed. Open the video to see why.";
+
+/**
+ * p4-b1 (QA SF3), permanent publish guard: a requested extra that the editor did not apply
+ * (notYetApplied) never lets a video reach final_qa. Team wording for posts.status_reason.
+ */
+export const EXTRAS_TEAM_REASON = "The edit is missing something it needs (for example the AI label). Open the video to see what.";
+
+/** One plain sentence per missing extra, saved on videos.error (admin wording). */
+const MISSING_EXTRA: Record<string, string> = {
+  ai_label: "AI label not added yet.",
+  watermark: "Trial watermark not added yet.",
+  broll: "B-roll not added yet.",
+  music: "Music not added yet.",
+  faststart: "Fast start not set yet.",
+};
+
+export function missingExtrasMessage(names: string[]): string {
+  return names.map((n) => MISSING_EXTRA[n] ?? `${n} not added yet.`).join(" ");
+}
 
 export function finalPathFor(brandId: string, videoId: string): string {
   return `final/${brandId}/${videoId}.mp4`;
@@ -212,6 +237,19 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     stage = "upload";
     uploadStarted = true;
     await deps.files.upload(finalPath, new Uint8Array(await readFile(finalFile)), "video/mp4");
+    // p4-b1 (QA SF3): never final_qa while a requested extra (the AI label above all) is missing.
+    // The file is kept (final_path saved) so the team can look at it.
+    const notApplied = notYetApplied(extras);
+    if (notApplied.length > 0) {
+      const saved = await deps.store.finishEdit(video.id, run, {
+        status: "team_review",
+        final_path: finalPath,
+        error: missingExtrasMessage(notApplied),
+      });
+      if (!saved) return { status: "superseded" };
+      await deps.store.setPostStatusForVideo(video.id, "team_review", EXTRAS_TEAM_REASON);
+      return { status: "needs_team", finalPath, notApplied };
+    }
     if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null }))) {
       // Another run took over (our claim went stale). Our file is a valid edit on the same
       // path; the row and post belong to the other run now, so touch nothing else.
@@ -219,7 +257,7 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
       return { status: "superseded" };
     }
     await deps.store.setPostStatusForVideo(video.id, "final_qa", null);
-    return { status: "edited", finalPath, notApplied: notYetApplied(extras) };
+    return { status: "edited", finalPath, notApplied: [] };
   } catch (error) {
     const message = plainMessage(error, stage);
     logAdminError("[edit] failed", { videoId: video.id, stage }, error);
