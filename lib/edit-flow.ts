@@ -8,12 +8,13 @@ import { z } from "zod";
 import { logAdminError } from "@/lib/admin-errors";
 import { scriptOutput } from "@/lib/ai-schemas";
 import { getBrollProvider, planBroll, type BrollProvider } from "@/lib/broll";
-import { CAPTION_STYLES, CAPTION_STYLE_NAMES, alignWords, buildAss } from "@/lib/captions";
+import { CAPTION_STYLES, CAPTION_STYLE_NAMES, alignWords, buildAss, groupPages } from "@/lib/captions";
 import { ffprobeBin, ffmpegBin, parseProbe, probeArgs } from "@/lib/clip-checks/media";
 import { buildEditArgs, buildLoudnessMeasureArgs, notYetApplied, type BrollCut, type EditExtras } from "@/lib/edit";
 import { getMusicLibrary, parseLoudnormJson, type MusicLibrary } from "@/lib/music";
 import { PlainError } from "@/lib/plain-error";
-import { EDIT } from "@/lib/qa/config";
+import { EDIT, MUSIC } from "@/lib/qa/config";
+import type { EditManifest } from "@/lib/qa/edit-manifest";
 import { getSttProvider, transcriptSchema, type SttProvider, type Transcript } from "@/lib/stt";
 
 // The edit job (Phase 4, docs/EDITOR-NOTES.md): raw HeyGen MP4 → finished
@@ -104,7 +105,8 @@ export interface EditStore {
   finishEdit(
     id: string,
     run: string,
-    patch: { status: "final_qa" | "team_review"; final_path: string | null; error: string | null },
+    /** p5-a2: edit_manifest = what was built (Gate 4 checks it); only with a final file. */
+    patch: { status: "final_qa" | "team_review"; final_path: string | null; error: string | null; edit_manifest?: EditManifest | null },
   ): Promise<boolean>;
   setPostStatusForVideo(id: string, status: "editing" | "final_qa" | "team_review", reason: string | null): Promise<void>;
 }
@@ -361,6 +363,7 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     });
     const provider = deps.broll ?? getBrollProvider();
     const broll: BrollCut[] = [];
+    const brollClips: string[] = [];
     const usedClips = new Set<string>();
     for (const cut of plan.cuts) {
       const clips = await provider.search(cut.keyword, { orientation: "portrait", minDuration_s: cut.duration_s });
@@ -368,6 +371,7 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
       if (!clip) continue;
       usedClips.add(clip.id);
       broll.push({ path: clip.file, start_s: cut.start_s, duration_s: cut.duration_s });
+      brollClips.push(clip.id);
     }
     console.info(
       `[edit] broll video=${video.id} cuts=${broll.length} coverage=${plan.coverage_s}s/${plan.max_coverage_s}s skipped=${plan.skipped.map((s) => s.why).join(",") || "none"}`,
@@ -414,9 +418,23 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     // p4-b1 (QA SF3): never final_qa while a requested extra (the AI label above all) is missing
     // from the command ffmpeg actually ran. The file is kept (final_path saved) for the team.
     const notApplied = notYetApplied(extras, args);
+    // p5-a2: what was built, for Gate 4 (the same pages buildAss burned in, the cuts, the bed and its gain).
+    const manifest: EditManifest = {
+      version: 1,
+      raw_duration_s: durationS,
+      format: job.format,
+      caption_style: job.captionStyle,
+      captions: groupPages(alignWords(job.displayText, transcript), job.captionStyle),
+      broll: broll.map((cut, i) => ({ start_s: cut.start_s, duration_s: cut.duration_s, clip: brollClips[i] })),
+      protected: plan.protected,
+      music: { bed_id: bed.id, gain_db: MUSIC.bed_gain_db },
+      ai_label: extras.ai_label === true,
+      watermark: extras.watermark === true,
+      not_applied: notApplied,
+    };
     if (notApplied.length > 0 || brollProblem) {
       const reason = [notApplied.length > 0 ? missingExtrasMessage(notApplied) : null, brollProblem].filter(Boolean).join(" ");
-      const saved = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: finalPath, error: reason });
+      const saved = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: finalPath, error: reason, edit_manifest: manifest });
       if (!saved) return await superseded();
       promoted = true;
       return await afterPromotion("team_review", notApplied.length > 0 ? EXTRAS_TEAM_REASON : brollProblem, {
@@ -426,7 +444,7 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
         reason,
       });
     }
-    if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null }))) {
+    if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null, edit_manifest: manifest }))) {
       // Another run took over (our claim went stale): the row, the post and the other run's
       // file are not ours. Remove only our own run-scoped upload.
       return await superseded();

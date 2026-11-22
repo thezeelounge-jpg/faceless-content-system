@@ -22,7 +22,8 @@ import {
 import { BROLL_NOT_SET_UP } from "@/lib/broll";
 import { notYetApplied } from "@/lib/edit";
 import { LOUDNORM_SILENT, MUSIC_NOT_SET_UP, fixtureMusicLibrary } from "@/lib/music";
-import { EDIT } from "@/lib/qa/config";
+import { EDIT, MUSIC } from "@/lib/qa/config";
+import { editManifestSchema } from "@/lib/qa/edit-manifest";
 import { NO_STT_PROVIDER, type SttProvider } from "@/lib/stt";
 
 // lib/edit-flow.ts with fakes: no Supabase, no real ffmpeg (that is in
@@ -177,6 +178,25 @@ describe("runEditJob", () => {
     expect(seenArgs).toContain("-filter_complex");
     expect(seenArgs.join(" ")).toContain(`fontsdir=${captionFontsDir()}`);
     expect(await readdir(tmpRoot)).toEqual([]); // temp files cleaned up
+  });
+
+  it("p5-a2: the finished edit saves what it built (videos.edit_manifest) for Gate 4", async () => {
+    const m = memory();
+    await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir(), music: fixtureMusicLibrary() });
+    const manifest = editManifestSchema.parse((m.row as Record<string, unknown>).edit_manifest);
+    expect(manifest).toMatchObject({
+      version: 1, raw_duration_s: 6, format: "talking", caption_style: "big_words",
+      music: { bed_id: expect.stringMatching(/^bed-/), gain_db: MUSIC.bed_gain_db },
+      ai_label: true, // the row's ai_label (on by default) wins over the payload's false
+      watermark: false, not_applied: [],
+    });
+    expect(manifest.captions.length).toBeGreaterThan(1);
+    expect(manifest.captions.every((page) => page.lines.length <= 2)).toBe(true);
+    const words = manifest.captions.flatMap((page) => page.lines.flat());
+    expect(words.map((w) => w.text).join(" ")).toBe(script.display_text);
+    expect(words[0]).toMatchObject({ text: "Stop", source: "matched", stt_indexes: [0], start_s: fixture.words[0].start_s });
+    expect(manifest.broll).toEqual([expect.objectContaining({ duration_s: expect.any(Number), clip: expect.any(String) })]);
+    expect(manifest.protected).toEqual({ hook_end_s: expect.any(Number), cta_start_s: expect.any(Number) });
   });
 
   it("uses the mock speech-to-text when no transcript is given, and saves it on the row", async () => {

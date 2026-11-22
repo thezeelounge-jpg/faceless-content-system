@@ -1,5 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { captionFontsDir, runEditJob, runFfmpeg, type EditFiles, type EditJob, type EditStore, type EditVideoRow, type FfmpegRunner } from "@/lib/edit-flow";
+import type { BrollProvider } from "@/lib/broll";
 import type { Transcript } from "@/lib/stt";
 
 // The whole edit job (lib/edit-flow.ts runEditJob) with the REAL local
@@ -32,6 +33,8 @@ export type RealEditInput = {
   tmpRoot: string;
   job: Omit<EditJob, "videoId" | "rawPath">;
   row?: Partial<EditVideoRow>;
+  /** p5-a2: another b-roll provider (default: the MOCK_PEXELS fixtures). */
+  broll?: BrollProvider;
 };
 
 export async function editForReal(input: RealEditInput) {
@@ -60,7 +63,7 @@ export async function editForReal(input: RealEditInput) {
   };
   const outcome = await runEditJob(
     { videoId: REAL_VIDEO, rawPath: REAL_RAW, ...input.job },
-    { store, files, ffmpeg, tmpRoot: input.tmpRoot, fontsDir: captionFontsDir(), runToken: REAL_RUN },
+    { store, files, ffmpeg, tmpRoot: input.tmpRoot, fontsDir: captionFontsDir(), runToken: REAL_RUN, broll: input.broll },
   );
   return { outcome, row, output: input.outFile, calls };
 }

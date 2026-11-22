@@ -92,6 +92,48 @@ export function makeTalkingInput(file: string, seconds: number, voice: "speech" 
   );
 }
 
+/**
+ * p5-a2: a MOVING talking-head stand-in for Gate 4 (freezedetect needs motion: the flat-colour
+ * inputs above are frozen by design). testsrc2 (a moving pattern) at 540x960, 25 fps, with the
+ * same "speech" voice as makeTalkingInput.
+ */
+export function makeMovingTalkingInput(file: string, seconds: number): void {
+  execFileSync(
+    "ffmpeg",
+    [
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", `testsrc2=size=540x960:rate=25:duration=${seconds}`,
+      "-f", "lavfi", "-i", `aevalsrc=0.4*sin(2*PI*180*t)*(0.6+0.4*sin(2*PI*5*t))*lt(mod(t\\,2)\\,1.6):s=44100:d=${seconds}`,
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest",
+      file,
+    ],
+    { stdio: "pipe" },
+  );
+}
+
+/**
+ * p5-a2: a deliberately BAD "final" reel for Gate 4: 1080x1920 at 25 fps, 1 s of black, then
+ * 2.2 s of one still colour (frozen), then 1 s of moving pattern; a quiet tone (about -30 LUFS);
+ * no +faststart (moov after mdat).
+ */
+export function makeBadFinal(file: string): void {
+  execFileSync(
+    "ffmpeg",
+    [
+      "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+      "-f", "lavfi", "-i", "color=c=black:s=1080x1920:r=25:d=1",
+      "-f", "lavfi", "-i", "color=c=0xD8B49A:s=1080x1920:r=25:d=2.2",
+      "-f", "lavfi", "-i", "testsrc2=size=1080x1920:rate=25:duration=1",
+      "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=4.2",
+      "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0[v];[3:a]volume=-24dB[a]",
+      "-map", "[v]", "-map", "[a]",
+      "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "48000",
+      file,
+    ],
+    { stdio: "pipe" },
+  );
+}
+
 /** EBU R128 integrated loudness (LUFS) and true peak (dBTP) of a file's audio, or of a filtergraph run. */
 export function measureLoudness(args: string[]): { i: number; tp: number } {
   const r = spawnSync("ffmpeg", ["-nostdin", "-hide_banner", "-nostats", ...args], { encoding: "utf8" });
