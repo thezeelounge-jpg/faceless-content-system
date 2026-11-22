@@ -124,6 +124,9 @@ export type CaptionPage = {
 
 export type CaptionBox = { top: number; bottom: number; left: number; right: number };
 
+/** A caption page has at most this many lines (groupPages). */
+export const MAX_PAGE_LINES = 2;
+
 // ---------------------------------------------------------------------------
 // Alignment
 // ---------------------------------------------------------------------------
@@ -324,7 +327,7 @@ export function groupPages(words: CaptionWord[], styleName: CaptionStyleName): C
     const tooLong = lineLength(line, style) + 1 + shown(w, style).length > style.max_chars_per_line;
     const tooManyWords = style.max_words_per_line !== undefined && line.length >= style.max_words_per_line;
     if (line.length > 0 && (tooLong || tooManyWords)) {
-      if (lines.length === 2) flush();
+      if (lines.length === MAX_PAGE_LINES) flush();
       else lines.push([]);
       line = lines[lines.length - 1];
     }
@@ -355,6 +358,18 @@ export function groupPages(words: CaptionWord[], styleName: CaptionStyleName): C
 const marginV = (style: CaptionStyle) => CAPTION_LAYOUT.safe.bottom + style.outline + style.shadow;
 
 /**
+ * The top edge (y, unrounded) of a page box with this many lines: the bottom is
+ * fixed at the safe zone, so more lines reach higher. With MAX_PAGE_LINES at
+ * scale 1 this is the highest a style's captions ever go (p5-a3: the trial
+ * centre mark sits between the face zone and this line, lib/edit.ts).
+ */
+export function captionBoxTop(styleName: CaptionStyleName, lines: number, scale = 1): number {
+  const style = CAPTION_STYLES[styleName];
+  const textBottom = CAPTION_LAYOUT.height - marginV(style);
+  return textBottom - lines * style.size * style.line_height * scale - (style.outline + style.shadow);
+}
+
+/**
  * Where a page lands on the frame (estimated from letter widths): bottom-centred
  * between the side margins, bottom edge at the safe zone. Used by the tests and
  * by Gate 4 (Phase 5) as the caption layout check.
@@ -363,12 +378,11 @@ export function estimatePageBox(page: CaptionPage, styleName: CaptionStyleName):
   const style = CAPTION_STYLES[styleName];
   const { width, height, safe } = CAPTION_LAYOUT;
   const textWidth = Math.max(...page.lines.map((l) => lineLength(l, style))) * style.size * style.char_width_em * page.scale;
-  const textHeight = page.lines.length * style.size * style.line_height * page.scale;
   const pad = style.outline + style.shadow;
   const centre = safe.left + (width - safe.left - safe.right) / 2;
   const textBottom = height - marginV(style);
   return {
-    top: Math.round(textBottom - textHeight - pad),
+    top: Math.round(captionBoxTop(styleName, page.lines.length, page.scale)),
     bottom: Math.round(textBottom + pad),
     left: Math.round(centre - textWidth / 2 - pad),
     right: Math.round(centre + textWidth / 2 + pad),

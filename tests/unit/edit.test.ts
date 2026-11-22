@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CAPTION_LAYOUT } from "@/lib/captions";
+import { CAPTION_LAYOUT, CAPTION_STYLES, CAPTION_STYLE_NAMES, estimatePageBox, type CaptionBox } from "@/lib/captions";
 import {
   EDIT_OUTPUT,
   EDIT_OVERLAYS,
@@ -109,10 +109,11 @@ const LABEL =
 const WATERMARK_TAG =
   "drawtext=fontfile=/app/assets/fonts/Poppins-Bold.ttf:text=TRIAL PREVIEW:expansion=none:fontsize=34:fontcolor=white" +
   ":box=1:boxcolor=black@0.5:boxborderw=12:x=w-tw-152:y=262";
-// p4-b3: plus a big, faint "TRIAL PREVIEW" centred in the frame (about 70% of the width, 35% opacity).
+// p4-b3: plus a big, faint (35%) "TRIAL PREVIEW", horizontally centred; p5-a3: 82 px, centred on
+// y 1189, the band between the face zone (1150) and the highest 2-line caption box (≈1228).
 const WATERMARK_CENTRE =
-  "drawtext=fontfile=/app/assets/fonts/Poppins-Bold.ttf:text=TRIAL PREVIEW:expansion=none:fontsize=102:fontcolor=white@0.35" +
-  ":borderw=2:bordercolor=black@0.2:x=(w-tw)/2:y=(h-th)/2";
+  "drawtext=fontfile=/app/assets/fonts/Poppins-Bold.ttf:text=TRIAL PREVIEW:expansion=none:fontsize=82:fontcolor=white@0.35" +
+  ":borderw=2:bordercolor=black@0.2:x=(w-tw)/2:y=1189-th/2";
 const WATERMARK = `${WATERMARK_CENTRE},${WATERMARK_TAG}`;
 const MEASURED = { input_i: -19.43, input_tp: -6.02, input_lra: 3.1, input_thresh: -29.61, target_offset: 0.05 };
 const FMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo";
@@ -167,27 +168,53 @@ describe("videoFilterGraph: b-roll, label, watermark (p4-b2)", () => {
     }
   });
 
-  it("p4-b3: the centred trial watermark is big (≈70% of the width), faint (35%) and inside the safe centre box", () => {
+  // p5-a3 (Rowan, overrides the p4-b3 "middle third, ~70% width"): the big faint centre mark moves
+  // into the lower-middle band, clear of the face (CAPTION_LAYOUT.face_zone) AND the caption box of
+  // every style at its tallest (2 lines), with at least 4 px to spare on both sides.
+  it("p5-a3: the centre trial mark's SAFE box clears the face and every caption style (2 lines), inside the frame and side margins", () => {
     const c = EDIT_OVERLAYS.watermark_centre;
-    expect(c.colour).toBe("white@0.35");
-    // x/y in the filter centre the text box: (w-tw)/2, (h-th)/2.
-    expect(WATERMARK_CENTRE).toContain(":x=(w-tw)/2:y=(h-th)/2");
-    // Text box from the filter's font size and the MEASURED width per px of font size (real
-    // ffmpeg, tests/integration/edit-extras-ffmpeg.test.ts checks the drawn box against these bounds).
-    const [minW, maxW] = c.width_em.map((em) => em * c.size);
-    const height = c.height_em * c.size;
     const W = CAPTION_LAYOUT.width;
     const H = CAPTION_LAYOUT.height;
-    expect(minW).toBeGreaterThanOrEqual(0.62 * W); // about 70% (756 px on 1080)
-    expect(maxW).toBeLessThanOrEqual(0.78 * W);
-    const left = (W - maxW) / 2;
-    const right = (W + maxW) / 2;
-    const top = (H - height) / 2;
-    const bottom = (H + height) / 2;
-    expect(left).toBeGreaterThanOrEqual(CAPTION_LAYOUT.safe.left);
-    expect(right).toBeLessThanOrEqual(W - CAPTION_LAYOUT.safe.right);
-    expect(top).toBeGreaterThanOrEqual(H / 3); // the middle third
-    expect(bottom).toBeLessThanOrEqual((2 * H) / 3);
+    expect(c.colour).toBe("white@0.35"); // still faint
+    const centre = videoFilterGraph("/tmp/job/captions.ass", FONTS, { watermark: true })
+      .split(/,(?=drawtext=)/)
+      .find((f) => f.includes(":x=(w-tw)/2:"))!;
+    expect(centre).toContain(`:fontsize=${c.size}:`);
+    // drawtext's y as written in the REAL filter, worked out for a text height th (h = frame height).
+    const yExpr = centre.match(/:y=([^:,[]+)/)![1];
+    const yAt = (th: number) => {
+      const arithmetic = yExpr.replace(/\bth\b/g, `(${th})`).replace(/\bh\b/g, `(${H})`);
+      expect(arithmetic).toMatch(/^[\d.+\-*/() ]+$/);
+      return Number(new Function(`return (${arithmetic});`)());
+    };
+    // Safe box: the MEASURED width bound (width_em max) and the height bound (height_em, incl. the border).
+    const safeW = c.width_em[1] * c.size;
+    const safeH = c.height_em * c.size;
+    // The y must centre the text on one line whatever its real height, so the real drawn box
+    // (th ≤ safeH, checked with real ffmpeg in tests/integration/edit-extras-ffmpeg.test.ts) sits inside this one.
+    expect(yAt(0) - yAt(safeH)).toBeCloseTo(safeH / 2, 6);
+    const mark = { left: (W - safeW) / 2, right: (W + safeW) / 2, top: yAt(safeH), bottom: yAt(safeH) + safeH };
+    const overlaps = (a: CaptionBox, b: CaptionBox) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+
+    // Inside the frame and the 140 px side margins.
+    expect(mark.left).toBeGreaterThanOrEqual(CAPTION_LAYOUT.safe.left);
+    expect(mark.right).toBeLessThanOrEqual(W - CAPTION_LAYOUT.safe.right);
+    expect(mark.top).toBeGreaterThanOrEqual(0);
+    expect(mark.bottom).toBeLessThanOrEqual(H);
+    // Clear of the face box (full width, y 300-1150), with ≥ 4 px.
+    const face: CaptionBox = { left: 0, right: W, top: CAPTION_LAYOUT.face_zone.top, bottom: CAPTION_LAYOUT.face_zone.bottom };
+    expect(overlaps(mark, face)).toBe(false);
+    expect(mark.top).toBeGreaterThanOrEqual(face.bottom + 4);
+    // Clear of each style's caption box at its tallest: 2 full lines at full size, ≥ 4 px.
+    for (const name of CAPTION_STYLE_NAMES) {
+      const style = CAPTION_STYLES[name];
+      const line = () => [{ text: "W".repeat(style.max_chars_per_line), start_s: 0, end_s: 1, source: "matched" as const, stt_indexes: [0] }];
+      const caption = estimatePageBox({ lines: [line(), line()], start_s: 0, end_s: 1, scale: 1 }, name);
+      expect(overlaps(mark, caption), name).toBe(false);
+      expect(mark.bottom, name).toBeLessThanOrEqual(caption.top - 4);
+    }
+    // Still a big mark (Rowan expects about 55-60% of the width).
+    expect(c.width_em[0] * c.size).toBeGreaterThanOrEqual(0.5 * W);
   });
 
   it("label and watermark sit inside the safe zone, above the caption band, and never overlap", () => {

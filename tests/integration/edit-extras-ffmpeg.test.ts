@@ -15,7 +15,7 @@ import {
   regionAt,
   topLevelBoxes,
 } from "@/tests/helpers/ffmpeg-local";
-import { buildAss } from "@/lib/captions";
+import { CAPTION_LAYOUT, CAPTION_STYLE_NAMES, buildAss, estimatePageBox } from "@/lib/captions";
 import { EDIT_OVERLAYS, buildEditArgs } from "@/lib/edit";
 import { captionFontsDir, runFfmpeg } from "@/lib/edit-flow";
 import { audioFilterGraph, getMusicLibrary } from "@/lib/music";
@@ -231,38 +231,68 @@ describe.skipIf(!FFMPEG)("p4-b2 AI label and trial watermark with real ffmpeg", 
     expect(labelSame).toBeLessThan(1);
   });
 
-  it("p4-b3: the big faint centre 'TRIAL PREVIEW' is drawn only on trial videos, ≈70% wide, inside the safe centre box", () => {
-    // Changed pixels (trial vs not) between the corner tag and the caption band.
+  it("p5-a3: the big faint centre 'TRIAL PREVIEW' is drawn only on trial videos, in the gap between the face and the captions", () => {
+    // Changed pixels (trial vs not) from below the corner tag down to the QA bottom 20% (y 1536).
+    // Both files carry the same captions, so only the centre mark differs here, plus x264 noise:
+    // a few scattered pixels (≤ 11 a row, measured) at the sharp caption edges. The mark is one
+    // solid block of rows (400+ changed pixels each): core rows ≥ 50 px, grown to every touching
+    // row with any change (its faint anti-aliased edges); every row outside it must be noise only.
     const top = 400;
-    const height = 1150 - top;
+    const height = 1536 - top;
     const a = regionAt(out.both, 1, 0, top, 1080, height);
     const b = regionAt(out.label, 1, 0, top, 1080, height);
-    let x0 = 1080, x1 = -1, y0 = 1920, y1 = -1, changed = 0;
+    const rows = new Array<number>(height).fill(0);
+    const xs: [number, number][] = Array.from({ length: height }, () => [1080, -1]);
+    let changed = 0;
     for (let p = 0; p < a.length; p += 3) {
       const d = Math.max(Math.abs(a[p] - b[p]), Math.abs(a[p + 1] - b[p + 1]), Math.abs(a[p + 2] - b[p + 2]));
       if (d <= 8) continue;
       changed += 1;
       const x = (p / 3) % 1080;
-      const y = top + Math.floor(p / 3 / 1080);
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      const r = Math.floor(p / 3 / 1080);
+      rows[r] += 1;
+      xs[r] = [Math.min(xs[r][0], x), Math.max(xs[r][1], x)];
     }
+    const core = rows.flatMap((n, r) => (n >= 50 ? [r] : []));
+    expect(core.length).toBeGreaterThan(0);
+    let r0 = core[0];
+    let r1 = core.at(-1)!;
+    expect(core.length).toBe(r1 - r0 + 1); // ONE block of solid rows
+    while (r0 > 0 && rows[r0 - 1] > 0) r0 -= 1;
+    while (r1 < height - 1 && rows[r1 + 1] > 0) r1 += 1;
+    const noise = Math.max(0, ...rows.filter((_, r) => r < r0 || r > r1));
+    expect(noise).toBeLessThanOrEqual(20);
+    const block = xs.slice(r0, r1 + 1);
+    const x0 = Math.min(...block.map(([lo]) => lo));
+    const x1 = Math.max(...block.map(([, hi]) => hi));
+    const y0 = top + r0;
+    const y1 = top + r1;
     const c = EDIT_OVERLAYS.watermark_centre;
     const width = x1 - x0 + 1;
-    console.info(`[watermark centre] box x ${x0}-${x1} (${width} px = ${(width / c.size).toFixed(2)} em) y ${y0}-${y1}, ${changed} px changed`);
+    console.info(`[watermark centre] box x ${x0}-${x1} (${width} px = ${(width / c.size).toFixed(2)} em) y ${y0}-${y1}, ${changed} px changed, noise ≤ ${noise} px a row elsewhere`);
     expect(changed).toBeGreaterThan(5000);
     expect(width).toBeGreaterThanOrEqual(c.width_em[0] * c.size);
     expect(width).toBeLessThanOrEqual(c.width_em[1] * c.size);
-    expect(width / 1080).toBeGreaterThanOrEqual(0.62);
-    expect(width / 1080).toBeLessThanOrEqual(0.78);
-    expect(x0).toBeGreaterThanOrEqual(140);
-    expect(x1).toBeLessThanOrEqual(1080 - 140);
-    expect(y0).toBeGreaterThanOrEqual(640);
-    expect(y1).toBeLessThanOrEqual(1280);
+    expect(width / 1080).toBeGreaterThanOrEqual(0.5);
+    expect(x0).toBeGreaterThanOrEqual(CAPTION_LAYOUT.safe.left);
+    expect(x1).toBeLessThanOrEqual(CAPTION_LAYOUT.width - CAPTION_LAYOUT.safe.right);
     expect(y1 - y0 + 1).toBeLessThanOrEqual(c.height_em * c.size);
+    // The drawn box lies in the gap: below the face zone, above the highest caption box of any
+    // style at 2 lines (estimatePageBox), with ≥ 4 px on both sides; so it overlaps neither.
+    const captionTop = Math.min(
+      ...CAPTION_STYLE_NAMES.map((name) => {
+        const line = () => [{ text: "W", start_s: 0, end_s: 1, source: "matched" as const, stt_indexes: [0] }];
+        return estimatePageBox({ lines: [line(), line()], start_s: 0, end_s: 1, scale: 1 }, name).top;
+      }),
+    );
+    console.info(`[watermark centre] gap y ${CAPTION_LAYOUT.face_zone.bottom}-${captionTop}`);
+    expect(y0).toBeGreaterThanOrEqual(CAPTION_LAYOUT.face_zone.bottom + 4);
+    expect(y1).toBeLessThanOrEqual(captionTop - 4);
     // Faint: the face shows through (35% white), it is not painted over.
     const mid = pixelAt(out.both, 1, Math.round((x0 + x1) / 2), Math.round((y0 + y1) / 2));
     console.info(`[watermark centre] a pixel near the middle: ${JSON.stringify(mid)}`);
-    // Paid videos: nothing in the centre.
-    expect(meanDiff(regionAt(out.label, 1, 140, 900, 800, 120), regionAt(out.none, 1, 140, 900, 800, 120))).toBeLessThan(1);
+    // Paid videos: nothing in the gap.
+    const gap = (file: string) => regionAt(file, 1, 140, CAPTION_LAYOUT.face_zone.bottom, 800, captionTop - CAPTION_LAYOUT.face_zone.bottom);
+    expect(meanDiff(gap(out.label), gap(out.none))).toBeLessThan(1);
   });
 });

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { CAPTION_LAYOUT, CAPTION_STYLE_NAMES, MAX_PAGE_LINES, captionBoxTop } from "@/lib/captions";
 import { audioFilterGraph, type LoudnormMeasured } from "@/lib/music";
 
 // The ffmpeg command builder for the editor (Phase 4, docs/EDITOR-NOTES.md).
@@ -32,12 +33,18 @@ export const EDIT_OUTPUT = {
   audio_channels: 2,
 } as const;
 
+/** Centre trial mark (p5-a3): safe drawn height per px of font size, and the px kept clear above and below it. */
+const CENTRE_HEIGHT_EM = 0.85;
+const CENTRE_GAP_MARGIN = 4;
+
 /**
- * The label and watermark (1080x1920 pixels). Both sit in the top row of the
- * caption safe zone (lib/captions.ts CAPTION_LAYOUT: below the top 250 px,
- * inside the 140 px side margins), far above the caption band (y 1150-1500),
- * so they never cover captions or the mouth. Label top-left, watermark
- * top-right. Fonts: our bundled Poppins (assets/fonts, OFL).
+ * The label and watermark (1080x1920 pixels). The label and the small trial
+ * tag sit in the top row of the caption safe zone (lib/captions.ts
+ * CAPTION_LAYOUT: below the top 250 px, inside the 140 px side margins), far
+ * above the caption band, so they never cover captions or the mouth. Label
+ * top-left, tag top-right. The big faint trial mark sits in the thin band
+ * between the face zone and the captions (watermark_centre). Fonts: our
+ * bundled Poppins (assets/fonts, OFL).
  */
 export const EDIT_OVERLAYS = {
   /** Shown when ai_label is on (default on; PRODUCT.md "an AI label on every video"). */
@@ -55,19 +62,38 @@ export const EDIT_OVERLAYS = {
     box_colour: "black@0.5", pad: 12, x: 152, y: 262, chars: 13,
   },
   /**
-   * p4-b3: trial videos also get a big, faint "TRIAL PREVIEW" centred in the frame (middle
-   * third, about 70% of the width, 35% opacity), so a screenshot can't crop the corner tag off.
+   * Trial videos also get a big, faint (35%) "TRIAL PREVIEW" across the frame, horizontally
+   * centred, so a screenshot can't crop the corner tag off.
+   * p5-a3 (Rowan; replaces the p4-b3 "middle third, ~70% width"): it sits in the lower-middle
+   * band between the face zone (CAPTION_LAYOUT.face_zone.bottom, y 1150) and the highest
+   * caption box of any style at 2 lines (captionBoxTop: big_words ≈ 1228), with gap_margin px
+   * clear on both sides. The size is the largest whose SAFE height (height_em × size) fits that
+   * band; y is the band's middle (drawtext y = centre - th/2). See CENTRE_MARK below.
    * width_em = [min, max] drawn text width per px of font size, MEASURED with the real ffmpeg
    * + Poppins Bold (tests/integration/edit-extras-ffmpeg.test.ts checks the drawn box);
-   * height_em = a safe upper bound for the drawn height (caps, no descenders).
-   * Measured p4-b3 (ffmpeg 7.1.5): 7.40 em wide, 0.76 em tall incl. the 2 px border, so
-   * size 102 → about 755 px wide (70% of 1080), about 77 px tall.
+   * height_em = a safe upper bound for the drawn height incl. the border (caps, no descenders).
+   * Measured p4-b3 (ffmpeg 7.1.5) at 102 px: 7.40 em wide, 0.76 em tall incl. the 2 px border.
+   * Result (p5-a3): size 82, y centre 1189 → safe box y 1154.2-1223.9; drawn ≈ 607 px wide (56%).
    */
   watermark_centre: {
-    text: "TRIAL PREVIEW", font_file: "Poppins-Bold.ttf", size: 102, colour: "white@0.35",
-    border: 2, border_colour: "black@0.2", width_em: [7.2, 7.6], height_em: 0.85,
+    text: "TRIAL PREVIEW", font_file: "Poppins-Bold.ttf", colour: "white@0.35",
+    border: 2, border_colour: "black@0.2", width_em: [7.2, 7.6], height_em: CENTRE_HEIGHT_EM, gap_margin: CENTRE_GAP_MARGIN,
+    ...centreMark(CENTRE_HEIGHT_EM, CENTRE_GAP_MARGIN),
   },
 } as const;
+
+/**
+ * p5-a3: the centre mark's font size and vertical centre, from the face zone and the caption
+ * box maths (no copied numbers): the band is face_zone.bottom → the highest 2-line caption top.
+ */
+function centreMark(heightEm: number, margin: number): { size: number; y_centre: number } {
+  const bandTop = CAPTION_LAYOUT.face_zone.bottom;
+  const bandBottom = Math.min(...CAPTION_STYLE_NAMES.map((name) => captionBoxTop(name, MAX_PAGE_LINES)));
+  return {
+    size: Math.floor((bandBottom - bandTop - 2 * margin) / heightEm),
+    y_centre: Math.round((bandTop + bandBottom) / 2),
+  };
+}
 
 export type BrollCut = { path: string; start_s: number; duration_s: number };
 export type MusicBed = { path: string };
@@ -157,8 +183,8 @@ function watermarkFilter(fontsDir: string): string {
     `fontcolor=${c.colour}`,
     `borderw=${c.border}`,
     `bordercolor=${c.border_colour}`,
-    "x=(w-tw)/2", // centred: w/h = frame size, tw/th = text size
-    "y=(h-th)/2",
+    "x=(w-tw)/2", // centred across: w = frame width, tw/th = text size
+    `y=${c.y_centre}-th/2`, // centred on the band between the face and the captions (p5-a3)
   ].join(":");
   const w = EDIT_OVERLAYS.watermark;
   const tag = [
