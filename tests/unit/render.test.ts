@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HEYGEN_RETRY_AFTER_MAX_S, createHeygenClient } from "@/lib/heygen";
 import { RENDER } from "@/lib/qa/config";
-import { LOST_RENDER, NOT_APPROVED_FOR_VIDEO, RENDER_UNKNOWN, createPostRender, heygenCallbackUrl, renderVideo } from "@/lib/render";
+import { LOST_RENDER, NOT_APPROVED_FOR_VIDEO, OTHER_SCRIPT_VIDEO, RENDER_UNKNOWN, createPostRender, heygenCallbackUrl, renderVideo } from "@/lib/render";
 import { postRenderResult } from "@/lib/video-store";
 import { BRAND_ID } from "@/tests/helpers/consent-memory";
 import { memorySpendStore } from "@/tests/helpers/spend-memory";
@@ -86,6 +86,19 @@ describe("createPostRender: only an approved script, with a chosen engine and a 
     mem.scripts[0].spoken_text = " ";
     await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow("The script has no spoken text.");
     expect(mem.videos).toHaveLength(0);
+  });
+
+  it("p4-b3 (Q8): v1 already has an active video, then a newer v2 passes → Make video is refused (no second paid render)", async () => {
+    await queuedPostVideo(); // V1 for script v1, queued: the post stays 'approved'
+    mem.scripts.push({ ...mem.scripts[0], id: "30000000-0000-4000-8000-0000000000a2", version: 2, spoken_text: "A rewritten script." });
+    await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow(OTHER_SCRIPT_VIDEO);
+    expect(OTHER_SCRIPT_VIDEO).toBe("This post already has a video for an earlier version of its script. Clear that one first.");
+    expect(mem.videos).toHaveLength(1);
+    // The real store reads the rpc's new answer.
+    expect(postRenderResult({ outcome: "other_script", video_id: mem.videos[0].id }, null)).toEqual({
+      outcome: "other_script",
+      videoId: mem.videos[0].id,
+    });
   });
 
   it("refuses without a chosen engine, or without a ready twin that supports it (never falls back)", async () => {

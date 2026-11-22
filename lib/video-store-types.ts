@@ -66,7 +66,8 @@ export type NewPostVideo = {
   engine: string;
   spokenWords: number;
 };
-export type PostRenderOutcome = { outcome: "created" | "existing" | "not_approved"; videoId: string | null };
+/** other_script (p4-b3, Q8): the post already has an active video for an older script version. */
+export type PostRenderOutcome = { outcome: "created" | "existing" | "other_script" | "not_approved"; videoId: string | null };
 
 export type ClaimResult ="claimed" | "taken" | "busy" | "missing";
 /** adopt_late_render (p4-fix c2): what happened to a HeyGen success that arrived after the claim was cleared. */

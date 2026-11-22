@@ -79,13 +79,18 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
       const rows = videos.filter((v) => v.script_id === scriptId && !["failed", "skipped"].includes(v.status));
       return rows.length ? structuredClone(rows[rows.length - 1]) : null;
     },
-    // Mirrors create_post_render (migration 20261122150000): one JS turn = the per-post lock.
+    // Mirrors create_post_render (migration 20261122180000): one JS turn = the per-post lock;
+    // an active video of ANY script of the post blocks a new one (p4-b3, Q8).
     async createPostVideo(input) {
       const post = posts.find((p) => p.id === input.postId && p.brand_id === input.brandId);
       const latest = scripts.filter((s) => s.post_id === input.postId).sort((a, b) => b.version - a.version)[0];
       if (post?.status !== "approved" || latest?.id !== input.scriptId) return { outcome: "not_approved", videoId: null };
-      const active = videos.filter((v) => v.kind === "post" && v.script_id === input.scriptId && !["failed", "skipped"].includes(v.status));
-      if (active.length) return { outcome: "existing", videoId: active[active.length - 1].id };
+      const postScripts = new Set(scripts.filter((s) => s.post_id === input.postId).map((s) => s.id));
+      const active = videos.filter(
+        (v) => v.kind === "post" && v.script_id !== null && postScripts.has(v.script_id) && !["failed", "skipped"].includes(v.status),
+      );
+      const last = active[active.length - 1];
+      if (last) return { outcome: last.script_id === input.scriptId ? "existing" : "other_script", videoId: last.id };
       const row = await store.insertVideo({
         brand_id: input.brandId,
         script_id: input.scriptId,

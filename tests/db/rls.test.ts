@@ -596,6 +596,7 @@ describe("SF2: customers read only the safe columns of their own post videos", (
     "late_heygen_video_id",
     "edit_run_id",
     "edit_started_at",
+    "post_id", // p4-b3 (Q8): server only like every new column
   ];
   const canSelect = async (role: string, column: string) =>
     (
@@ -1196,7 +1197,13 @@ describe("table privileges for anon and authenticated", () => {
     );
     const seen: Record<string, { anon: boolean; authenticated: boolean; service_role: boolean }> = {};
     for (const { sig, name } of fns.rows) {
-      if (name === "handle_new_user") continue; // trigger function, revoked separately
+      // Trigger functions, revoked from everyone (a trigger fires without EXECUTE; p4-b3 inserts above prove it).
+      if (name === "handle_new_user" || name === "videos_fill_post_id") {
+        for (const role of ["anon", "authenticated"]) {
+          expect((await db.query<{ ok: boolean }>("select has_function_privilege($1, $2, 'EXECUTE') as ok", [role, sig])).rows[0].ok).toBe(false);
+        }
+        continue;
+      }
       const can = async (role: string) =>
         (await db.query<{ ok: boolean }>("select has_function_privilege($1, $2, 'EXECUTE') as ok", [role, sig])).rows[0].ok;
       seen[name] = { anon: await can("anon"), authenticated: await can("authenticated"), service_role: await can("service_role") };
@@ -1446,16 +1453,81 @@ describe("p4-b1: Make video vs late webhook (create_post_render + adopt_late_ren
     });
   });
 
-  it("both functions take the same per-post advisory lock; the index is unique and partial", async () => {
+  it("both functions take the same per-post advisory lock; the index is unique, partial and PER POST (p4-b3, Q8)", async () => {
     const src = async (name: string) =>
       (await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = $1", [name])).rows[0].src;
     const lock = "pg_advisory_xact_lock(hashtext('post_render'), hashtext(";
     expect(await src("create_post_render")).toContain(lock);
     expect(await src("adopt_late_render")).toContain(lock);
-    const index = await db.query<{ def: string }>(
-      "select indexdef as def from pg_indexes where schemaname = 'public' and indexname = 'videos_one_active_post_video'",
+    const index = async (name: string) =>
+      (await db.query<{ def: string }>("select indexdef as def from pg_indexes where schemaname = 'public' and indexname = $1", [name])).rows[0]
+        ?.def;
+    expect(await index("videos_one_active_post_video_per_post")).toMatch(
+      /CREATE UNIQUE INDEX .* \(post_id\) WHERE .*kind = 'post'.*failed.*skipped/,
     );
-    expect(index.rows[0]?.def).toMatch(/CREATE UNIQUE INDEX .* \(script_id\) WHERE .*kind = 'post'.*failed.*skipped/);
+    expect(await index("videos_one_active_post_video")).toBeUndefined(); // the per-script one is replaced
+  });
+
+  // p4-b3 (Q8): a post CAN get a second live script: two overlapping "Run checks" runs, one
+  // passing v1 (post → approved) while the other is still rewriting (lib/qa/script-pipeline.ts
+  // inserts v2 with no post-status guard). Make video for v1, then for v2, must not give the post
+  // two active videos (two paid renders). The guard is now per post (videos.post_id).
+  it("Q8: v1 has an active video, then a newer v2 passes → Make video for v2 is refused (other_script); a raw insert too", async () => {
+    await asRole("service_role", null, async () => {
+      const { post } = await seed(); // post back to approved; V0 cleared (failed)
+      const v1 = (await db.query<{ id: string }>("select id from public.scripts where post_id = $1 and version = 1", [post])).rows[0].id;
+      const first = (await make(post, v1)).rows[0].result;
+      expect(first.outcome).toBe("created");
+      const v2 = (
+        await db.query<{ id: string }>(
+          `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 2, 'Rewritten.', 'passed') returning id`,
+          [post],
+        )
+      ).rows[0].id;
+      expect((await make(post, v2)).rows[0].result).toEqual({ outcome: "other_script", video_id: first.video_id });
+      await expect(
+        db.query(`insert into public.videos (brand_id, script_id, kind, status) values ('${BRAND_A}', $1, 'post', 'queued')`, [v2]),
+      ).rejects.toMatchObject({ code: "23505" });
+      const active = await db.query(
+        "select id from public.videos where post_id = $1 and kind = 'post' and status not in ('failed', 'skipped')",
+        [post],
+      );
+      expect(active.rows).toEqual([{ id: first.video_id }]);
+      await cleanup(post);
+    });
+  });
+
+  it("Q8: videos.post_id is filled from the script (insert and script change); likeness tests have none", async () => {
+    const cols = await db.query<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'videos'",
+    );
+    expect(cols.rows.map((c) => c.column_name)).toContain("post_id");
+    await asRole("service_role", null, async () => {
+      const { post, script, v1 } = await seed();
+      expect((await db.query("select post_id from public.videos where id = $1", [v1])).rows).toEqual([{ post_id: post }]);
+      // A raw insert that forgets post_id still gets it (trigger), so the per-post index always applies.
+      const other = (
+        await db.query<{ id: string }>(
+          `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Other', 'approved') returning id`,
+        )
+      ).rows[0].id;
+      const otherScript = (
+        await db.query<{ id: string }>(`insert into public.scripts (post_id, version, qa_status) values ($1, 1, 'passed') returning id`, [other])
+      ).rows[0].id;
+      await db.query("update public.videos set script_id = $1 where id = $2", [otherScript, v1]);
+      expect((await db.query("select post_id from public.videos where id = $1", [v1])).rows).toEqual([{ post_id: other }]);
+      await db.query("update public.videos set script_id = $1 where id = $2", [script, v1]);
+      const likeness = (
+        await db.query<{ post_id: string | null }>(
+          `insert into public.videos (brand_id, kind, status) values ('${BRAND_A}', 'likeness_test', 'queued') returning post_id`,
+        )
+      ).rows[0];
+      expect(likeness).toEqual({ post_id: null });
+      await db.query("delete from public.videos where kind = 'likeness_test' and brand_id = $1 and script_id is null", [BRAND_A]);
+      await db.query("delete from public.scripts where post_id = $1", [other]);
+      await db.query("delete from public.posts where id = $1", [other]);
+      await cleanup(post);
+    });
   });
 
   it("customers and logged-out visitors can't call create_post_render (or start_edit)", async () => {

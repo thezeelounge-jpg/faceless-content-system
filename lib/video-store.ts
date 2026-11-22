@@ -24,14 +24,14 @@ function toVideo(row: Record<string, unknown> | null): VideoRow | null {
 }
 
 const postRenderAnswer = z.object({
-  outcome: z.enum(["created", "existing", "not_approved"]),
+  outcome: z.enum(["created", "existing", "other_script", "not_approved"]),
   video_id: z.string().nullable(),
 });
 
 /**
  * The create_post_render rpc answer (p4-b1). A unique violation (23505) means
- * a second active video for the script was refused by the index
- * videos_one_active_post_video: the same plain refusal as 'not_approved'.
+ * a second active video for the POST was refused by the index
+ * videos_one_active_post_video_per_post (p4-b3): the same plain refusal as 'not_approved'.
  */
 export function postRenderResult(data: unknown, error: { code?: string; message: string } | null): PostRenderOutcome {
   if (error?.code === "23505") return { outcome: "not_approved", videoId: null };

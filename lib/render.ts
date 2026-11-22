@@ -73,6 +73,9 @@ export const LIKENESS_LINE =
 /** Make video refused: the post is not approved (or moved on, e.g. a late render was adopted). */
 export const NOT_APPROVED_FOR_VIDEO = "Only an approved script can be made into a video.";
 
+/** p4-b3 (Q8): an active video exists for an OLDER script of the same post (admin wording). */
+export const OTHER_SCRIPT_VIDEO = "This post already has a video for an earlier version of its script. Clear that one first.";
+
 export const NEEDS_SPEND_CONFIRM =
   "A real HeyGen render costs money. Tick “I agree to spend” first. Nothing was sent to HeyGen.";
 
@@ -151,6 +154,8 @@ export async function createPostRender(postId: string, deps: { videos: VideoStor
     engine: brand.engine!,
     spokenWords: countWords(script.spoken_text),
   });
+  // p4-b3 (Q8): never hand back a video that says an older script's words.
+  if (made.outcome === "other_script") throw new PlainError(OTHER_SCRIPT_VIDEO);
   if (made.outcome === "not_approved" || !made.videoId) throw new PlainError(NOT_APPROVED_FOR_VIDEO);
   const video = await deps.videos.getVideo(made.videoId);
   if (!video) throw new PlainError("Video not found.");
