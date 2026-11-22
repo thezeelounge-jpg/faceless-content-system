@@ -45,6 +45,9 @@ export type QaReportRow = {
 
 export type PostStatus = "script_review" | "approved" | "team_review" | "needs_you";
 
+/** p5-b1: the finish_script_checks answer. */
+export type FinishChecksOutcome = "done" | "stale" | "moved_on" | "not_found";
+
 /** p5-a: a post may get a new script version only while it is in one of these. */
 export const OPEN_POST_STATUSES = ["planned", "scripting"] as const;
 export const isOpenPostStatus = (status: string) => (OPEN_POST_STATUSES as readonly string[]).includes(status);
@@ -67,7 +70,15 @@ export interface ScriptQaStore {
    */
   insertScriptVersion(row: Omit<StoredScript, "id">, override?: ScriptOverride): Promise<string>;
   updateScript(id: string, patch: Partial<Pick<StoredScript, "qa_status" | "spoken_text">>): Promise<void>;
-  updatePost(id: string, patch: { status: PostStatus; status_reason: string | null }): Promise<void>;
+  /**
+   * p5-b1 (Rowan 7): the checks' verdict for one script (rpc finish_script_checks, post row
+   * locked). Only the post's LATEST version may set its qa_status (when given) and move the post
+   * (and only while it is planned / scripting). 'stale' = a newer version exists: nothing written.
+   */
+  finishChecks(
+    scriptId: string,
+    patch: { qa_status: QaStatus | null; status: PostStatus; status_reason: string | null },
+  ): Promise<FinishChecksOutcome>;
   /**
    * p5-b1 (Rowan 5): the facts insert_script_version decides on, read cheaply BEFORE a Claude
    * rewrite (the post's status; whether it has an active post video = kind post, not failed or
@@ -318,7 +329,8 @@ export async function runGate2(args: {
 // ---------------------------------------------------------------------------
 
 export type ScriptChecksResult = {
-  outcome: PostStatus;
+  /** p5-b1: 'superseded' = a newer script version exists; this run's verdict moved nothing. */
+  outcome: PostStatus | "superseded";
   script: StoredScript;
 };
 
@@ -349,7 +361,9 @@ export async function runScriptChecks(args: {
   if (!gate2.passed) return fail(args, script, gate2.issues, "Pronunciation prep failed");
 
   const status = postStatusAfterChecks(args.brand);
-  await args.store.updatePost(args.postId, { status, status_reason: null });
+  // p5-b1 (Rowan 7): only the post's latest version may move it on (rpc finish_script_checks).
+  const finished = await args.store.finishChecks(script.id, { qa_status: null, status, status_reason: null });
+  if (finished === "stale") return { outcome: "superseded", script };
   return { outcome: status, script };
 }
 
@@ -360,7 +374,8 @@ async function fail(
   teamNote: string,
 ): Promise<ScriptChecksResult> {
   const route = routeFailedScript(args.brand, issues, teamNote);
-  await args.store.updateScript(script.id, { qa_status: route.qa_status });
-  await args.store.updatePost(args.postId, { status: route.post_status, status_reason: route.reason });
+  // p5-b1 (Rowan 7): a newer version exists → nothing is written (not this row, not the post).
+  const finished = await args.store.finishChecks(script.id, { qa_status: route.qa_status, status: route.post_status, status_reason: route.reason });
+  if (finished === "stale") return { outcome: "superseded", script };
   return { outcome: route.post_status, script: { ...script, qa_status: route.qa_status } };
 }

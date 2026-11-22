@@ -8,7 +8,7 @@
 //   was saved but not checked yet);
 // - the latest version is "passed" with no spoken_text: Gate 2 didn't finish.
 // Both are retryable while the post is still "planned" or "scripting" (the
-// same statuses lib/qa/store.ts updatePost is allowed to move on).
+// same statuses lib/qa/store.ts finishChecks / rpc finish_script_checks is allowed to move on).
 
 type ScriptVersion = { id: string; version: number; qa_status: string; spoken_text: string | null };
 

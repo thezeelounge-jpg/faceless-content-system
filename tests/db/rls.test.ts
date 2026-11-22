@@ -1683,6 +1683,86 @@ describe("p5-a: insert_script_version (no rewrites after scripting; audited admi
   });
 });
 
+// p5-b1 (Rowan 7): only the post's LATEST script version may set its qa_status and move the post.
+describe("p5-b1: finish_script_checks (the checks' verdict counts only for the latest version)", () => {
+  const finish = (script: string, qa: string | null, status: string, reason: string | null = null) =>
+    db.query<{ result: { outcome: string } }>("select public.finish_script_checks($1, $2, $3, $4) as result", [script, qa, status, reason]);
+  const seed = async (postStatus: string, versions: number[]) => {
+    const post = (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Latest only', $1) returning id`,
+        [postStatus],
+      )
+    ).rows[0].id;
+    const ids: string[] = [];
+    for (const v of versions) {
+      ids.push(
+        (
+          await db.query<{ id: string }>(
+            `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, $2, 'Hi.', 'pending') returning id`,
+            [post, v],
+          )
+        ).rows[0].id,
+      );
+    }
+    return { post, ids };
+  };
+  const state = async (post: string) => ({
+    post: (await db.query("select status, status_reason from public.posts where id = $1", [post])).rows[0],
+    scripts: (await db.query("select version, qa_status from public.scripts where post_id = $1 order by version", [post])).rows,
+  });
+  const cleanup = (post: string) => db.query("delete from public.posts where id = $1", [post]);
+
+  it("the latest version: sets its qa_status and moves a scripting post → 'done'", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, ids } = await seed("scripting", [1, 2]);
+      expect((await finish(ids[1], "passed", "script_review")).rows[0].result).toEqual({ outcome: "done" });
+      expect(await state(post)).toEqual({
+        post: { status: "script_review", status_reason: null },
+        scripts: [{ version: 1, qa_status: "pending" }, { version: 2, qa_status: "passed" }],
+      });
+      await cleanup(post);
+    });
+  });
+
+  it("an older version while a newer one exists → 'stale': nothing written (not the post, not either script)", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, ids } = await seed("scripting", [1, 2]);
+      const before = await state(post);
+      expect((await finish(ids[0], "team_review", "team_review", "Script QA failed")).rows[0].result).toEqual({ outcome: "stale" });
+      expect((await finish(ids[0], null, "approved")).rows[0].result).toEqual({ outcome: "stale" });
+      expect(await state(post)).toEqual(before);
+      await cleanup(post);
+    });
+  });
+
+  it("a post that already moved on → 'moved_on': the script row is updated, the post is not", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, ids } = await seed("approved", [1]);
+      expect((await finish(ids[0], "failed", "needs_you", "Please look")).rows[0].result).toEqual({ outcome: "moved_on" });
+      expect(await state(post)).toEqual({ post: { status: "approved", status_reason: null }, scripts: [{ version: 1, qa_status: "failed" }] });
+      await cleanup(post);
+    });
+  });
+
+  it("an unknown script → 'not_found'; a post status that is not a check outcome is refused", async () => {
+    await asRole("service_role", null, async () => {
+      expect((await finish("30000000-0000-4000-8000-00000000beef", null, "approved")).rows[0].result).toEqual({ outcome: "not_found" });
+      const { post, ids } = await seed("scripting", [1]);
+      await expect(finish(ids[0], null, "ready")).rejects.toThrow(/not a script-check outcome/);
+      await cleanup(post);
+    });
+  });
+
+  it("customers and logged-out visitors can't call finish_script_checks", async () => {
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(finish("30000000-0000-4000-8000-00000000beef", null, "approved")).rejects.toThrow(/permission denied/);
+      });
+    }
+  });
+});
+
 // p5-a2 (Gate 3 auto-fix): one QA re-render per post video, our cost. Under the same per-post lock
 // as create_post_render / adopt_late_render: the checked video (audio_qa, attempt 1, newest script)
 // becomes failed and ONE new queued video is made: attempt 2, counts_toward_plan = false,
@@ -1779,7 +1859,7 @@ describe("p5-a2: create_qa_rerender (one automatic re-render, never counted)", (
 // CREATE OR REPLACE / DROP ... IF EXISTS, so applying them again changes nothing. A fresh
 // database gets the whole chain, then each re-runnable file again, and the schema must match.
 describe("p5-a: re-runnable migrations leave the same schema", () => {
-  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000", "20261122220000"];
+  const RERUNNABLE = ["20261122190000", "20261122200000", "20261122210000", "20261122220000", "20261122230000"];
   const FILES = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
   const sqlOf = (version: string) => {
     const file = FILES.find((f) => f.startsWith(`${version}_`));

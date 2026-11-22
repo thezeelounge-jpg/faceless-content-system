@@ -21,7 +21,7 @@ import {
 } from "@/lib/posts";
 import { canRunChecks, latestScript } from "@/lib/qa/can-run-checks";
 import { rewriteAnywayInput, rewriteScriptAnyway } from "@/lib/qa/script-override";
-import { runScriptChecks, type PostStatus } from "@/lib/qa/script-pipeline";
+import { runScriptChecks, type ScriptChecksResult } from "@/lib/qa/script-pipeline";
 import { createQaStore } from "@/lib/qa/store";
 import { maxSecondsFor, writeScriptForPost } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -77,11 +77,13 @@ export async function planNextFourWeeks(brandId: string, _prev: ActionState): Pr
 }
 
 /** One sentence for where the post went after the checks. */
-const CHECK_OUTCOME: Record<PostStatus, string> = {
+const CHECK_OUTCOME: Record<ScriptChecksResult["outcome"], string> = {
   script_review: "Checked: ready for script review.",
   approved: "Checked and approved.",
   team_review: "It failed the checks after one rewrite and is in the team queue.",
   needs_you: "It failed the checks after one rewrite; the client sees “Needs you”.",
+  // p5-b1 (Rowan 7): a newer version of the script exists; it is checked on its own.
+  superseded: "A newer version of this script exists, so this check changed nothing. Reload the page.",
 };
 
 /** "Write script" for one planned post: Claude (MAIN) writes it, our code checks the length, we save version 1, then Gates 1 and 2 run. */

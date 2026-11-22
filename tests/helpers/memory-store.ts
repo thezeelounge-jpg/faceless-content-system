@@ -47,8 +47,16 @@ export function memoryStore(): MemoryStore {
       if (!script) throw new Error(`no script ${id}`);
       Object.assign(script, patch);
     },
-    async updatePost(id, patch) {
-      store.posts.set(id, { ...patch });
+    // Mirrors rpc finish_script_checks (migration 20261122230000). A post with no entry is still planned.
+    async finishChecks(scriptId, patch) {
+      const script = store.scripts.find((s) => s.id === scriptId);
+      if (!script) return "not_found";
+      if (store.scripts.some((s) => s.post_id === script.post_id && s.version > script.version)) return "stale";
+      if (patch.qa_status !== null) script.qa_status = patch.qa_status;
+      const status = store.posts.get(script.post_id)?.status ?? "planned";
+      if (!(OPEN_POST_STATUSES as readonly string[]).includes(status)) return "moved_on";
+      store.posts.set(script.post_id, { status: patch.status, status_reason: patch.status_reason });
+      return "done";
     },
     // p5-b1: the facts insert_script_version decides on (a post with no entry is still planned).
     async getRewriteState(postId) {
