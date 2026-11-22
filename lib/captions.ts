@@ -74,8 +74,10 @@ export const CAPTION_STYLES: Record<CaptionStyleName, CaptionStyle> = {
     highlight_active_word: true, max_chars_per_line: 15, max_words_per_page: 6, char_width_em: 0.52, line_height: 1.2,
   },
   small_box: {
+    // Opaque box: libass draws one box per line and the two overlap; a
+    // see-through box showed the overlap as a darker stripe (p4-artifacts).
     font: "Poppins Bold", font_file: "Poppins-Bold.ttf", size: 60, uppercase: false, primary: "#FFFFFF",
-    outline_colour: "#000000", outline_alpha: 0x40, back_colour: "#000000", border_style: 3, outline: 14, shadow: 0,
+    outline_colour: "#141414", outline_alpha: 0, back_colour: "#000000", border_style: 3, outline: 14, shadow: 0,
     highlight_active_word: false, max_chars_per_line: 20, max_words_per_page: 10, char_width_em: 0.58, line_height: 1.2,
   },
   minimal: {

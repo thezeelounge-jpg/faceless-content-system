@@ -272,6 +272,12 @@ describe("buildAss", () => {
     expect(CAPTION_STYLES.small_box.border_style).toBe(3); // the box
   });
 
+  it("box styles use an opaque box (libass draws one box per line; see-through boxes overlap as a dark stripe)", () => {
+    for (const name of CAPTION_STYLE_NAMES) {
+      if (CAPTION_STYLES[name].border_style === 3) expect(CAPTION_STYLES[name].outline_alpha).toBe(0);
+    }
+  });
+
   it("big_words: one event per word, the active word in the brand colour", () => {
     const { events } = parseAss(buildAss({ displayText: script.display_text, transcript, brandColour: "#FF5A1F" }));
     expect(events).toHaveLength(script.display_text.split(" ").length);
