@@ -207,6 +207,38 @@ export function createVideoStore(): VideoStore {
   };
 }
 
+/** What the admin video pages show (columns named; server only, after requireAdmin). */
+export type AdminVideoSummary = {
+  id: string;
+  brand_id: string;
+  kind: string;
+  status: string;
+  engine: string | null;
+  heygen_video_id: string | null;
+  late_heygen_video_id: string | null;
+  error: string | null;
+  created_at: string;
+};
+const ADMIN_VIDEO_COLUMNS = "id, brand_id, kind, status, engine, heygen_video_id, late_heygen_video_id, error, created_at";
+
+/** Admin pages only (call after requireAdmin). */
+export async function getAdminVideo(id: string): Promise<AdminVideoSummary | null> {
+  const { data, error } = await createAdminClient().from("videos").select(ADMIN_VIDEO_COLUMNS).eq("id", id).maybeSingle();
+  if (error) fail("load video", error);
+  return (data as AdminVideoSummary | null) ?? null;
+}
+
+/** The newest videos, for the admin Videos list (call after requireAdmin). */
+export async function listAdminVideos(limit = 50): Promise<AdminVideoSummary[]> {
+  const { data, error } = await createAdminClient()
+    .from("videos")
+    .select(ADMIN_VIDEO_COLUMNS)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) fail("list videos", error);
+  return (data as AdminVideoSummary[] | null) ?? [];
+}
+
 /** The PRIVATE videos bucket. Browsers only ever get signed, short-lived URLs. */
 export function createVideoFiles(): VideoFiles {
   const bucket = createAdminClient().storage.from(VIDEO_BUCKET);
