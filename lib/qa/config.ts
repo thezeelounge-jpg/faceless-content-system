@@ -102,8 +102,12 @@ export const TWIN_POLL_MAX_S = Array.from({ length: TWIN_POLL.max_attempts - 1 }
  * the limit leaves room for a slow machine. The task's maxDuration is longer.
  */
 export const EDIT = {
-  /** ffmpeg is stopped after this long. */
+  /** ffmpeg (the final encode) is stopped after this long. */
   ffmpeg_timeout_s: 900,
+  /** p4-b2: loudness pass 1 (audio only, decodes far faster than real time). */
+  loudness_timeout_s: 90,
+  /** p4-b2: ffprobe for the raw video's length. */
+  probe_timeout_s: 30,
   /** trigger/edit-video.ts maxDuration (seconds of compute); Trigger.dev stops the run after this. */
   task_max_duration_s: 1800,
   /**
@@ -120,6 +124,55 @@ export const EDIT = {
   storage_timeout_s: 120,
   storage_max_attempts: 3,
   storage_backoff_ms: 2000,
+} as const;
+
+/**
+ * B-roll cut-ins (Phase 4 part B, lib/broll.ts planBroll). PRODUCT.md "Video
+ * formats" + QA-SPEC Gate 4: each cut-in 1.5 to 3 s, 2 to 4 of them when they
+ * fit, total coverage talking ≤ 25% / story ≤ 60% of the video, never during
+ * the hook or the call to action (the face is on screen there).
+ */
+export const BROLL = {
+  min_cut_s: 1.5,
+  max_cut_s: 3,
+  /** Wanted length of one cut-in; shortened (never below min_cut_s) to fit. */
+  target_cut_s: 2.5,
+  min_cuts: 2,
+  max_cuts: 4,
+  /** Share of the whole video that b-roll may cover, per post format. */
+  max_coverage: { talking: 0.25, story: 0.6 },
+  /** The face comes back for at least this long between two cut-ins. */
+  min_gap_s: 0.5,
+} as const;
+
+/**
+ * Music bed under the voice (lib/music.ts). Beds are prepared at about -14
+ * LUFS; bed_gain_db turns them down, and sidechaincompress (the voice is the
+ * sidechain) ducks them further while someone speaks. QA-SPEC Gate 4: the
+ * music stem must be at least 15 dB quieter than the voice stem.
+ */
+export const MUSIC = {
+  bed_gain_db: -22,
+  fade_in_s: 0.5,
+  fade_out_s: 1.5,
+  /** sidechaincompress (ffmpeg 7.1 `-h filter=sidechaincompress`): threshold is linear 0.000976563..1. */
+  duck: { threshold: 0.02, ratio: 8, attack_ms: 20, release_ms: 400 },
+  /** QA-SPEC Gate 4. */
+  min_voice_over_music_db: 15,
+} as const;
+
+/**
+ * Final mix loudness (QA-SPEC Gate 4: -14 LUFS ±1.5, true peak ≤ -1 dBTP; we
+ * aim stricter: ±1). Two-pass loudnorm: pass 1 measures with these targets,
+ * pass 2 applies the measured values with linear=true. Target TP is -1.5 so
+ * the AAC encode keeps 0.5 dB of headroom under the -1 dBTP limit.
+ */
+export const LOUDNESS = {
+  target_i: -14,
+  target_tp: -1.5,
+  target_lra: 11,
+  tolerance_lu: 1,
+  max_true_peak_db: -1,
 } as const;
 
 /**

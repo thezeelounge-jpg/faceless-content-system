@@ -1,0 +1,20 @@
+{
+  "note": "Mock B-roll catalogue (MOCK_PEXELS). Clips are made by scripts/make-fixtures.sh from ffmpeg colour sources (ours, CC0). keywords: lowercase search word -> clip ids, best first. 'default' is used when no keyword matches.",
+  "clips": {
+    "cafe-green": { "file": "cafe-green.mp4", "width": 720, "height": 1280, "duration_s": 3.5, "colour": "#1E8C3A" },
+    "cafe-blue": { "file": "cafe-blue.mp4", "width": 1080, "height": 1920, "duration_s": 3.2, "colour": "#1F4FD8" },
+    "phone-magenta": { "file": "phone-magenta.mp4", "width": 540, "height": 960, "duration_s": 4, "colour": "#C2187A" },
+    "city-orange": { "file": "city-orange.mp4", "width": 640, "height": 1136, "duration_s": 3, "colour": "#E8730C" }
+  },
+  "keywords": {
+    "coffee shop": ["cafe-green", "cafe-blue"],
+    "cafe": ["cafe-green", "cafe-blue"],
+    "coffee": ["cafe-blue", "cafe-green"],
+    "phone": ["phone-magenta"],
+    "whatsapp": ["phone-magenta"],
+    "message": ["phone-magenta"],
+    "city": ["city-orange"],
+    "business": ["city-orange", "cafe-blue"],
+    "default": ["city-orange", "cafe-blue", "phone-magenta", "cafe-green"]
+  }
+}

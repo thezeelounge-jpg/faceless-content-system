@@ -19,6 +19,15 @@ export function isMockStt(): boolean {
   return process.env.MOCK_STT?.trim() !== "false";
 }
 
+/**
+ * B-roll search (Pexels, Phase 4 part B) follows the same rule. In this phase
+ * there is no real client at all: mock = local fixture clips; "false" = a
+ * plain "not set up yet" error (lib/broll.ts).
+ */
+export function isMockPexels(): boolean {
+  return process.env.MOCK_PEXELS?.trim() !== "false";
+}
+
 /** Claude follows the same rule: sample answers, no API calls, unless exactly "false". */
 export function isMockClaude(): boolean {
   return process.env.MOCK_CLAUDE?.trim() !== "false";
