@@ -124,6 +124,15 @@ export const EDIT = {
   storage_timeout_s: 120,
   storage_max_attempts: 3,
   storage_backoff_ms: 2000,
+  /**
+   * p5-a: "Clean up old edit files" removes a run's final/<brand>/<video>/runs/<run>.mp4 only
+   * when the row does not point at it, the run holds no claim, and the file is older than this.
+   * 6 hours: far beyond a run's life (2 attempts × task_max_duration_s plus retries), so no live
+   * run can still be writing or promoting it. Not a QA threshold (a safety wait).
+   */
+  stray_run_min_age_s: 21_600,
+  /** p5-a: the cleanup looks at this many edited videos per press (newest edits first). */
+  stray_run_videos_per_pass: 200,
 } as const;
 
 /**

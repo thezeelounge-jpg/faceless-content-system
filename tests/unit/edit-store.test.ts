@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createEditFiles, type EditBucket } from "@/lib/edit-store";
+import { createEditFiles, createRunFileStorage, type EditBucket } from "@/lib/edit-store";
 import { EDIT } from "@/lib/qa/config";
 
 // p4-b1 (QA SF4): the edit task's storage download / upload have a per-attempt
@@ -23,6 +23,32 @@ function fakeBucket(over: Partial<EditBucket>): EditBucket {
 }
 
 const fast = () => ({ sleep: vi.fn(async (_ms: number) => {}), random: () => 0.5, timeoutMs: 30 });
+
+describe("p5-a cleanup storage (list + remove, same timeout + retry)", () => {
+  it("lists a folder (age from updated_at, else created_at), retries a 503, removes one path", async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce(err(503))
+      .mockResolvedValueOnce(
+        ok([
+          { name: "run_a.mp4", updated_at: "2026-11-22T00:00:00Z" },
+          { name: "run_b.mp4", updated_at: null, created_at: "2026-11-21T00:00:00Z" },
+          { name: "odd" },
+        ]),
+      );
+    const remove = vi.fn(async (_paths: string[]) => ok([]));
+    const storage = createRunFileStorage({ list, remove }, fast());
+    expect(await storage.list("final/b/v/runs")).toEqual([
+      { name: "run_a.mp4", updated_at: "2026-11-22T00:00:00Z" },
+      { name: "run_b.mp4", updated_at: "2026-11-21T00:00:00Z" },
+      { name: "odd", updated_at: null },
+    ]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenCalledWith("final/b/v/runs", { limit: 1000 });
+    await storage.remove("final/b/v/runs/run_a.mp4");
+    expect(remove).toHaveBeenCalledWith(["final/b/v/runs/run_a.mp4"]);
+  });
+});
 
 describe("edit storage: timeout + bounded retry", () => {
   it("a hung download times out (the signal is aborted) and is retried, then gives up after the attempt limit", async () => {
