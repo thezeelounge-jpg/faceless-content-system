@@ -185,6 +185,73 @@ export const LOUDNESS = {
 } as const;
 
 /**
+ * Gate 3: Audio and pronunciation QA (p5-a2, lib/qa/audio-checks.ts, lib/qa/audio-gate.ts).
+ * Starting values from QA-SPEC; calibrate on the first real videos.
+ */
+export const AUDIO_QA = {
+  /** Highest word error rate allowed, per brands.language (speech-to-text is less reliable in Roman Urdu / Hinglish). */
+  max_wer: { en: 0.08, roman_urdu: 0.15, hinglish: 0.15 },
+  /** Key terms (brand, person, offers, CTA words, dictionary) heard wrong after Claude's same-sound check. */
+  max_key_term_mismatches: 0,
+  /** The longest silence allowed inside speech (word gaps and ffmpeg silencedetect). */
+  max_silence_s: 1.0,
+  /** silencedetect: quieter than this counts as silence. */
+  silence_noise_db: -40,
+  /** The real duration may differ from scripts.est_seconds by at most this share. */
+  duration_tolerance: 0.15,
+  /**
+   * Clipping (ffmpeg astats, whole file): the loudest sample at or above clip_peak_dbfs AND
+   * reached at least clip_min_peak_count times (flat tops). A clean loud voice peaks once or twice.
+   */
+  clip_peak_dbfs: -0.1,
+  clip_min_peak_count: 8,
+  /** One automatic fix per gate: at most this many QA re-renders of a post video (SQL create_qa_rerender holds the same number). */
+  max_rerenders: 1,
+  /** ffmpeg measuring the raw audio is stopped after this long. */
+  measure_timeout_s: 120,
+} as const;
+
+/**
+ * Gate 4: Technical QA (p5-a2, lib/qa/technical-checks.ts, lib/qa/technical-gate.ts). ffprobe +
+ * ffmpeg filters, no AI. The music rule reuses MUSIC.min_voice_over_music_db; b-roll reuses BROLL.
+ */
+export const TECH_QA = {
+  width: 1080,
+  height: 1920,
+  fps: 30,
+  video_codec: "h264",
+  pix_fmt: "yuv420p",
+  audio_codec: "aac",
+  audio_rate: 48000,
+  /** Duration ≤ plan max_seconds_per_video + this. */
+  duration_slack_s: 1,
+  loudness_target_lufs: -14,
+  loudness_tolerance_lu: 1.5,
+  max_true_peak_dbtp: -1,
+  /** blackdetect: a frame darker than this share of full scale is black; reported from black_report_s, fails above max_black_s. */
+  black_pix_th: 0.1,
+  black_report_s: 0.1,
+  max_black_s: 0.5,
+  /** freezedetect: frames closer than freeze_noise_db count as the same; reported from freeze_report_s, fails above max_freeze_s. */
+  freeze_noise_db: -60,
+  freeze_report_s: 0.5,
+  max_freeze_s: 1.5,
+  /** Each caption word starts within this of its speech-to-text timing. */
+  caption_timing_tolerance_s: 0.15,
+  caption_max_lines: 2,
+  /** Captions stay out of the top 12%, bottom 20% and right 12% of the frame. */
+  safe_zone: { top: 0.12, bottom: 0.2, right: 0.12 },
+  /** File size: under this many MB per 60 s of video (proportional). */
+  max_mb_per_60s: 100,
+  /** b-roll cut lengths are compared with this slack (ffmpeg rounds times to milliseconds). */
+  broll_slack_s: 0.01,
+  /** One automatic fix per gate: the edit is rebuilt at most this many times. */
+  max_rebuilds: 1,
+  /** ffmpeg measuring the final file is stopped after this long. */
+  measure_timeout_s: 300,
+} as const;
+
+/**
  * brands.words_per_second: the rolling average of the last 10 real post
  * renders (words in spoken_text / real duration). Samples outside these
  * bounds are ignored as absurd (a broken duration, an empty script).
