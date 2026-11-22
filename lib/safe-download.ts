@@ -1,6 +1,9 @@
 import "server-only";
 import { promises as dnsPromises } from "node:dns";
+import type { IncomingMessage } from "node:http";
+import https from "node:https";
 import { isIP } from "node:net";
+import { Readable } from "node:stream";
 import { PlainError } from "@/lib/plain-error";
 
 // A careful downloader for files whose link comes from outside (QA MUST FIX 1:
@@ -13,21 +16,40 @@ import { PlainError } from "@/lib/plain-error";
 //   3. DNS: every address the host resolves to must be public. Private,
 //      loopback, link-local, CGNAT, ULA, unspecified, multicast, IPv4-mapped
 //      versions of those and cloud metadata addresses are refused.
-//   4. fetch with redirect: "manual"; at most `maxRedirects` hops.
+//   4. One GET, redirects NOT followed (we follow them ourselves); at most
+//      `maxRedirects` hops.
+//   5. The IP is pinned (p4-fix b, DNS rebinding): the default transport is
+//      node:https whose socket `lookup` is createPinnedLookup. At connect
+//      time it resolves the host once, refuses if ANY address is blocked and
+//      hands the socket only the addresses it just checked, so the socket
+//      cannot reach an address that was not validated. TLS servername stays
+//      the hostname (the certificate is checked against the host).
+//      `agent: false`: a fresh socket per hop. No extra package needed.
 // Then: a 2xx answer with a video/* content type, a byte cap checked on
 // Content-Length AND while streaming, and one timeout for the whole download.
-// Errors are plain and never contain the URL.
-//
-// Known limit: fetch resolves DNS again itself, so a host could in theory
-// answer differently a moment later (DNS rebinding). The exact-host allowlist
-// (HeyGen's own file host) is the main guard; pinning the address would need
-// the undici package as a new dependency (not added).
+// Errors are plain and never contain the URL. A host refusal logs one line:
+// `[safe-download] refused host=<host> code=<code>` (never the path or query).
 
 export type ResolvedAddress = { address: string; family: number };
 export type Resolver = (hostname: string) => Promise<ResolvedAddress[]>;
 
+/** Node's socket `lookup` option (same shape as dns.lookup). */
+export type PinnedLookup = NonNullable<https.RequestOptions["lookup"]>;
+
+export type TransportInit = {
+  method: "GET";
+  redirect: "manual";
+  signal: AbortSignal;
+  headers: Record<string, string>;
+  /** The socket must connect only to the address this hands back. */
+  lookup: PinnedLookup;
+};
+/** One request, no redirects followed. fetch-shaped so tests can pass a fake. */
+export type Transport = (url: string, init: TransportInit) => Promise<Response>;
+
 export type SafeDownloadOptions = {
-  fetch: typeof fetch;
+  /** Default: node:https with the pinned lookup (createHttpsTransport). Tests pass a fake. */
+  transport?: Transport;
   /** Tests pass a fake. Default: node:dns lookup with all addresses. */
   resolve: Resolver;
   /** Exact hosts, or ".suffix" entries (dot boundary). */
@@ -181,6 +203,99 @@ async function checkDns(url: URL, resolve: Resolver): Promise<void> {
   if (!addresses.length || addresses.some((a) => isBlockedAddress(a.address))) throw PRIVATE();
 }
 
+/**
+ * The IP pin (p4-fix b, DNS rebinding). Given to node:https as the socket's
+ * `lookup`, so it runs at connect time on every hop: it resolves the host
+ * ONCE, refuses if ANY address is blocked, and hands the socket only the
+ * addresses it just checked. The socket cannot connect anywhere else, even if
+ * the host answers differently a moment later.
+ */
+export function createPinnedLookup(resolve: Resolver): PinnedLookup {
+  const lookup = (hostname: string, options: { all?: boolean } | number | undefined, callback: (...args: unknown[]) => void) => {
+    const all = typeof options === "object" && options !== null && options.all === true;
+    resolve(hostname).then(
+      (addresses) => {
+        if (!addresses.length || addresses.some((a) => isBlockedAddress(a.address))) return callback(PRIVATE());
+        const checked = addresses.map((a) => ({ address: a.address, family: a.family }));
+        if (all) callback(null, checked);
+        else callback(null, checked[0].address, checked[0].family);
+      },
+      () => callback(refuse("network", "Could not look up the video host. It will be tried again.", true)),
+    );
+  };
+  return lookup as unknown as PinnedLookup;
+}
+
+const NO_BODY = new Set([204, 205, 304]);
+
+/**
+ * The default transport: one node:https GET (no redirects followed) whose
+ * socket uses the pinned lookup. TLS `servername` is the hostname, so the
+ * certificate is still checked against the host, not the IP. `agent: false`
+ * means a fresh socket every hop (no pooled socket from another lookup).
+ * `request` is injectable so tests never open a socket.
+ */
+export type HttpsRequest = (
+  options: https.RequestOptions,
+  callback: (res: IncomingMessage) => void,
+) => ReturnType<typeof https.request>;
+
+export function createHttpsTransport(request: HttpsRequest = (options, callback) => https.request(options, callback)): Transport {
+  return (raw, init) =>
+    new Promise<Response>((resolve, reject) => {
+      const url = new URL(raw);
+      let req: ReturnType<typeof https.request>;
+      try {
+        req = request(
+          {
+            protocol: "https:",
+            hostname: url.hostname,
+            port: 443,
+            path: `${url.pathname}${url.search}`,
+            method: init.method,
+            headers: init.headers,
+            lookup: init.lookup,
+            servername: url.hostname,
+            agent: false,
+            signal: init.signal,
+          },
+          (res) => {
+            try {
+              const status = res.statusCode ?? 0;
+              if (status < 200 || status > 599) throw new Error("unexpected status");
+              const headers = new Headers();
+              const rawHeaders = res.rawHeaders ?? [];
+              for (let i = 0; i + 1 < rawHeaders.length; i += 2) headers.append(rawHeaders[i], rawHeaders[i + 1]);
+              const body = NO_BODY.has(status) ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>);
+              if (!body) res.resume();
+              resolve(new Response(body, { status, headers }));
+            } catch (error) {
+              res.destroy();
+              reject(error);
+            }
+          },
+        );
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      req.on("error", reject);
+      req.end();
+    });
+}
+
+/** One server log line for a refused download: host and code only, never the URL, path or query. */
+function logRefusal(raw: string, error: SafeDownloadError): void {
+  let host: string;
+  try {
+    host = new URL(raw).hostname;
+  } catch {
+    host = "unparseable";
+  }
+  const safeHost = host.replace(/[^a-zA-Z0-9.\-:[\]]/g, "?").slice(0, 253) || "none";
+  console.warn(`[safe-download] refused host=${safeHost} code=${error.code}`);
+}
+
 // ---------------------------------------------------------------------------
 // The download
 // ---------------------------------------------------------------------------
@@ -243,14 +358,40 @@ function mediaType(header: string | null): string {
 }
 
 export async function safeDownload(raw: string, opts: SafeDownloadOptions): Promise<{ bytes: Uint8Array; contentType: string }> {
+  // The link being checked right now (first link, then each redirect), so a
+  // refusal logs the host that was actually refused.
+  const current = { raw };
+  try {
+    return await downloadHops(raw, opts, current);
+  } catch (error) {
+    if (error instanceof SafeDownloadError && HOST_REFUSALS.has(error.code)) logRefusal(current.raw, error);
+    throw error;
+  }
+}
+
+const HOST_REFUSALS = new Set<SafeDownloadCode>(["bad_url", "not_allowed", "private_address"]);
+
+async function downloadHops(
+  raw: string,
+  opts: SafeDownloadOptions,
+  current: { raw: string },
+): Promise<{ bytes: Uint8Array; contentType: string }> {
   const signal = AbortSignal.timeout(opts.timeoutMs);
+  const transport = opts.transport ?? createHttpsTransport();
   let url = checkUrl(raw, opts.allowedHosts);
   for (let hop = 0; ; hop++) {
     await checkDns(url, opts.resolve);
     let response: Response;
     try {
-      response = await opts.fetch(url.href, { method: "GET", redirect: "manual", signal, headers: { Accept: "video/*" } });
-    } catch {
+      response = await transport(url.href, {
+        method: "GET",
+        redirect: "manual",
+        signal,
+        headers: { Accept: "video/*" },
+        lookup: createPinnedLookup(opts.resolve),
+      });
+    } catch (error) {
+      if (error instanceof SafeDownloadError) throw error;
       if (signal.aborted) throw timeoutError();
       throw refuse("network", "Could not reach the video host. It will be tried again.", true);
     }
@@ -266,6 +407,7 @@ export async function safeDownload(raw: string, opts: SafeDownloadOptions): Prom
       } catch {
         throw BAD_URL();
       }
+      current.raw = next;
       url = checkUrl(next, opts.allowedHosts);
       continue;
     }

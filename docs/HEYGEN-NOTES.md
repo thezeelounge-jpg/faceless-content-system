@@ -84,10 +84,11 @@ Context7 (`/websites/developers_heygen`), read only; no request to any HeyGen ho
 1. https only; no `user:pass@`; no port other than 443; no literal IP host.
 2. Host on the allowlist (exact host, or an explicit `.suffix` entry on a dot boundary; none used today).
 3. DNS (`node:dns` lookup, all addresses; tests inject a fake): refuse if ANY address is private (10/8, 172.16/12, 192.168/16), loopback (127/8, ::1), link-local (169.254/16, fe80::/10), CGNAT (100.64/10), ULA (fc00::/7), unspecified (0.0.0.0/8, ::), multicast/reserved, IPv4-mapped/NAT64/6to4 forms of these, or metadata (169.254.169.254, fd00:ec2::254, 100.100.100.200). IPv6 outside 2000::/3 is refused.
-4. `redirect: "manual"`, at most `download_max_redirects` = 3 hops.
+4. Redirects are never followed by the transport (we follow them), at most `download_max_redirects` = 3 hops.
 5. 2xx with a `video/*` content type; `download_max_bytes` = 200 MB checked on Content-Length and while streaming (stream cancelled); `download_timeout_s` = 300 s for the whole download, body included.
 6. Timeouts, network errors and 5xx retry (3 tries, backoff); refusals don't. Errors never contain the URL. Our API key is never sent.
-Known limit: fetch resolves DNS again itself (rebinding window); pinning the address would need the `undici` package (not added). The exact-host allowlist is the main guard.
+7. **The IP is pinned (p4-fix b, DNS rebinding closed, no new package).** The download goes through `node:https` (not `fetch`) with `agent: false` and a socket `lookup` = `createPinnedLookup`: at connect time it resolves the host once, refuses if ANY address is blocked, and hands the socket only the addresses it just checked. So the socket can only connect to a validated IP, on every hop. TLS `servername` is the hostname, so the certificate is still checked against the host. A refused host logs one server line `[safe-download] refused host=<host> code=<code>` (never the path or query).
+Still: the exact-host allowlist is the first guard; do not widen it to a suffix without a reason and a source.
 
 **Lost POST answers (SF3/SF5)**: a timeout or 5xx on `POST /v3/videos` leaves the video `rendering` with its claim and no HeyGen id (the "unknown" state, `RENDER_UNKNOWN` on the row); it is never POSTed again. The webhook matches it by `callback_id`, saves HeyGen's id and completes it; the poll completes it once the id is known. After `RENDER.poll_max_s` (30 min) from `render_started_at` with no word, it fails to the team queue. Likeness re-runs (SF6) reuse any row that reached HeyGen.
 

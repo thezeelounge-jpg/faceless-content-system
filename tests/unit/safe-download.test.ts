@@ -1,6 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
+import type http from "node:http";
+import https from "node:https";
+import { Readable } from "node:stream";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SafeDownloadError,
+  createHttpsTransport,
+  createPinnedLookup,
   hostAllowed,
   isBlockedAddress,
   safeDownload,
@@ -12,6 +18,8 @@ import {
 // HeyGen allowlist, whose DNS answers are all public, following at most a few
 // redirects (each re-checked), with a byte cap, a timeout and a video/* type.
 // Everything here uses a FAKE fetch and a FAKE resolver: no network, no DNS.
+
+afterEach(() => vi.restoreAllMocks());
 
 const HOST = "resource2.heygen.ai";
 const GOOD_URL = `https://${HOST}/videos/abc/VIDEO.mp4?sig=1`;
@@ -37,7 +45,7 @@ const redirect = (location: string, status = 302) => () => new Response(null, { 
 
 function options(fake: { fetch: typeof globalThis.fetch }, over: Partial<SafeDownloadOptions> = {}): SafeDownloadOptions {
   return {
-    fetch: fake.fetch,
+    transport: fake.fetch,
     resolve: vi.fn(async () => PUBLIC_IP),
     allowedHosts: [HOST],
     maxBytes: 1_000,
@@ -276,6 +284,137 @@ describe("f. content type", () => {
       const error = await refusal(safeDownload(GOOD_URL, options(fake)));
       expect(error.code, type).toBe("not_video");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// p4-fix b (QA SF2): the socket connects only to the address that was checked.
+// A FAKE https.request stands in for node:https: it does what net does on
+// connect (calls options.lookup) and records the address it would connect
+// to. No socket is ever opened.
+// ---------------------------------------------------------------------------
+
+type FakeAnswer = { status: number; headers?: Record<string, string>; body?: number[] };
+
+function fakeHttps(answers: FakeAnswer[]) {
+  const connectedTo: string[] = [];
+  const seen: https.RequestOptions[] = [];
+  const request = ((options: https.RequestOptions, callback: (res: http.IncomingMessage) => void) => {
+    seen.push(options);
+    const req = Object.assign(new EventEmitter(), {
+      destroy: () => req,
+      end: () => {
+        options.lookup?.(String(options.hostname), { all: false }, (err, address) => {
+          if (err) return void req.emit("error", err);
+          connectedTo.push(String(address));
+          const answer = answers.shift();
+          if (!answer) return void req.emit("error", new Error("no more fake answers"));
+          const res = Object.assign(Readable.from(answer.body ? [Buffer.from(answer.body)] : []), {
+            statusCode: answer.status,
+            rawHeaders: Object.entries(answer.headers ?? {}).flat(),
+          });
+          callback(res as unknown as http.IncomingMessage);
+        });
+      },
+    });
+    return req;
+  }) as unknown as typeof https.request;
+  return { request, connectedTo, seen };
+}
+
+const mp4Answer = (body = [1, 2, 3]): FakeAnswer => ({ status: 200, headers: { "content-type": "video/mp4" }, body });
+const PRIVATE_IPS = ["169.254.169.254", "10.0.0.5"];
+
+function pinnedOptions(fake: ReturnType<typeof fakeHttps>, resolve: SafeDownloadOptions["resolve"]): SafeDownloadOptions {
+  return { transport: createHttpsTransport(fake.request), resolve, allowedHosts: [HOST], maxBytes: 1_000, maxRedirects: 3, timeoutMs: 5_000 };
+}
+
+describe("g. pinned IP (DNS rebinding, p4-fix b)", () => {
+  it("rebinding: public on the check, private at connect time -> refused (private_address), nothing connects to the private IP", async () => {
+    for (const privateIp of PRIVATE_IPS) {
+      const resolve = vi
+        .fn<SafeDownloadOptions["resolve"]>()
+        .mockResolvedValueOnce(PUBLIC_IP)
+        .mockResolvedValueOnce([{ address: privateIp, family: 4 }]);
+      const fake = fakeHttps([mp4Answer()]);
+      const error = await refusal(safeDownload(GOOD_URL, pinnedOptions(fake, resolve)));
+      expect(error.code, privateIp).toBe("private_address");
+      expect(resolve).toHaveBeenCalledTimes(2);
+      expect(fake.connectedTo).toEqual([]);
+    }
+  });
+
+  it("the socket gets exactly the validated address; TLS still checks the hostname; no pooled agent; no API key", async () => {
+    const resolve = vi.fn(async () => PUBLIC_IP);
+    const fake = fakeHttps([mp4Answer([7, 8])]);
+    const result = await safeDownload(GOOD_URL, pinnedOptions(fake, resolve));
+    expect(Array.from(result.bytes)).toEqual([7, 8]);
+    expect(fake.connectedTo).toEqual(["93.184.216.34"]);
+    expect(fake.seen[0]).toMatchObject({ hostname: HOST, servername: HOST, port: 443, path: "/videos/abc/VIDEO.mp4?sig=1", agent: false, method: "GET" });
+    expect(JSON.stringify(fake.seen[0].headers)).not.toMatch(/api-key/i);
+  });
+
+  it("createPinnedLookup hands back the checked address (single and all:true forms)", async () => {
+    const lookup = createPinnedLookup(vi.fn(async () => [{ address: "93.184.216.34", family: 4 }, { address: "2606:4700:4700::1111", family: 6 }]));
+    const single = await new Promise<unknown[]>((resolve) => lookup(HOST, { all: false }, (...args: unknown[]) => resolve(args)));
+    expect(single).toEqual([null, "93.184.216.34", 4]);
+    const all = await new Promise<unknown[]>((resolve) => lookup(HOST, { all: true }, (...args: unknown[]) => resolve(args)));
+    expect(all).toEqual([null, [{ address: "93.184.216.34", family: 4 }, { address: "2606:4700:4700::1111", family: 6 }]]);
+  });
+
+  it("a mixed answer (public + private) at connect time is refused; nothing connects", async () => {
+    const lookup = createPinnedLookup(vi.fn(async () => [{ address: "93.184.216.34", family: 4 }, { address: "10.0.0.5", family: 4 }]));
+    const [err] = await new Promise<unknown[]>((resolve) => lookup(HOST, { all: false }, (...args: unknown[]) => resolve(args)));
+    expect(err).toBeInstanceOf(SafeDownloadError);
+    expect((err as SafeDownloadError).code).toBe("private_address");
+
+    const resolve = vi
+      .fn<SafeDownloadOptions["resolve"]>()
+      .mockResolvedValueOnce(PUBLIC_IP)
+      .mockResolvedValueOnce([{ address: "93.184.216.34", family: 4 }, { address: "169.254.169.254", family: 4 }]);
+    const fake = fakeHttps([mp4Answer()]);
+    const error = await refusal(safeDownload(GOOD_URL, pinnedOptions(fake, resolve)));
+    expect(error.code).toBe("private_address");
+    expect(fake.connectedTo).toEqual([]);
+  });
+
+  it("each redirect hop is pinned again (a hop that rebinds is refused)", async () => {
+    const resolve = vi
+      .fn<SafeDownloadOptions["resolve"]>()
+      .mockResolvedValueOnce(PUBLIC_IP) // hop 0 check
+      .mockResolvedValueOnce(PUBLIC_IP) // hop 0 connect
+      .mockResolvedValueOnce(PUBLIC_IP) // hop 1 check
+      .mockResolvedValueOnce([{ address: "10.0.0.5", family: 4 }]); // hop 1 connect
+    const fake = fakeHttps([{ status: 302, headers: { location: `https://${HOST}/videos/next.mp4` } }, mp4Answer()]);
+    const error = await refusal(safeDownload(GOOD_URL, pinnedOptions(fake, resolve)));
+    expect(error.code).toBe("private_address");
+    expect(fake.connectedTo).toEqual(["93.184.216.34"]);
+  });
+
+  it("the DEFAULT transport is node:https with the pinned lookup (not fetch)", async () => {
+    const fake = fakeHttps([mp4Answer([5])]);
+    const spy = vi.spyOn(https, "request").mockImplementation(fake.request as never);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const result = await safeDownload(GOOD_URL, { resolve: vi.fn(async () => PUBLIC_IP), allowedHosts: [HOST], maxBytes: 1_000, maxRedirects: 3, timeoutMs: 5_000 });
+    expect(Array.from(result.bytes)).toEqual([5]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(fake.connectedTo).toEqual(["93.184.216.34"]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("h. a refused host is logged (host and code only, never the URL)", () => {
+  it("logs `[safe-download] refused host=<host> code=<code>`", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await refusal(safeDownload("https://evil.example.com/x/y.mp4?sig=secret", options(fakeFetch([]))));
+    const resolve = vi.fn(async () => [{ address: "10.0.0.5", family: 4 }]);
+    await refusal(safeDownload(GOOD_URL, options(fakeFetch([]), { resolve })));
+    const lines = warn.mock.calls.map((args) => args.join(" "));
+    expect(lines).toEqual([
+      "[safe-download] refused host=evil.example.com code=not_allowed",
+      `[safe-download] refused host=${HOST} code=private_address`,
+    ]);
+    expect(lines.join("\n")).not.toMatch(/sig=|\/videos|y\.mp4|https:/);
   });
 });
 

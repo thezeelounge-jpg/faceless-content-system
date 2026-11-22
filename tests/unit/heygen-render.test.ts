@@ -51,7 +51,7 @@ const publicDns = () =>
     return [{ address: "93.184.216.34", family: 4 }];
   });
 const realClient = (fakeFetchFn: typeof globalThis.fetch, sleep = vi.fn(async () => {}), resolve = publicDns()) =>
-  createHeygenClient({ mock: false, apiKey: "test-key-not-real", fetch: fakeFetchFn, sleep, resolve });
+  createHeygenClient({ mock: false, apiKey: "test-key-not-real", fetch: fakeFetchFn, sleep, resolve, downloadTransport: fakeFetchFn });
 const mp4 = (bytes: number[]) => () => new Response(new Uint8Array(bytes), { status: 200, headers: { "content-type": "video/mp4" } });
 
 describe("mock mode: renders, downloads and webhook setup never fetch", () => {
@@ -207,6 +207,17 @@ describe("downloadVideo (mock off, fake fetch): the safe downloader (QA MUST FIX
       "The video link from HeyGen is not usable.",
     );
     expect(fake.calls).toHaveLength(1);
+  });
+
+  it("without an injected downloadTransport, downloads never use the general fetch (default = pinned node:https)", async () => {
+    const fake = fakeFetch([mp4([1])]);
+    const sleep = vi.fn(async () => {});
+    const client = createHeygenClient({ mock: false, apiKey: "test-key-not-real", fetch: fake.fetch, sleep, resolve: publicDns() });
+    // node:https is blocked by the test guard, so the pinned transport fails as a network error.
+    await expect(client.downloadVideo("https://resource2.heygen.ai/a.mp4")).rejects.toThrow(
+      "Could not download the video from HeyGen. Try again later.",
+    );
+    expect(fake.calls).toHaveLength(0);
   });
 
   it("retries a failed download (5xx) with backoff, then gives a plain error", async () => {
