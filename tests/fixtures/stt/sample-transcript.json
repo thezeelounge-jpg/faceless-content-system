@@ -1,0 +1,25 @@
+{
+  "language": "en",
+  "duration_s": 6,
+  "words": [
+    { "text": "stop", "start_s": 0.1, "end_s": 0.42, "confidence": 0.98 },
+    { "text": "scrolling", "start_s": 0.42, "end_s": 0.98, "confidence": 0.97 },
+    { "text": "here", "start_s": 1.2, "end_s": 1.36, "confidence": 0.95 },
+    { "text": "are", "start_s": 1.36, "end_s": 1.48, "confidence": 0.94 },
+    { "text": "three", "start_s": 1.48, "end_s": 1.74, "confidence": 0.96 },
+    { "text": "quick", "start_s": 1.74, "end_s": 2.02, "confidence": 0.97 },
+    { "text": "tips", "start_s": 2.02, "end_s": 2.38, "confidence": 0.96 },
+    { "text": "um", "start_s": 2.45, "end_s": 2.6, "confidence": 0.61 },
+    { "text": "to", "start_s": 2.62, "end_s": 2.72, "confidence": 0.93 },
+    { "text": "grow", "start_s": 2.72, "end_s": 3.02, "confidence": 0.97 },
+    { "text": "your", "start_s": 3.02, "end_s": 3.16, "confidence": 0.95 },
+    { "text": "cafe", "start_s": 3.16, "end_s": 3.52, "confidence": 0.9 },
+    { "text": "on", "start_s": 3.56, "end_s": 3.68, "confidence": 0.94 },
+    { "text": "whats", "start_s": 3.68, "end_s": 3.92, "confidence": 0.88 },
+    { "text": "app", "start_s": 3.92, "end_s": 4.18, "confidence": 0.89 },
+    { "text": "book", "start_s": 4.4, "end_s": 4.62, "confidence": 0.97 },
+    { "text": "free", "start_s": 4.7, "end_s": 4.94, "confidence": 0.95 },
+    { "text": "call", "start_s": 4.94, "end_s": 5.2, "confidence": 0.97 },
+    { "text": "today", "start_s": 5.2, "end_s": 5.6, "confidence": 0.98 }
+  ]
+}
