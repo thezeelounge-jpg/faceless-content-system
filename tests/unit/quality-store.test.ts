@@ -34,6 +34,28 @@ describe("loadQualityInput", () => {
     for (const c of calls.filter((x) => x.op === "select")) expect(String(c.args[0])).not.toContain("*");
   });
 
+  it("p5-b4 (QA SF3): pages through every table, so a 1000-row cap per answer never cuts the numbers short", async () => {
+    const n = (count: number) => Array.from({ length: count }, (_, i) => i);
+    const { db, calls } = readOnlyDb(
+      {
+        qa_reports: n(2500).map((i) => ({ gate: "audio", passed: i % 2 === 0, auto_fix: null, issues: [], created_at: "2026-11-20T09:00:00Z", video_id: `v${i}` })),
+        videos: n(1500).map((i) => ({ id: `v${i}`, post_id: `p${i}`, delivered_at: "2026-11-20T11:00:00Z", created_at: "2026-11-20T10:00:00Z" })),
+        provider_usage: n(2300).map(() => ({ cost_usd: "1.0000" })),
+        ai_usage: n(1200).map(() => ({ cost_usd: "0.0100" })),
+        scripts: [],
+      },
+      { maxRows: 1000 },
+    );
+    const input = await loadQualityInput(db as never, RANGE);
+    expect(input.reports).toHaveLength(2500);
+    expect(input.delivered).toHaveLength(1500);
+    expect(input.spend).toEqual({ heygen_usd: 2300, claude_usd: 12 });
+    // Every started_at was found (the per-post lookups paged / split too).
+    expect(input.delivered.every((d) => d.started_at === "2026-11-20T10:00:00Z")).toBe(true);
+    // Paging needs a stable order on every paged query.
+    expect(calls.some((c) => c.op === "range")).toBe(true);
+  });
+
   it("never writes (any insert/update/delete/rpc would throw)", async () => {
     const { db, calls } = readOnlyDb({});
     await expect(loadQualityInput(db as never, RANGE)).resolves.toBeDefined();

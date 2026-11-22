@@ -94,6 +94,27 @@ describe("calibration never writes", () => {
     expect(calls.some((c) => ["insert", "update", "upsert", "delete"].includes(c.op))).toBe(false);
   });
 
+  it("p5-b4 (QA SF3): pages through every table, so a 1000-row cap per answer never cuts the input short", async () => {
+    const n = (count: number) => Array.from({ length: count }, (_, i) => i);
+    const { db, calls } = readOnlyDb(
+      {
+        provider_usage: n(1800).map((i) => ({ video_id: `v${i}`, mock: false })),
+        videos: n(1800).map((i) => ({ id: `v${i}`, script_id: `s${i}`, brand: { language: "en" } })),
+        qa_reports: [
+          ...n(2600).map((i) => ({ gate: "visual", passed: true, score: 9, video_id: `v${i % 1800}`, script_id: null, created_at: "2026-11-20T09:00:00Z" })),
+          ...n(1100).map((i) => ({ gate: "script", passed: true, score: 8, video_id: null, script_id: `s${i}`, created_at: "2026-11-20T08:00:00Z" })),
+        ],
+      },
+      { maxRows: 1000 },
+    );
+    const loaded = await loadCalibrationInput(db as never);
+    expect(loaded.renders).toHaveLength(1800);
+    expect(loaded.videos).toHaveLength(1800);
+    expect(loaded.reports.filter((r) => r.gate === "visual")).toHaveLength(2600);
+    expect(loaded.reports.filter((r) => r.gate === "script" && r.video_id === null)).toHaveLength(1100);
+    expect(calls.some((c) => c.op === "range")).toBe(true);
+  });
+
   it("calibrating leaves lib/qa/config.ts byte for byte the same", () => {
     const file = path.resolve(process.cwd(), "lib/qa/config.ts");
     const before = readFileSync(file, "utf8");
