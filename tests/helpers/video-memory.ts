@@ -84,7 +84,10 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
     async createPostVideo(input) {
       const post = posts.find((p) => p.id === input.postId && p.brand_id === input.brandId);
       const latest = scripts.filter((s) => s.post_id === input.postId).sort((a, b) => b.version - a.version)[0];
-      if (post?.status !== "approved" || latest?.id !== input.scriptId) return { outcome: "not_approved", videoId: null };
+      // p5-a (migration 20261122200000): the newest script must also have passed QA.
+      if (post?.status !== "approved" || latest?.id !== input.scriptId || latest.qa_status !== "passed") {
+        return { outcome: "not_approved", videoId: null };
+      }
       const postScripts = new Set(scripts.filter((s) => s.post_id === input.postId).map((s) => s.id));
       const active = videos.filter(
         (v) => v.kind === "post" && v.script_id !== null && postScripts.has(v.script_id) && !["failed", "skipped"].includes(v.status),

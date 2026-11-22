@@ -101,6 +101,18 @@ describe("createPostRender: only an approved script, with a chosen engine and a 
     });
   });
 
+  it("p5-a: the script's QA changes after the app's check → the rpc re-check refuses (plain not-approved), no video", async () => {
+    mem.seedApprovedPost();
+    await mem.seedReadyTwin({ engine: "avatar_v" });
+    const realGetAvatar = mem.store.getReadyAvatar.bind(mem.store);
+    mem.store.getReadyAvatar = async (brandId) => {
+      mem.scripts[0].qa_status = "team_review"; // e.g. a re-run of the checks between check and insert
+      return realGetAvatar(brandId);
+    };
+    await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow(NOT_APPROVED_FOR_VIDEO);
+    expect(mem.videos).toHaveLength(0);
+  });
+
   it("refuses without a chosen engine, or without a ready twin that supports it (never falls back)", async () => {
     mem.seedApprovedPost();
     await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow(

@@ -1202,6 +1202,10 @@ describe("table privileges for anon and authenticated", () => {
         for (const role of ["anon", "authenticated"]) {
           expect((await db.query<{ ok: boolean }>("select has_function_privilege($1, $2, 'EXECUTE') as ok", [role, sig])).rows[0].ok).toBe(false);
         }
+        // p5-a (QA NICE): the server role may run the post_id trigger function explicitly too.
+        if (name === "videos_fill_post_id") {
+          expect((await db.query<{ ok: boolean }>("select has_function_privilege('service_role', $1, 'EXECUTE') as ok", [sig])).rows[0].ok).toBe(true);
+        }
         continue;
       }
       const can = async (role: string) =>
@@ -1530,6 +1534,34 @@ describe("p4-b1: Make video vs late webhook (create_post_render + adopt_late_ren
     });
   });
 
+  // p5-a: the database itself re-checks that the script passed QA (not only lib/render.ts),
+  // so a direct rpc call for a pending, failed or team_review script is refused.
+  it("p5-a: create_post_render refuses a script that has not passed QA, even when called directly", async () => {
+    await asRole("service_role", null, async () => {
+      const { post } = await seed(); // post approved; v1 passed; V0 cleared
+      for (const qa of ["pending", "failed", "team_review"]) {
+        const script = (
+          await db.query<{ id: string }>(
+            `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, (select coalesce(max(version), 0) + 1 from public.scripts where post_id = $1), 'Not checked.', $2) returning id`,
+            [post, qa],
+          )
+        ).rows[0].id;
+        expect((await make(post, script)).rows[0].result).toEqual({ outcome: "not_approved", video_id: null });
+      }
+      const active = await db.query("select id from public.videos where post_id = $1 and status not in ('failed', 'skipped')", [post]);
+      expect(active.rows).toEqual([]);
+      // The newest script passes → allowed again.
+      const passed = (
+        await db.query<{ id: string }>(
+          `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 99, 'Checked.', 'passed') returning id`,
+          [post],
+        )
+      ).rows[0].id;
+      expect((await make(post, passed)).rows[0].result.outcome).toBe("created");
+      await cleanup(post);
+    });
+  });
+
   it("customers and logged-out visitors can't call create_post_render (or start_edit)", async () => {
     for (const role of ["anon", "authenticated"] as const) {
       await asRole(role, USER_A, async () => {
@@ -1542,4 +1574,55 @@ describe("p4-b1: Make video vs late webhook (create_post_render + adopt_late_ren
       });
     }
   });
+});
+
+// p5-a: migrations written to be re-run. 20261122180000 is ALREADY applied on staging and is
+// not edited. Its follow-up 20261122190000 (and 20261122200000) use IF NOT EXISTS /
+// CREATE OR REPLACE / DROP ... IF EXISTS, so applying them again changes nothing. A fresh
+// database gets the whole chain, then each re-runnable file again, and the schema must match.
+describe("p5-a: re-runnable migrations leave the same schema", () => {
+  const RERUNNABLE = ["20261122190000", "20261122200000"];
+  const FILES = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql")).sort();
+  const sqlOf = (version: string) => {
+    const file = FILES.find((f) => f.startsWith(`${version}_`));
+    expect(file, `migration ${version}`).toBeDefined();
+    return readFileSync(path.join(MIGRATIONS_DIR, file!), "utf8");
+  };
+
+  /** Everything a migration in this repo can change: columns, indexes, triggers, functions, privileges, policies. */
+  async function schemaSnapshot(fresh: PGlite) {
+    const q = async (sql: string) => (await fresh.query(sql)).rows;
+    return {
+      columns: await q(`select table_name, column_name, data_type, is_nullable, column_default from information_schema.columns
+                        where table_schema = 'public' order by 1, 2`),
+      indexes: await q(`select indexname, indexdef from pg_indexes where schemaname = 'public' order by 1`),
+      triggers: await q(`select t.tgname, pg_get_triggerdef(t.oid) as def from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                         join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and not t.tgisinternal order by 1`),
+      functions: await q(`select p.oid::regprocedure::text as sig, pg_get_functiondef(p.oid) as def, p.proacl::text as acl
+                          from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' order by 1`),
+      tables: await q(`select c.relname, c.relacl::text as acl, c.relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace
+                       where n.nspname = 'public' and c.relkind = 'r' order by 1`),
+      columnAcl: await q(`select c.relname, a.attname, a.attacl::text as acl from pg_attribute a join pg_class c on c.oid = a.attrelid
+                          join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and a.attacl is not null order by 1, 2`),
+      policies: await q(`select tablename, policyname, cmd, roles::text, qual, with_check from pg_policies where schemaname = 'public' order by 1, 2`),
+    };
+  }
+
+  it("the chain applies, then 190000 and 200000 apply again with no error and no change; 180000 is not re-run (it would stop and change nothing)", async () => {
+    const fresh = await PGlite.create();
+    try {
+      await fresh.exec(SUPABASE_STUBS);
+      for (const migration of MIGRATIONS) await fresh.exec(migration);
+      const before = await schemaSnapshot(fresh);
+      for (const version of RERUNNABLE) await fresh.exec(sqlOf(version));
+      for (const version of RERUNNABLE) await fresh.exec(sqlOf(version)); // and a third time
+      expect(await schemaSnapshot(fresh)).toEqual(before);
+      // The applied 180000 file is left as it is: run again it fails at once ("already exists")
+      // and, being one implicit transaction, leaves the schema untouched. db push never re-runs it.
+      await expect(fresh.exec(sqlOf("20261122180000"))).rejects.toThrow(/already exists/);
+      expect(await schemaSnapshot(fresh)).toEqual(before);
+    } finally {
+      await fresh.close();
+    }
+  }, 60_000);
 });
