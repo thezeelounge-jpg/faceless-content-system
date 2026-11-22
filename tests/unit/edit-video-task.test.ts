@@ -20,4 +20,9 @@ describe("edit-video task", () => {
     expect(EDIT_TASK.maxDuration).toBeLessThanOrEqual(3600);
     expect(EDIT_TASK.retry.maxAttempts).toBe(2);
   });
+
+  it("p4-b1: an edit claim goes stale only after the task's maxDuration (the old run is stopped by then)", () => {
+    expect(EDIT_TASK.maxDuration).toBe(EDIT.task_max_duration_s);
+    expect(EDIT.claim_stale_s).toBeGreaterThanOrEqual(EDIT_TASK.maxDuration);
+  });
 });

@@ -1,5 +1,6 @@
 import "server-only";
-import { EDITABLE_STATUSES, type EditFiles, type EditStore, type EditVideoRow } from "@/lib/edit-flow";
+import type { EditFiles, EditStore, EditVideoRow } from "@/lib/edit-flow";
+import { EDIT } from "@/lib/qa/config";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { VIDEO_BUCKET } from "@/lib/video-store";
 
@@ -25,28 +26,28 @@ export function createEditStore(): EditStore {
       if (error) fail("load video", error);
       return (data as EditVideoRow | null) ?? null;
     },
-    async startEdit(id) {
-      // One conditional update: only a post render that is waiting for an edit.
-      const { data, error } = await db
-        .from("videos")
-        .update({ status: "editing", error: null })
-        .eq("id", id)
-        .eq("kind", "post")
-        .in("status", [...EDITABLE_STATUSES])
-        .not("raw_path", "is", null)
-        .select("id")
-        .maybeSingle();
+    async startEdit(id, run) {
+      // p4-b1: rpc start_edit (one run at a time; same run or a stale claim may re-claim).
+      const { data, error } = await db.rpc("start_edit", { p_video_id: id, p_run: run, p_stale_s: EDIT.claim_stale_s });
       if (error) fail("start edit", error);
-      return data !== null;
+      return data === true;
     },
     async saveTranscript(id, transcript) {
       const { error } = await db.from("videos").update({ transcript }).eq("id", id);
       if (error) fail("save transcript", error);
     },
-    async finishEdit(id, patch) {
-      // Only while still 'editing': never overwrite a status someone else set since.
-      const { error } = await db.from("videos").update(patch).eq("id", id).eq("status", "editing");
+    async finishEdit(id, run, patch) {
+      // Only while still 'editing' AND claimed by this run: never overwrite another run's result.
+      const { data, error } = await db
+        .from("videos")
+        .update(patch)
+        .eq("id", id)
+        .eq("status", "editing")
+        .eq("edit_run_id", run)
+        .select("id")
+        .maybeSingle();
       if (error) fail("finish edit", error);
+      return data !== null;
     },
     async setPostStatusForVideo(id, status, reason) {
       const { data: video, error } = await db.from("videos").select("script_id").eq("id", id).maybeSingle();

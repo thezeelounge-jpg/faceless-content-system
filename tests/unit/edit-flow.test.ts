@@ -16,6 +16,7 @@ import {
   type EditVideoRow,
   type FfmpegRunner,
 } from "@/lib/edit-flow";
+import { EDIT } from "@/lib/qa/config";
 import { NO_STT_PROVIDER, type SttProvider } from "@/lib/stt";
 
 // lib/edit-flow.ts with fakes: no Supabase, no real ffmpeg (that is in
@@ -29,25 +30,32 @@ const RAW_BYTES = new Uint8Array([1, 2, 3, 4]);
 const FINAL_BYTES = Buffer.from("finished mp4 bytes");
 
 function memory(overrides: Partial<EditVideoRow> = {}) {
-  const row: EditVideoRow = {
+  const row: EditVideoRow & { edit_run_id: string | null; edit_started_at: number | null } = {
     id: VIDEO, brand_id: BRAND, kind: "post", status: "rendered", raw_path: RAW, final_path: null, transcript: null, error: null,
+    edit_run_id: null, edit_started_at: null,
     ...overrides,
   };
   const postStatuses: { status: string; reason: string | null }[] = [];
+  // Mirrors start_edit (migration 20261122160000) and the owner-only finish in lib/edit-store.ts.
   const store: EditStore = {
     async getVideo(id) {
       return id === row.id ? { ...row } : null;
     },
-    async startEdit(id) {
-      if (id !== row.id || row.kind !== "post" || !["rendered", "audio_qa", "editing"].includes(row.status)) return false;
-      row.status = "editing";
+    async startEdit(id, run) {
+      if (id !== row.id || row.kind !== "post" || !row.raw_path) return false;
+      const stale = row.edit_started_at === null || Date.now() - row.edit_started_at > EDIT.claim_stale_s * 1000;
+      const free = ["rendered", "audio_qa"].includes(row.status) || (row.status === "editing" && (row.edit_run_id === run || stale));
+      if (!free) return false;
+      Object.assign(row, { status: "editing", error: null, edit_run_id: run, edit_started_at: Date.now() });
       return true;
     },
     async saveTranscript(_id, transcript) {
       row.transcript = transcript;
     },
-    async finishEdit(_id, patch) {
+    async finishEdit(_id, run, patch) {
+      if (row.status !== "editing" || row.edit_run_id !== run) return false;
       Object.assign(row, patch);
+      return true;
     },
     async setPostStatusForVideo(_id, status, reason) {
       postStatuses.push({ status, reason });
@@ -231,6 +239,61 @@ describe("runEditJob", () => {
       expect(m.row).toEqual(before);
       expect(ffmpeg).not.toHaveBeenCalled();
     }
+  });
+
+  it("p4-b1 SF2: a second run is refused while the first is editing; the first still finishes", async () => {
+    const m = memory();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let ffmpegStarted!: () => void;
+    const started = new Promise<void>((resolve) => (ffmpegStarted = resolve));
+    const slowFfmpeg: FfmpegRunner = async (args) => {
+      ffmpegStarted();
+      await gate;
+      return okFfmpeg(args);
+    };
+    const runA = runEditJob(job, { ...m, ffmpeg: slowFfmpeg, tmpRoot, fontsDir: captionFontsDir(), runToken: "run_a" });
+    await started;
+    const ffmpegB = vi.fn(okFfmpeg);
+    await expect(
+      runEditJob(job, { ...m, ffmpeg: ffmpegB, tmpRoot, fontsDir: captionFontsDir(), runToken: "run_b" }),
+    ).rejects.toThrow(/can't be edited/);
+    expect(ffmpegB).not.toHaveBeenCalled();
+    release();
+    expect((await runA).status).toBe("edited");
+    expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, edit_run_id: "run_a" });
+  });
+
+  it("p4-b1 SF2: run B took over a stale claim and finished; run A then fails after its upload → B's final file stays", async () => {
+    const m = memory();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // Run A: gets stuck in its upload (a hung storage call), then fails.
+    let failUpload!: () => void;
+    const uploadFails = new Promise<void>((resolve) => (failUpload = resolve));
+    let uploadStarted!: () => void;
+    const inUpload = new Promise<void>((resolve) => (uploadStarted = resolve));
+    const filesA: EditFiles = {
+      ...m.files,
+      async upload() {
+        uploadStarted();
+        await uploadFails;
+        throw new Error("storage timeout");
+      },
+    };
+    const runA = runEditJob(job, { ...m, files: filesA, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir(), runToken: "run_a" });
+    await inUpload;
+    // A's claim goes stale (older than the task's maxDuration), so run B may take over and finishes first.
+    m.row.edit_started_at = Date.now() - (EDIT.claim_stale_s + 60) * 1000;
+    const finishedB = await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir(), runToken: "run_b" });
+    expect(finishedB.status).toBe("edited");
+    // Now A fails after its upload started.
+    failUpload();
+    const outcomeA = await runA;
+    expect(outcomeA.status).toBe("superseded");
+    expect(m.removed).toEqual([]); // A never deletes a file it does not own
+    expect(Buffer.from(m.stored.get(FINAL)!.bytes).toString()).toBe("finished mp4 bytes");
+    expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, error: null, edit_run_id: "run_b" });
+    expect(m.postStatuses.at(-1)).toEqual({ status: "final_qa", reason: null }); // A did not touch the post either
   });
 
   it("an unknown video id is refused", async () => {

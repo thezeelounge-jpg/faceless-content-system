@@ -82,6 +82,13 @@ export const RENDER = {
 export const EDIT = {
   /** ffmpeg is stopped after this long. */
   ffmpeg_timeout_s: 900,
+  /** trigger/edit-video.ts maxDuration (seconds of compute); Trigger.dev stops the run after this. */
+  task_max_duration_s: 1800,
+  /**
+   * p4-b1: an edit claim (videos.edit_run_id) older than this may be taken over
+   * by another run. Equal to the task's maxDuration: by then the old run is stopped.
+   */
+  claim_stale_s: 1800,
 } as const;
 
 /**

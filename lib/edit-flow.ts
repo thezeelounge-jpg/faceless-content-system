@@ -1,5 +1,6 @@
 import "server-only";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -61,10 +62,19 @@ export const EDITABLE_STATUSES = ["rendered", "audio_qa", "editing"] as const;
 
 export interface EditStore {
   getVideo(id: string): Promise<EditVideoRow | null>;
-  /** Status → editing, only for a post render in EDITABLE_STATUSES with a raw_path. False = refused. */
-  startEdit(id: string): Promise<boolean>;
+  /**
+   * p4-b1 (QA SF2), rpc start_edit: status → editing and the claim → `run`, only for a post
+   * render with a raw_path that is rendered/audio_qa, or editing by the SAME run (a retry), or
+   * editing under a claim older than EDIT.claim_stale_s. False = refused (another run edits it).
+   */
+  startEdit(id: string, run: string): Promise<boolean>;
   saveTranscript(id: string, transcript: Transcript): Promise<void>;
-  finishEdit(id: string, patch: { status: "final_qa" | "team_review"; final_path: string | null; error: string | null }): Promise<void>;
+  /** Saves only while the row is still 'editing' and claimed by `run`. False = another run owns it now. */
+  finishEdit(
+    id: string,
+    run: string,
+    patch: { status: "final_qa" | "team_review"; final_path: string | null; error: string | null },
+  ): Promise<boolean>;
   setPostStatusForVideo(id: string, status: "editing" | "final_qa" | "team_review", reason: string | null): Promise<void>;
 }
 
@@ -88,11 +98,15 @@ export type EditDeps = {
   fontsDir?: string;
   /** Default: the system temp folder. */
   tmpRoot?: string;
+  /** This run's claim token (the task passes ctx.run.id, the same on a retry). Default: a fresh UUID. */
+  runToken?: string;
 };
 
 export type EditOutcome =
   | { status: "edited"; finalPath: string; notApplied: string[] }
-  | { status: "failed"; error: string };
+  | { status: "failed"; error: string }
+  /** p4-b1: another run took over this video's edit; this run changed nothing it does not own. */
+  | { status: "superseded" };
 
 /** Plain errors saved on videos.error (admin wording; customers never see this column). */
 export const EDIT_ERRORS = {
@@ -152,7 +166,8 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
   if (video.kind !== "post") throw refuse("it is a likeness test");
   if (!video.raw_path || video.raw_path !== job.rawPath) throw refuse("the raw file does not match this video");
   if (!(EDITABLE_STATUSES as readonly string[]).includes(video.status)) throw refuse(`it is ${video.status}`);
-  if (!(await deps.store.startEdit(video.id))) throw refuse("it is not waiting for an edit");
+  const run = deps.runToken ?? randomUUID();
+  if (!(await deps.store.startEdit(video.id, run))) throw refuse("it is not waiting for an edit (or another edit is running)");
   await deps.store.setPostStatusForVideo(video.id, "editing", null);
 
   const finalPath = finalPathFor(video.brand_id, video.id);
@@ -197,15 +212,23 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     stage = "upload";
     uploadStarted = true;
     await deps.files.upload(finalPath, new Uint8Array(await readFile(finalFile)), "video/mp4");
-    await deps.store.finishEdit(video.id, { status: "final_qa", final_path: finalPath, error: null });
+    if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null }))) {
+      // Another run took over (our claim went stale). Our file is a valid edit on the same
+      // path; the row and post belong to the other run now, so touch nothing else.
+      console.warn(`[edit] superseded after upload video=${video.id}`);
+      return { status: "superseded" };
+    }
     await deps.store.setPostStatusForVideo(video.id, "final_qa", null);
     return { status: "edited", finalPath, notApplied: notYetApplied(extras) };
   } catch (error) {
     const message = plainMessage(error, stage);
     logAdminError("[edit] failed", { videoId: video.id, stage }, error);
-    // Never leave a half-written or unrecorded final in storage.
+    // p4-b1 (QA SF2): record the failure only while THIS run still owns the claim. If another
+    // run took over (and maybe finished: final_qa), its row, post and final file are not ours.
+    const owned = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: null, error: message });
+    if (!owned) return { status: "superseded" };
+    // Never leave a half-written or unrecorded final in storage (ours: the row is team_review now).
     if (uploadStarted) await deps.files.remove(finalPath).catch((e) => logAdminError("[edit] cleanup failed", { videoId: video.id }, e));
-    await deps.store.finishEdit(video.id, { status: "team_review", final_path: null, error: message });
     await deps.store.setPostStatusForVideo(video.id, "team_review", TEAM_EDIT_REASON);
     return { status: "failed", error: message };
   } finally {

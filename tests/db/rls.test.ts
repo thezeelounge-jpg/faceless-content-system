@@ -594,6 +594,8 @@ describe("SF2: customers read only the safe columns of their own post videos", (
     "rendered_at",
     "claim_cleared_at",
     "late_heygen_video_id",
+    "edit_run_id",
+    "edit_started_at",
   ];
   const canSelect = async (role: string, column: string) =>
     (
@@ -1255,6 +1257,66 @@ describe("brand profile versions (save_brand_version)", () => {
   });
 });
 
+// p4-b1 (QA SF2): one edit run at a time. start_edit claims the row with the
+// run's token; another run is refused while the claim is fresh; the same run
+// (a Trigger.dev retry) may claim again; a claim older than the task's
+// maxDuration (the run is surely dead) may be taken over.
+describe("p4-b1: start_edit (one edit run at a time)", () => {
+  const start = (id: string, run: string, staleS = 1800) =>
+    db.query<{ ok: boolean }>("select public.start_edit($1, $2, $3) as ok", [id, run, staleS]);
+  const video = async (status: string, startedSql = "null", run: string | null = null) =>
+    (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, kind, status, raw_path, edit_run_id, edit_started_at)
+         values ('${BRAND_A}', 'post', $1, 'raw/x.mp4', $2, ${startedSql}) returning id`,
+        [status, run],
+      )
+    ).rows[0].id;
+  const row = async (id: string) =>
+    (await db.query<{ status: string; edit_run_id: string | null }>("select status, edit_run_id from public.videos where id = $1", [id])).rows[0];
+
+  it("the first run claims a rendered video; a second run is REFUSED while the first is editing", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await video("rendered");
+      expect((await start(id, "run_a")).rows[0].ok).toBe(true);
+      expect(await row(id)).toEqual({ status: "editing", edit_run_id: "run_a" });
+      expect((await start(id, "run_b")).rows[0].ok).toBe(false);
+      expect(await row(id)).toEqual({ status: "editing", edit_run_id: "run_a" });
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+
+  it("the same run may claim again (a retry after a crash); a claim older than the stale limit may be taken over", async () => {
+    await asRole("service_role", null, async () => {
+      const fresh = await video("editing", "now() - interval '5 minutes'", "run_a");
+      expect((await start(fresh, "run_a")).rows[0].ok).toBe(true);
+      const stale = await video("editing", "now() - interval '31 minutes'", "run_a");
+      expect((await start(stale, "run_b")).rows[0].ok).toBe(true);
+      expect(await row(stale)).toEqual({ status: "editing", edit_run_id: "run_b" });
+      await db.query("delete from public.videos where id in ($1, $2)", [fresh, stale]);
+    });
+  });
+
+  it("never claims a video that is final_qa (or later), a likeness test, or one without a raw file", async () => {
+    await asRole("service_role", null, async () => {
+      const done = await video("final_qa", "now() - interval '2 hours'", "run_a");
+      expect((await start(done, "run_b")).rows[0].ok).toBe(false);
+      const likeness = (
+        await db.query<{ id: string }>(
+          `insert into public.videos (brand_id, kind, status, raw_path) values ('${BRAND_A}', 'likeness_test', 'rendered', 'raw/y.mp4') returning id`,
+        )
+      ).rows[0].id;
+      const noRaw = (
+        await db.query<{ id: string }>(`insert into public.videos (brand_id, kind, status) values ('${BRAND_A}', 'post', 'rendered') returning id`)
+      ).rows[0].id;
+      expect((await start(likeness, "run_c")).rows[0].ok).toBe(false);
+      expect((await start(noRaw, "run_c")).rows[0].ok).toBe(false);
+      expect(await row(done)).toEqual({ status: "final_qa", edit_run_id: "run_a" });
+      await db.query("delete from public.videos where id in ($1, $2, $3)", [done, likeness, noRaw]);
+    });
+  });
+});
+
 // p4-b1 (QA SF1): "Make video" vs a late HeyGen webhook. Both paths take the
 // same per-post advisory lock (create_post_render, adopt_late_render) and a
 // unique partial index allows at most one ACTIVE post video per script
@@ -1370,7 +1432,12 @@ describe("p4-b1: Make video vs late webhook (create_post_render + adopt_late_ren
     expect(index.rows[0]?.def).toMatch(/CREATE UNIQUE INDEX .* \(script_id\) WHERE .*kind = 'post'.*failed.*skipped/);
   });
 
-  it("customers and logged-out visitors can't call create_post_render", async () => {
+  it("customers and logged-out visitors can't call create_post_render (or start_edit)", async () => {
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(db.query("select public.start_edit($1, 'run', 1800)", [POST_A])).rejects.toThrow(/permission denied/);
+      });
+    }
     for (const role of ["anon", "authenticated"] as const) {
       await asRole(role, USER_A, async () => {
         await expect(make(POST_A, POST_A)).rejects.toThrow(/permission denied/);
