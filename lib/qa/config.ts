@@ -89,6 +89,15 @@ export const EDIT = {
    * by another run. Equal to the task's maxDuration: by then the old run is stopped.
    */
   claim_stale_s: 1800,
+  /**
+   * p4-b1 (QA SF4): storage download / upload in the edit task. Each try is
+   * stopped after storage_timeout_s; at most storage_max_attempts tries, waiting
+   * storage_backoff_ms × 2^(try-1) plus up to one backoff of random jitter.
+   * Worst case for download + upload + ffmpeg stays under task_max_duration_s.
+   */
+  storage_timeout_s: 120,
+  storage_max_attempts: 3,
+  storage_backoff_ms: 2000,
 } as const;
 
 /**

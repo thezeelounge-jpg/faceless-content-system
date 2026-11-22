@@ -62,22 +62,112 @@ export function createEditStore(): EditStore {
   };
 }
 
-/** The PRIVATE videos bucket (raw/ in, final/ out). */
-export function createEditFiles(): EditFiles {
-  const bucket = createAdminClient().storage.from(VIDEO_BUCKET);
+type StorageErrorLike = { message: string; status?: number; statusCode?: string };
+type StorageAnswer<T> = { data: T | null; error: StorageErrorLike | null };
+
+/** The bucket calls we use (Supabase storage-js; tests pass a fake). */
+export type EditBucket = {
+  download(path: string, options?: undefined, parameters?: { signal?: AbortSignal }): PromiseLike<StorageAnswer<Blob>>;
+  upload(path: string, body: Uint8Array, options: { contentType: string; upsert: boolean }): PromiseLike<StorageAnswer<unknown>>;
+  remove(paths: string[]): PromiseLike<StorageAnswer<unknown>>;
+};
+
+export type StorageRetryOptions = {
+  timeoutMs: number;
+  maxAttempts: number;
+  backoffMs: number;
+  sleep: (ms: number) => Promise<void>;
+  random: () => number;
+};
+
+/** One failed storage try; `retryable` decides whether another try may help. */
+class StorageTryError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+/**
+ * Worth another try: a timeout, a network error (no HTTP status, e.g. storage-js
+ * StorageUnknownError or a thrown fetch error), 408, 429 or any 5xx.
+ * Not: other 4xx (not found, no permission, too large) — those never pass.
+ */
+function retryableStatus(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status === 429 || status >= 500;
+}
+
+/**
+ * p4-b1 (QA SF4): runs one storage call with a per-try timeout and a bounded retry.
+ * The timeout aborts the try's signal (download passes it to storage-js; upload and
+ * remove have no signal option in storage-js, so their late answer is ignored — a
+ * retried upload overwrites the same path, upsert). Errors keep `what` but never
+ * the storage URL; lib/edit-flow.ts saves its own plain sentence on the row.
+ */
+async function withStorageRetry<T>(
+  what: string,
+  call: (signal: AbortSignal) => PromiseLike<StorageAnswer<T>>,
+  options: StorageRetryOptions,
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new StorageTryError(`[edit] ${what}: timed out after ${options.timeoutMs} ms`, true));
+        }, options.timeoutMs);
+      });
+      let answer: StorageAnswer<T>;
+      try {
+        answer = await Promise.race([Promise.resolve(call(controller.signal)), timeout]);
+      } catch (error) {
+        if (error instanceof StorageTryError) throw error;
+        throw new StorageTryError(`[edit] ${what}: request failed`, true, { cause: error });
+      }
+      if (answer.error) {
+        throw new StorageTryError(`[edit] ${what}: ${answer.error.message}`, retryableStatus(answer.error.status));
+      }
+      if (answer.data === null) throw new StorageTryError(`[edit] ${what}: no data`, false);
+      return answer.data;
+    } catch (error) {
+      const tryError = error as StorageTryError;
+      if (!tryError.retryable || attempt >= options.maxAttempts) throw tryError;
+      const backoff = options.backoffMs * 2 ** (attempt - 1);
+      await options.sleep(backoff + Math.round(options.random() * options.backoffMs));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/** The PRIVATE videos bucket (raw/ in, final/ out). Every call: timeout + bounded retry (EDIT in lib/qa/config.ts). */
+export function createEditFiles(
+  bucket: EditBucket = createAdminClient().storage.from(VIDEO_BUCKET),
+  overrides: Partial<StorageRetryOptions> = {},
+): EditFiles {
+  const options: StorageRetryOptions = {
+    timeoutMs: EDIT.storage_timeout_s * 1000,
+    maxAttempts: EDIT.storage_max_attempts,
+    backoffMs: EDIT.storage_backoff_ms,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    random: Math.random,
+    ...overrides,
+  };
   return {
     async download(path) {
-      const { data, error } = await bucket.download(path);
-      if (error || !data) fail("download raw video", error);
+      const data = await withStorageRetry("download raw video", (signal) => bucket.download(path, undefined, { signal }), options);
       return new Uint8Array(await data.arrayBuffer());
     },
     async upload(path, bytes, contentType) {
-      const { error } = await bucket.upload(path, bytes, { contentType, upsert: true });
-      if (error) fail("upload final video", error);
+      await withStorageRetry("upload final video", () => bucket.upload(path, bytes, { contentType, upsert: true }), options);
     },
     async remove(path) {
-      const { error } = await bucket.remove([path]);
-      if (error) fail("remove final video", error);
+      await withStorageRetry("remove final video", () => bucket.remove([path]), options);
     },
   };
 }
