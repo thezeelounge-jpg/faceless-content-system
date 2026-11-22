@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { HEYGEN_RETRY_AFTER_MAX_S, createHeygenClient } from "@/lib/heygen";
 import { RENDER } from "@/lib/qa/config";
-import { LOST_RENDER, RENDER_UNKNOWN, createPostRender, heygenCallbackUrl, renderVideo } from "@/lib/render";
+import { LOST_RENDER, NOT_APPROVED_FOR_VIDEO, RENDER_UNKNOWN, createPostRender, heygenCallbackUrl, renderVideo } from "@/lib/render";
+import { postRenderResult } from "@/lib/video-store";
 import { BRAND_ID } from "@/tests/helpers/consent-memory";
 import { memorySpendStore } from "@/tests/helpers/spend-memory";
 import { POST_ID, SCRIPT_ID, memoryVideoStore } from "@/tests/helpers/video-memory";
@@ -100,6 +101,38 @@ describe("createPostRender: only an approved script, with a chosen engine and a 
       "The twin does not support the chosen engine (heygen-avatar-6). Run the likeness test again.",
     );
     expect(mem.videos).toHaveLength(0);
+  });
+
+  it("p4-b1 race B: a late webhook adopts the old render WHILE Make video runs → no second video (the store refuses)", async () => {
+    const v1 = await queuedPostVideo();
+    // V1 was claimed, then cleared after the wait: failed + retired, post back to approved.
+    Object.assign(mem.videos[0], { status: "failed", render_started_at: new Date(Date.now() - 40 * 60_000).toISOString() });
+    mem.clearedAt.set(v1.id, new Date().toISOString());
+    const realGetAvatar = mem.store.getReadyAvatar.bind(mem.store);
+    let adopted: string | null = null;
+    // QA's interleaving: the webhook lands between Make video's checks and its insert.
+    mem.store.getReadyAvatar = async (brandId) => {
+      adopted ??= await mem.store.adoptLateRender(v1.id, "hg_late_race");
+      return realGetAvatar(brandId);
+    };
+    await expect(createPostRender(POST_ID, { videos: mem.store })).rejects.toThrow(NOT_APPROVED_FOR_VIDEO);
+    expect(adopted).toBe("adopted");
+    expect(mem.videos.filter((v) => !["failed", "skipped"].includes(v.status)).map((v) => v.id)).toEqual([v1.id]);
+  });
+});
+
+describe("postRenderResult (create_post_render answer from Supabase)", () => {
+  it("maps the answer, a unique violation (second active video) to not_approved, and throws on other errors", () => {
+    const id = "90000000-0000-4000-8000-000000000001";
+    expect(postRenderResult({ outcome: "created", video_id: id }, null)).toEqual({ outcome: "created", videoId: id });
+    expect(postRenderResult({ outcome: "existing", video_id: id }, null)).toEqual({ outcome: "existing", videoId: id });
+    expect(postRenderResult({ outcome: "not_approved", video_id: null }, null)).toEqual({ outcome: "not_approved", videoId: null });
+    expect(postRenderResult(null, { code: "23505", message: "duplicate key value violates unique constraint" })).toEqual({
+      outcome: "not_approved",
+      videoId: null,
+    });
+    expect(() => postRenderResult(null, { code: "42501", message: "permission denied" })).toThrow(/create post render/);
+    expect(() => postRenderResult({ outcome: "weird" }, null)).toThrow(/create post render/);
   });
 });
 

@@ -79,20 +79,40 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
       const rows = videos.filter((v) => v.script_id === scriptId && !["failed", "skipped"].includes(v.status));
       return rows.length ? structuredClone(rows[rows.length - 1]) : null;
     },
-    // Mirrors adopt_late_render (migration 20261122130000).
+    // Mirrors create_post_render (migration 20261122150000): one JS turn = the per-post lock.
+    async createPostVideo(input) {
+      const post = posts.find((p) => p.id === input.postId && p.brand_id === input.brandId);
+      const latest = scripts.filter((s) => s.post_id === input.postId).sort((a, b) => b.version - a.version)[0];
+      if (post?.status !== "approved" || latest?.id !== input.scriptId) return { outcome: "not_approved", videoId: null };
+      const active = videos.filter((v) => v.kind === "post" && v.script_id === input.scriptId && !["failed", "skipped"].includes(v.status));
+      if (active.length) return { outcome: "existing", videoId: active[active.length - 1].id };
+      const row = await store.insertVideo({
+        brand_id: input.brandId,
+        script_id: input.scriptId,
+        avatar_id: input.avatarId,
+        kind: "post",
+        engine: input.engine,
+        spoken_words: input.spokenWords,
+      });
+      return { outcome: "created", videoId: row.id };
+    },
+    // Mirrors adopt_late_render (migration 20261122150000, which replaced 20261122130000).
     async adoptLateRender(id, heygenVideoId) {
       const row = videos.find((v) => v.id === id);
       if (!row || row.status !== "failed" || row.heygen_video_id || (!row.render_started_at && !clearedAt.has(id))) return "not_late";
       const active = (v: VideoRow) => v.id !== row.id && !["failed", "skipped"].includes(v.status);
       const postOf = (v: VideoRow) => scripts.find((s) => s.id === v.script_id)?.post_id;
       const postId = row.kind === "post" ? postOf(row) : undefined;
+      const version = scripts.find((s) => s.id === row.script_id)?.version ?? 0;
       const newer =
         row.kind === "post"
-          ? videos.some((v) => active(v) && v.script_id !== null && postOf(v) === postId)
+          ? videos.some((v) => active(v) && v.script_id !== null && postOf(v) === postId) ||
+            scripts.some((s) => s.post_id === postId && s.version > version)
           : videos.some((v) => active(v) && v.kind === "likeness_test" && v.avatar_id === row.avatar_id && v.engine === row.engine);
       if (newer) {
         lateHeygenIds.set(id, heygenVideoId);
-        row.error = "HeyGen finished this video late, after a newer render was started. The newer one was kept; the late HeyGen id is saved.";
+        row.error =
+          "HeyGen finished this video late, after a newer render or script was started. The newer one was kept; the late HeyGen id is saved.";
         return "moved_on";
       }
       Object.assign(row, {

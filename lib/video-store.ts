@@ -1,7 +1,10 @@
 import "server-only";
 import type { AvatarRow } from "@/lib/consent-store-types";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { ClaimResult, LateRender, VideoFiles, VideoRow, VideoStore } from "@/lib/video-store-types";
+import { z } from "zod";
+import type { ClaimResult, LateRender, PostRenderOutcome, VideoFiles, VideoRow, VideoStore } from "@/lib/video-store-types";
+
+export type { PostRenderOutcome };
 
 // Supabase versions of VideoStore and VideoFiles. They use the SECRET key,
 // so call them only after requireAdmin(), after a verified webhook signature,
@@ -18,6 +21,24 @@ function fail(what: string, error: { message: string } | null): never {
 function toVideo(row: Record<string, unknown> | null): VideoRow | null {
   if (!row) return null;
   return { ...(row as VideoRow), duration_s: row.duration_s === null ? null : Number(row.duration_s) };
+}
+
+const postRenderAnswer = z.object({
+  outcome: z.enum(["created", "existing", "not_approved"]),
+  video_id: z.string().nullable(),
+});
+
+/**
+ * The create_post_render rpc answer (p4-b1). A unique violation (23505) means
+ * a second active video for the script was refused by the index
+ * videos_one_active_post_video: the same plain refusal as 'not_approved'.
+ */
+export function postRenderResult(data: unknown, error: { code?: string; message: string } | null): PostRenderOutcome {
+  if (error?.code === "23505") return { outcome: "not_approved", videoId: null };
+  if (error) fail("create post render", error);
+  const parsed = postRenderAnswer.safeParse(data);
+  if (!parsed.success) fail("create post render", { message: "unexpected answer" });
+  return { outcome: parsed.data.outcome, videoId: parsed.data.video_id };
 }
 
 export function createVideoStore(): VideoStore {
@@ -47,6 +68,17 @@ export function createVideoStore(): VideoStore {
       const { data, error } = await db.rpc("claim_render_slot", { p_video_id: id, p_max: max });
       if (error) fail("claim render slot", error);
       return data as ClaimResult;
+    },
+    async createPostVideo(input) {
+      const { data, error } = await db.rpc("create_post_render", {
+        p_post_id: input.postId,
+        p_script_id: input.scriptId,
+        p_brand_id: input.brandId,
+        p_avatar_id: input.avatarId,
+        p_engine: input.engine,
+        p_spoken_words: input.spokenWords,
+      });
+      return postRenderResult(data, error);
     },
     async adoptLateRender(id, heygenVideoId) {
       const { data, error } = await db.rpc("adopt_late_render", { p_video_id: id, p_heygen_video_id: heygenVideoId });

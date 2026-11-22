@@ -70,6 +70,9 @@ export const LIKENESS_LINE =
   "Hi, I'm testing my digital twin today. I want to see how natural my face, my voice and my hands look when I talk. " +
   "If this feels like a real video of me, we can start making my posts.";
 
+/** Make video refused: the post is not approved (or moved on, e.g. a late render was adopted). */
+export const NOT_APPROVED_FOR_VIDEO = "Only an approved script can be made into a video.";
+
 export const NEEDS_SPEND_CONFIRM =
   "A real HeyGen render costs money. Tick “I agree to spend” first. Nothing was sent to HeyGen.";
 
@@ -123,7 +126,7 @@ export async function createPostRender(postId: string, deps: { videos: VideoStor
   const found = await deps.videos.getRenderablePost(postId);
   if (!found) throw new PlainError("Post not found.");
   const { post, script } = found;
-  if (post.status !== "approved") throw new PlainError("Only an approved script can be made into a video.");
+  if (post.status !== "approved") throw new PlainError(NOT_APPROVED_FOR_VIDEO);
   if (!script || script.qa_status !== "passed") throw new PlainError("The script has not passed its checks.");
   if (!script.spoken_text?.trim()) throw new PlainError("The script has no spoken text.");
 
@@ -137,14 +140,21 @@ export async function createPostRender(postId: string, deps: { videos: VideoStor
   const problem = engineProblem(brand.engine, avatar.supported_engines);
   if (problem) throw new PlainError(problem);
 
-  return deps.videos.insertVideo({
-    brand_id: post.brand_id,
-    script_id: script.id,
-    avatar_id: avatar.id,
-    kind: "post",
-    engine: brand.engine,
-    spoken_words: countWords(script.spoken_text),
+  // p4-b1 (QA SF1): the checks above are only for plain messages. The database re-checks
+  // "approved + no active video" and inserts under the same per-post lock as
+  // adopt_late_render, so a late webhook in between can never lead to a second render.
+  const made = await deps.videos.createPostVideo({
+    postId: post.id,
+    scriptId: script.id,
+    brandId: post.brand_id,
+    avatarId: avatar.id,
+    engine: brand.engine!,
+    spokenWords: countWords(script.spoken_text),
   });
+  if (made.outcome === "not_approved" || !made.videoId) throw new PlainError(NOT_APPROVED_FOR_VIDEO);
+  const video = await deps.videos.getVideo(made.videoId);
+  if (!video) throw new PlainError("Video not found.");
+  return video;
 }
 
 /** The text HeyGen should say, and the post it belongs to (null for likeness tests). */
