@@ -13,6 +13,7 @@
 //   self-serve → needs_you with a plain reason.
 import type { ScriptOutput } from "@/lib/ai-schemas";
 import { ClaudeError, type ClaudeBrand, type ClaudeContext, type ClaudeTaskName, type TaskOutput } from "@/lib/claude";
+import { PlainError } from "@/lib/plain-error";
 import { buildSpokenText, type PronunciationEntry } from "@/lib/pronunciation/dictionary";
 import { unspeakableCharacters } from "@/lib/pronunciation/normalise";
 import { findRiskyWords } from "@/lib/pronunciation/risky-words";
@@ -46,6 +47,7 @@ export type PostStatus = "script_review" | "approved" | "team_review" | "needs_y
 
 /** p5-a: a post may get a new script version only while it is in one of these. */
 export const OPEN_POST_STATUSES = ["planned", "scripting"] as const;
+export const isOpenPostStatus = (status: string) => (OPEN_POST_STATUSES as readonly string[]).includes(status);
 
 /** p5-a: a rewrite was refused because the post has moved on (admin wording). */
 export const SCRIPT_REWRITE_CLOSED =
@@ -66,6 +68,12 @@ export interface ScriptQaStore {
   insertScriptVersion(row: Omit<StoredScript, "id">, override?: ScriptOverride): Promise<string>;
   updateScript(id: string, patch: Partial<Pick<StoredScript, "qa_status" | "spoken_text">>): Promise<void>;
   updatePost(id: string, patch: { status: PostStatus; status_reason: string | null }): Promise<void>;
+  /**
+   * p5-b1 (Rowan 5): the facts insert_script_version decides on, read cheaply BEFORE a Claude
+   * rewrite (the post's status; whether it has an active post video = kind post, not failed or
+   * skipped). null = no such post. The rpc still decides (post row locked); this only saves a call.
+   */
+  getRewriteState(postId: string): Promise<{ status: string; hasActiveVideo: boolean } | null>;
   listPronunciations(brandId: string): Promise<PronunciationEntry[]>;
   /** Saves new status 'suggested', source 'qa' rows; words already in the list are skipped. */
   insertSuggestedPronunciations(brandId: string, rows: { written: string; say_as: string }[]): Promise<void>;
@@ -189,6 +197,12 @@ export async function runGate1(args: GateArgs): Promise<Gate1Result> {
 
   const rewritesLeft = SCRIPT_QA.max_rewrites - (args.script.version - 1);
   if (rewritesLeft <= 0) return { passed: false, script: args.script, issues: first.issues };
+
+  // p5-b1 (Rowan 5): the database would refuse the new version once the post has left scripting
+  // (rpc insert_script_version 'closed'): refuse now, before paying for the Claude rewrite.
+  const state = await args.store.getRewriteState(args.script.post_id);
+  if (!state) throw new PlainError("Post not found.");
+  if (!isOpenPostStatus(state.status)) throw new PlainError(SCRIPT_REWRITE_CLOSED);
 
   // Version 1 stays "pending" until the rewrite is saved: if the rewrite
   // throws (busy, timeout, bad output), "Run checks" can simply try again

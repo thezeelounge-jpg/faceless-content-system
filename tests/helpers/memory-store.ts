@@ -50,6 +50,10 @@ export function memoryStore(): MemoryStore {
     async updatePost(id, patch) {
       store.posts.set(id, { ...patch });
     },
+    // p5-b1: the facts insert_script_version decides on (a post with no entry is still planned).
+    async getRewriteState(postId) {
+      return { status: store.posts.get(postId)?.status ?? "planned", hasActiveVideo: store.postsWithActiveVideo.has(postId) };
+    },
     async listPronunciations(brandId) {
       return store.pronunciations
         .filter((p) => p.brand_id === brandId)

@@ -19,10 +19,8 @@ import { getBrand, listBrandVersions } from "@/lib/brands";
 import { timezoneFor } from "@/lib/posting-times";
 import { listPosts } from "@/lib/posts";
 import { canRunChecks, latestScript } from "@/lib/qa/can-run-checks";
+import { canOfferRewriteAnyway } from "@/lib/qa/script-override";
 import { checkScript, generateBrandProfile, planNextFourWeeks, rewriteAnyway, saveProfileEdit, writeScript } from "./actions";
-
-/** p5-a: posts past scripting with no video yet, where "Rewrite anyway" is offered. */
-const REWRITE_ANYWAY_STATUSES = ["script_review", "team_review", "needs_you"];
 import { makeVideoAction } from "./render-actions";
 import { ActionForm } from "@/components/admin/action-form";
 import { isMockHeygen } from "@/lib/config";
@@ -179,7 +177,8 @@ async function BrandDetail({ params }: Pick<PageProps<"/admin/clients/[id]">, "p
                   // Same rule as the checkScript action (lib/qa/can-run-checks.ts).
                   const latest = latestScript(post.scripts);
                   // p5-a: past scripting, only an admin override may rewrite (audited; lib/qa/script-override.ts).
-                  if (latest && REWRITE_ANYWAY_STATUSES.includes(post.status)) {
+                  // p5-b1 (QA SF3): not on team_review, never while the post has an active video.
+                  if (latest && canOfferRewriteAnyway(post)) {
                     return (
                       <details className="text-sm">
                         <summary className="cursor-pointer">Rewrite anyway</summary>

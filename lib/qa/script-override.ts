@@ -14,7 +14,7 @@
 import { z } from "zod";
 import { PlainError } from "@/lib/plain-error";
 import {
-  OPEN_POST_STATUSES,
+  isOpenPostStatus,
   runScriptChecks,
   scriptOnly,
   type QaBrand,
@@ -34,6 +34,19 @@ export const rewriteAnywayInput = z.object({
   confirm: z.literal("yes", { error: "Tick the box to confirm." }), // ActionForm's confirmCheck value
 });
 
+/**
+ * p5-b1 (QA SF3): where the page offers "Rewrite anyway": posts past scripting with no active post
+ * video. Not team_review (it often has a video; the team clears it first, then the post is offered
+ * again). Same "active" rule as insert_script_version: kind post and not failed / skipped.
+ */
+export const REWRITE_ANYWAY_STATUSES = ["script_review", "needs_you"] as const;
+const INACTIVE_VIDEO_STATUSES = ["failed", "skipped"];
+export const isActivePostVideo = (v: { kind: string; status: string }) => v.kind === "post" && !INACTIVE_VIDEO_STATUSES.includes(v.status);
+
+export function canOfferRewriteAnyway(post: { status: string; videos?: { kind: string; status: string }[] }): boolean {
+  return (REWRITE_ANYWAY_STATUSES as readonly string[]).includes(post.status) && !(post.videos ?? []).some(isActivePostVideo);
+}
+
 export async function rewriteScriptAnyway(args: {
   brand: QaBrand;
   postId: string;
@@ -46,7 +59,13 @@ export async function rewriteScriptAnyway(args: {
   run: RunTask;
   store: ScriptQaStore;
 }): Promise<ScriptChecksResult> {
-  if ((OPEN_POST_STATUSES as readonly string[]).includes(args.postStatus)) throw new PlainError(OVERRIDE_NOT_NEEDED);
+  if (isOpenPostStatus(args.postStatus)) throw new PlainError(OVERRIDE_NOT_NEEDED);
+  // p5-b1 (QA SF3 + Rowan 5): what insert_script_version would answer, read from the database
+  // BEFORE the Claude call: still scripting → not needed; an active post video → has_video.
+  const state = await args.store.getRewriteState(args.postId);
+  if (!state) throw new PlainError("Post not found.");
+  if (isOpenPostStatus(state.status)) throw new PlainError(OVERRIDE_NOT_NEEDED);
+  if (state.hasActiveVideo) throw new PlainError(OVERRIDE_HAS_VIDEO);
   const wps = Number(args.brand.words_per_second);
   const rewritten = await args.run("script_rewrite", {
     brand: args.brand,

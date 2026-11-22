@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { runClaudeTask, type ClaudeContext, type ClaudeTaskName, type TaskOutput } from "@/lib/claude";
 import type { MockScenario } from "@/lib/claude-mocks";
 import { PlainError } from "@/lib/plain-error";
-import { OVERRIDE_HAS_VIDEO, OVERRIDE_NOT_NEEDED, rewriteScriptAnyway } from "@/lib/qa/script-override";
+import { canOfferRewriteAnyway, OVERRIDE_HAS_VIDEO, OVERRIDE_NOT_NEEDED, rewriteScriptAnyway } from "@/lib/qa/script-override";
 import { SCRIPT_REWRITE_CLOSED, runScriptChecks, type QaBrand, type StoredScript } from "@/lib/qa/script-pipeline";
 import { scriptVersionResult } from "@/lib/qa/store";
 import { writeScriptForPost } from "@/lib/scripts";
@@ -128,5 +128,53 @@ describe("rewriteScriptAnyway (admin override)", () => {
     ).rejects.toThrow(OVERRIDE_HAS_VIDEO);
     expect(store.scripts).toHaveLength(1);
     expect(store.audits).toEqual([]);
+  });
+
+  it("p5-b1 (QA SF3 + Rowan 5): a team_review post with an active video is refused BEFORE Claude: zero Claude calls", async () => {
+    const v1 = await draft(store, "good");
+    store.posts.set(POST.id, { status: "team_review", status_reason: "Audio check failed" });
+    store.postsWithActiveVideo.add(POST.id);
+    const { run, calls } = mockRunner("good");
+    await expect(
+      rewriteScriptAnyway({ brand: BRAND, postId: POST.id, postStatus: "team_review", script: v1, adminEmail: "a@x.com", reason: "Again please", maxSeconds: MAX, run, store }),
+    ).rejects.toThrow(OVERRIDE_HAS_VIDEO);
+    expect(calls).toEqual([]);
+    expect(store.scripts).toHaveLength(1);
+    expect(store.audits).toEqual([]);
+  });
+
+  it("p5-b1 (Rowan 5): the post's status is read from the database, not trusted from the page (scripting now → refused, no Claude)", async () => {
+    const v1 = await draft(store, "good");
+    store.posts.set(POST.id, { status: "scripting", status_reason: null }); // moved back meanwhile
+    const { run, calls } = mockRunner("good");
+    await expect(
+      rewriteScriptAnyway({ brand: BRAND, postId: POST.id, postStatus: "team_review", script: v1, adminEmail: "a@x.com", reason: "Again please", maxSeconds: MAX, run, store }),
+    ).rejects.toThrow(OVERRIDE_NOT_NEEDED);
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("p5-b1 (Rowan 5): Gate 1's rewrite asks the cheap question first", () => {
+  it("a post that left scripting: the rubric runs, but NO script_rewrite call is made", async () => {
+    const v1 = await draft(store, "bad_first_draft");
+    store.posts.set(POST.id, { status: "approved", status_reason: null });
+    const { run, calls } = mockRunner("bad_first_draft");
+    await expect(runScriptChecks({ brand: BRAND, postId: POST.id, script: v1, maxSeconds: MAX, run, store })).rejects.toThrow(SCRIPT_REWRITE_CLOSED);
+    expect(calls).not.toContain("script_rewrite");
+    expect(store.scripts.map((s) => [s.version, s.qa_status])).toEqual([[1, "pending"]]);
+  });
+});
+
+describe("p5-b1 (QA SF3): where the Rewrite anyway button is offered", () => {
+  const vid = (status: string, kind = "post") => ({ status, kind });
+  it("script_review / needs_you with no active video only; never team_review; never with an active post video", () => {
+    expect(canOfferRewriteAnyway({ status: "script_review", videos: [] })).toBe(true);
+    expect(canOfferRewriteAnyway({ status: "needs_you" })).toBe(true);
+    expect(canOfferRewriteAnyway({ status: "team_review", videos: [] })).toBe(false);
+    expect(canOfferRewriteAnyway({ status: "scripting", videos: [] })).toBe(false);
+    expect(canOfferRewriteAnyway({ status: "script_review", videos: [vid("queued")] })).toBe(false);
+    expect(canOfferRewriteAnyway({ status: "needs_you", videos: [vid("final_qa")] })).toBe(false);
+    // Failed / skipped videos and likeness tests are not active post videos (same rule as the database).
+    expect(canOfferRewriteAnyway({ status: "script_review", videos: [vid("failed"), vid("skipped"), vid("rendering", "likeness_test")] })).toBe(true);
   });
 });

@@ -55,6 +55,21 @@ export function createQaStore(): ScriptQaStore {
       const { error } = await db.from("posts").update(patch).eq("id", id).in("status", ["planned", "scripting"]);
       if (error) throw new Error(`Could not update post: ${error.message}`);
     },
+    async getRewriteState(postId) {
+      // p5-b1 (Rowan 5): the same facts insert_script_version decides on (migration 20261122210000):
+      // the post's status and an active post video (kind post, not failed / skipped). Read only.
+      const { data: post, error } = await db.from("posts").select("status").eq("id", postId).maybeSingle();
+      if (error) throw new Error(`Could not load post: ${error.message}`);
+      if (!post) return null;
+      const { count, error: videoError } = await db
+        .from("videos")
+        .select("id", { count: "exact", head: true })
+        .eq("post_id", postId)
+        .eq("kind", "post")
+        .not("status", "in", "(failed,skipped)");
+      if (videoError) throw new Error(`Could not check the post's videos: ${videoError.message}`);
+      return { status: post.status as string, hasActiveVideo: (count ?? 0) > 0 };
+    },
     async listPronunciations(brandId) {
       const { data, error } = await db
         .from("pronunciations")

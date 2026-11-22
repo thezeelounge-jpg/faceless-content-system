@@ -62,6 +62,8 @@ export type PostWithScript = PostRow & {
     spoken_text: string | null;
     hashtags: string[];
   }[];
+  /** p5-b1: the post's videos (kind + status only), so the page knows when one is active. */
+  videos?: { kind: string; status: string }[];
 };
 
 /** Posts from a week ago onward, oldest first, with their scripts. */
@@ -69,7 +71,7 @@ export async function listPosts(brandId: string): Promise<PostWithScript[]> {
   const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const { data, error } = await createAdminClient()
     .from("posts")
-    .select("id, brand_id, scheduled_for, pillar, title, hook, format, status, status_reason, scripts(id, version, qa_status, est_seconds, display_text, spoken_text, hashtags)")
+    .select("id, brand_id, scheduled_for, pillar, title, hook, format, status, status_reason, scripts(id, version, qa_status, est_seconds, display_text, spoken_text, hashtags), videos(kind, status)")
     .eq("brand_id", brandId)
     .gte("scheduled_for", since)
     .order("scheduled_for", { ascending: true })
