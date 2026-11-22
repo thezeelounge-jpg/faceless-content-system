@@ -1,8 +1,11 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
 import { z } from "zod";
 import { isMockStt } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
+import byText from "@/tests/fixtures/stt/by-text.json";
+import ayeshaFixed from "@/tests/fixtures/stt/gate3-ayesha-fixed.json";
+import ayeshaMisheard from "@/tests/fixtures/stt/gate3-ayesha-misheard.json";
+import sameerMisheard from "@/tests/fixtures/stt/gate3-sameer-misheard.json";
+import sameerStillWrong from "@/tests/fixtures/stt/gate3-sameer-still-wrong.json";
 import mockTranscript from "@/tests/fixtures/stt/sample-transcript.json";
 
 // Speech-to-text, provider-agnostic (Phase 4). Every provider answers with the
@@ -61,15 +64,27 @@ export const mockSttProvider: SttProvider = {
   },
 };
 
-const STT_FIXTURES = path.join(process.cwd(), "tests", "fixtures", "stt");
+// p5-b1 (QA SF2): the keyed fixtures are EMBEDDED (static JSON imports, bundled into the app and
+// the Trigger.dev build), never read from process.cwd() at run time: a deployed task has no tests/.
+// A rule naming a file that is not in this map fails when the module loads (and in the unit tests).
+const KEYED_TRANSCRIPTS: Record<string, unknown> = {
+  "gate3-ayesha-fixed.json": ayeshaFixed,
+  "gate3-ayesha-misheard.json": ayeshaMisheard,
+  "gate3-sameer-misheard.json": sameerMisheard,
+  "gate3-sameer-still-wrong.json": sameerStillWrong,
+};
 const byTextSchema = z.object({ rules: z.array(z.object({ contains: z.string().min(1), file: z.string().regex(/^[a-z0-9-]+\.json$/) })) });
+const BY_TEXT_RULES = byTextSchema.parse(byText).rules.map((rule) => {
+  const fixture = KEYED_TRANSCRIPTS[rule.file];
+  if (!fixture) throw new Error(`Mock speech-to-text: ${rule.file} is not embedded in lib/stt.ts.`);
+  return { contains: rule.contains.toLowerCase(), transcript: transcriptSchema.parse(fixture) };
+});
 
-/** The first by-text rule whose `contains` is in the text (any case), or null. */
+/** The first by-text rule whose `contains` is in the text (any case), or null. A fresh copy every time. */
 function keyedFixture(expectedText: string): Transcript | null {
-  const { rules } = byTextSchema.parse(JSON.parse(readFileSync(path.join(STT_FIXTURES, "by-text.json"), "utf8")));
   const text = expectedText.toLowerCase();
-  const rule = rules.find((r) => text.includes(r.contains.toLowerCase()));
-  return rule ? transcriptSchema.parse(JSON.parse(readFileSync(path.join(STT_FIXTURES, rule.file), "utf8"))) : null;
+  const rule = BY_TEXT_RULES.find((r) => text.includes(r.contains));
+  return rule ? structuredClone(rule.transcript) : null;
 }
 
 export function getSttProvider(): SttProvider {
