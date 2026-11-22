@@ -1,6 +1,6 @@
-# QA engine (Phase 5): orchestrator, Gate 3, Gate 4
+# QA engine (Phase 5): orchestrator, Gates 3 to 6, Quality, calibration
 
-Built in p5-a2 (22 Nov 2026). Rules come from `docs/QA-SPEC.md`; every number lives in `lib/qa/config.ts` (`AUDIO_QA`, `TECH_QA`, plus the existing `BROLL`, `MUSIC`, `LOUDNESS`). Gates 5 and 6, the Quality page and calibration are part 5b.
+Built in p5-a2 / p5-b2 / p5-b3 (22 Nov 2026). Rules come from `docs/QA-SPEC.md`; every number lives in `lib/qa/config.ts` (`AUDIO_QA`, `TECH_QA`, `VISUAL_QA`, `HUMAN_REVIEW`, `QUALITY`, `CALIBRATION`, plus the existing `BROLL`, `MUSIC`, `LOUDNESS`).
 
 ## The pipeline (`lib/qa/pipeline.ts`)
 
@@ -62,7 +62,44 @@ Started by `technical-qa` when Gate 4 passed (key `visual-qa-<video>-<edit run>`
 6. **Failed**, and the script has not used its one Gate 5 fix (failed `visual` reports counted per SCRIPT, so a re-render shares the budget): `classifyFix`: face/realism problem → re-render once (rpc `create_visual_rerender`: attempt + 1, `counts_toward_plan = false`, `rerender_gate = 'visual'`, through `renderVideo`; real HeyGen waits for the admin's spend OK exactly like Gate 3); captions over the face / unreadable → re-edit once with the next lower caption style (`VISUAL_QA.caption_fix_styles`: big_words → small_box → minimal); stray text in a b-roll frame → re-edit with that clip avoided (`avoidBrollClips`, kept in the manifest's `avoid_clips`). Re-edit = video back to `audio_qa`, post `editing`, `edit-video` key `edit-<video>-visual-1`; `editJobFor` takes the caption style and avoided clips from the manifest, so a later Gate 4 rebuild keeps the fix. Anything else (face zone, label/tag pixels, stray text on the face, Claude unavailable, no lower caption style) or a second failure → `team_review` with the reason.
 7. Crash after the last retry → `onFailure` → `gateCrashed("visual")`: a video still in `final_qa` + its post → `team_review`.
 
-**Usage rule:** `counts_toward_plan` is set ONLY by `deliver_post_video`. Failed attempts, QA re-renders, re-edits and videos waiting in the QA queue never count (a queue video counts when Gate 6 delivers it, step 3). Migration `20261123000000` (re-runnable): `videos.rerender_gate`, table `brand_qa_settings` (server only), rpcs `create_visual_rerender`, `deliver_post_video` (both under the per-post render lock, service_role only).
+**Usage rule:** `counts_toward_plan` is set ONLY by `deliver_post_video` and, for a queue video, by a Gate 6 approval (`review_queued_video`, same rule, p5-b3). Failed attempts, QA re-renders, re-edits, rejected videos and videos waiting in the QA queue never count. Migration `20261123000000` (re-runnable): `videos.rerender_gate`, table `brand_qa_settings` (server only), rpcs `create_visual_rerender`, `deliver_post_video` (both under the per-post render lock, service_role only).
+
+## Gate 6: human review, Admin → QA queue (p5-b3)
+
+Files: `app/admin/qa/page.tsx`, `app/admin/qa/actions.ts`, `lib/qa/human-review.ts` (checklist, reasons, zod, `reviewQueuedVideo`), `lib/qa/queue-store.ts` (list + rpc), `components/admin/qa-queue-item.tsx`, `components/admin/qa-review-form.tsx`.
+
+- **Who is in the queue:** every post video with status `team_review`, oldest first (at most 30 shown): the Gate 5 human-review rules above, a second failure at Gates 3-5, a fix that can't help, or a crash.
+- **Each card:** a player (10-minute signed link to the final edit, made on the server; the raw render, labelled, when there is no edit yet), why it is there (`posts.status_reason`, plus `videos.error`), every gate report of the video and of its script (Gates 1-2 are per script), and the checklist: pronunciation, lip-sync, looks real, captions, b-roll, music, label.
+- **Approve** (offered only with a finished edit): every box ticked. **Reject**: one reason (a checklist item or "other") + an optional note.
+- **Server Action** `reviewVideoAction`: `requireAdmin()` first, then zod (`humanReviewFromForm`), then rpc `review_queued_video` (migration `20261123010000`, service_role only, per-post render lock + video row lock):
+  - only a post video still in `team_review`, else `not_in_queue` (a double submit changes nothing);
+  - approve: every checklist key `true` (checked again in SQL) and `final_path` set → the usage rule exactly as `deliver_post_video` (this video `ready` + `counts_toward_plan = true`, every other video of the post false), post `ready`, `videos.delivered_at = now()`; then `confirmPlanSlot` (stub until Phase 7);
+  - reject: video `failed` (never counted), post `problem` (PRODUCT.md: "Taking a little longer. We're fixing it.") with `Rejected in the QA queue (<reason>): <note>` in `status_reason` / `videos.error`;
+  - both: ONE `qa_reports` row (gate `human`; reject issue code `human_<reason>`) and ONE `provider_usage` audit row (provider `other`, kind `human_review`, cost 0, who / what / why), in the same transaction.
+- `deliver_post_video` is re-stated in the same migration to also set `delivered_at`.
+
+## Quality: Admin → Usage and spend (p5-b3)
+
+`lib/qa/quality.ts` (pure `computeQuality`, `parseQualityRange`), `lib/qa/quality-store.ts` (read-only query, service role after `requireAdmin`), `components/admin/quality-table.tsx`. Date range `?from=YYYY-MM-DD&to=YYYY-MM-DD` (UTC days; default the last `QUALITY.default_range_days` = 28). Targets `QUALITY.targets` (QA-SPEC's numbers).
+
+| QA-SPEC metric | How it is computed |
+|---|---|
+| First-time pass rate, per gate (Gates 1-6) | `qa_reports` with `auto_fix` null: passed / runs (gate 6 = approved / reviewed) |
+| Automatic fix success rate | `qa_reports` with `auto_fix` set (the run right after a fix): passed / runs |
+| Human reject rate | gate `human`: rejected / reviewed (target is strictly under 5%) |
+| Customer redo rate | gate `customer` (written from Phase 6; "No data" until then) |
+| Average cost per delivered video | real (non-mock, succeeded) HeyGen `render` spend + `ai_usage` cost in the range, re-renders included, / videos with `delivered_at` in the range |
+| Time from approval to Ready | the post's first post video (`created_at`, made by "Make video" after approval) → `delivered_at`; average hours |
+| Top 5 failure codes this week | hard issue codes of failed reports in the last `QUALITY.top_failure_days` (7) days of the range |
+
+## Calibration (p5-b3, read only)
+
+`lib/qa/calibration.ts` (pure `calibrate`), `lib/qa/calibration-store.ts` (read-only), `components/admin/calibration-view.tsx`, shown under Quality.
+
+- A **real video** = a post video with a succeeded, non-mock HeyGen `render` row in `provider_usage`. Mock videos never count and their scores are left out. Below `CALIBRATION.min_real_videos` (10): "N of 10 real videos so far … after M more".
+- From 10: per gate, each real video's latest score vs the CURRENT value read from `lib/qa/config.ts`: Gate 1 voice match (`SCRIPT_QA.voice_pass_score`), Gate 3 WER per language (`AUDIO_QA.max_wer`), Gate 4 loudness (`TECH_QA` band, shown only, never re-proposed), Gate 5 realism (`VISUAL_QA.pass_realism_score`). Lowest / middle / highest, how many pass.
+- **Proposal rule:** videos a person REJECTED in the QA queue whose score still passed the gate → one step past the worst of them (realism / voice +1, max 10; WER −0.01), with the reason. None → keep.
+- **Never writes:** no Server Action, form or button; the loader is tested on a client where any write throws; a test checks `lib/qa/config.ts` is unchanged. The owner agrees, then a person edits `lib/qa/config.ts`.
 
 ## What is mocked
 
@@ -74,5 +111,7 @@ Started by `technical-qa` when Gate 4 passed (key `visual-qa-<video>-<edit run>`
 - **Known mock artefact:** the MOCK_PEXELS b-roll clips are flat colours, so in a local mock run a b-roll cut longer than 1.5 s is a real freeze and Gate 4 sends it back once, then to the team. Real stock clips move. The integration test uses a moving clip.
 
 ## Tests
+
+p5-b3: `human-review.test.ts` (zod, lib, Server Action), `qa-queue-view.test.ts` (card render), `quality.test.ts` (metrics + the Done-when "the Quality page shows pass rates per gate"), `quality-store.test.ts`, `calibration.test.ts` (incl. "nothing writes"); `tests/db/rls.test.ts` "p5-b3: review_queued_video" (approve / reject / double submit / checklist / grants), `delivered_at` server only, 010000 re-runnable. Helper `tests/helpers/read-only-db.ts`.
 
 p5-b2: `visual-checks.test.ts`, `visual-mock.test.ts`, `visual-gate.test.ts`, `qa-pipeline-gate5.test.ts` (full mocked pipeline + Done-when), `tests/integration/visual-gate-ffmpeg.test.ts`. Earlier: `tests/unit/audio-checks.test.ts`, `key-term-check.test.ts`, `audio-gate.test.ts` (incl. the Done-when), `technical-checks.test.ts`, `technical-gate.test.ts`, `qa-pipeline.test.ts`, `qa-tasks.test.ts`, `pipeline-store.test.ts`; `tests/db/rls.test.ts` (create_qa_rerender, new server-only columns); `tests/integration/technical-gate-ffmpeg.test.ts`.
