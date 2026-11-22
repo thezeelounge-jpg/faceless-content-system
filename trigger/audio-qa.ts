@@ -5,7 +5,7 @@ import { createEditFiles } from "../lib/edit-store";
 import { heygen } from "../lib/heygen";
 import { createSpendStore } from "../lib/heygen-spend-store";
 import { PlainError } from "../lib/plain-error";
-import { afterRender } from "../lib/qa/pipeline";
+import { afterRender, gateCrashed } from "../lib/qa/pipeline";
 import { createPipelineStore } from "../lib/qa/pipeline-store";
 import { heygenCallbackUrl, renderVideo } from "../lib/render";
 import { createVideoStore } from "../lib/video-store";
@@ -28,12 +28,22 @@ export const AUDIO_QA_TASK = {
   retry: { maxAttempts: 3, minTimeoutInMs: 30_000, maxTimeoutInMs: 300_000, factor: 2 },
 } as const;
 
+/**
+ * p5-b1 (QA SF1): Trigger.dev calls onFailure once the run failed and will not be retried
+ * (crash after the last retry, or AbortTaskRunError). A video still in audio_qa (and its post)
+ * goes to team_review with a plain reason (lib/qa/pipeline.ts gateCrashed), never left stuck.
+ */
+export async function audioQaFailed({ payload, error }: { payload: { videoId: string }; error: unknown }): Promise<void> {
+  await gateCrashed("audio", payload.videoId, error, createPipelineStore());
+}
+
 export const audioQaTask = schemaTask({
   id: "audio-qa",
   schema: audioQaPayload,
   machine: AUDIO_QA_TASK.machine,
   maxDuration: AUDIO_QA_TASK.maxDuration,
   retry: AUDIO_QA_TASK.retry,
+  onFailure: audioQaFailed,
   run: async ({ videoId }) => {
     try {
       const { outcome, next } = await afterRender(videoId, {

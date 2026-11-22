@@ -6,7 +6,7 @@ import { runClaudeTask, type ClaudeContext, type ClaudeTaskName } from "@/lib/cl
 import { captionFontsDir, runEditJob, type FfmpegRunner } from "@/lib/edit-flow";
 import { fixtureMusicLibrary } from "@/lib/music";
 import type { AudioGateDeps, AudioMeasure } from "@/lib/qa/audio-gate";
-import { afterEdit, afterEditTask, afterPoll, afterRender, editJobFor } from "@/lib/qa/pipeline";
+import { afterEdit, afterEditTask, afterPoll, afterRender, editJobFor, GATE_CRASH_REASONS, gateCrashed } from "@/lib/qa/pipeline";
 import type { TechnicalGateDeps } from "@/lib/qa/technical-gate";
 import { memoryPipeline } from "@/tests/helpers/pipeline-memory";
 
@@ -179,6 +179,50 @@ describe("forced failures end in the team queue, never with the customer, never 
       [false, null],
       [false, "Rebuilt the edit once."],
     ]);
+  });
+
+  it("p5-b1 (QA SF1): Gate 3 crashes (speech-to-text throws, retries exhausted) → the failure hook moves video + post to team_review; twice changes nothing more", async () => {
+    const { p, gate3 } = pipeline();
+    const { postId } = await p.seedPost(AYESHA);
+    const videoId = await p.makeVideo(postId);
+    const broken = { transcribe: async () => { throw new Error("ENOENT: no such file tests/fixtures/stt/by-text.json"); } };
+    await expect(afterRender(videoId, { ...gate3, stt: broken })).rejects.toThrow(/ENOENT/);
+    expect(p.video(videoId)?.status).toBe("audio_qa"); // stuck without the hook
+
+    expect(await gateCrashed("audio", videoId, new Error("ENOENT"), p.store)).toBe(true);
+    expect(p.video(videoId)).toMatchObject({ status: "team_review", error: GATE_CRASH_REASONS.audio });
+    expect(p.v.posts[0]).toMatchObject({ status: "team_review", status_reason: GATE_CRASH_REASONS.audio });
+
+    // Safe to run more than once: the row has left audio_qa, so nothing moves (and the post is not touched).
+    p.v.posts[0].status_reason = "the team is on it";
+    expect(await gateCrashed("audio", videoId, new Error("again"), p.store)).toBe(false);
+    expect(p.v.posts[0].status_reason).toBe("the team is on it");
+  });
+
+  it("p5-b1 (QA SF1): Gate 4 crashes → final_qa → team_review; a row that moved on (or the wrong gate) is never touched", async () => {
+    const { p, gate3, gate4, edit } = pipeline();
+    const { postId } = await p.seedPost({ ...AYESHA, dictionary: [{ written: "Ayesha", say_as: "Aa-ee-sha", status: "approved" }] });
+    const videoId = await p.makeVideo(postId);
+    const r1 = await afterRender(videoId, gate3);
+    await edit((r1.next as { payload: Parameters<typeof runEditJob>[0] }).payload);
+    expect(p.video(videoId)?.status).toBe("final_qa");
+    const crashing: FfmpegRunner = async () => { throw new Error("ffmpeg was killed"); };
+    await expect(afterEdit(videoId, { ...gate4(), ffmpeg: crashing })).rejects.toThrow(/killed/);
+    expect(p.video(videoId)?.status).toBe("final_qa");
+
+    // The audio hook only takes rows in audio_qa: a final_qa row is not its business.
+    expect(await gateCrashed("audio", videoId, new Error("x"), p.store)).toBe(false);
+    expect(p.video(videoId)?.status).toBe("final_qa");
+
+    expect(await gateCrashed("technical", videoId, new Error("ffmpeg was killed"), p.store)).toBe(true);
+    expect(p.video(videoId)).toMatchObject({ status: "team_review", error: GATE_CRASH_REASONS.technical });
+    expect(p.v.posts[0]).toMatchObject({ status: "team_review", status_reason: GATE_CRASH_REASONS.technical });
+    expect(await gateCrashed("technical", videoId, new Error("again"), p.store)).toBe(false);
+  });
+
+  it("p5-b1 (QA SF1): a crash for a video that does not exist changes nothing", async () => {
+    const { p } = pipeline();
+    expect(await gateCrashed("audio", "90000000-0000-4000-8000-00000000dead", new Error("x"), p.store)).toBe(false);
   });
 
   it("a finished likeness test or a failed poll starts nothing", () => {

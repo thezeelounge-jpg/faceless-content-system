@@ -3,7 +3,7 @@ import { z } from "zod";
 import { createEditFiles } from "../lib/edit-store";
 import { PlainError } from "../lib/plain-error";
 import { TECH_QA } from "../lib/qa/config";
-import { afterEdit } from "../lib/qa/pipeline";
+import { afterEdit, gateCrashed } from "../lib/qa/pipeline";
 import { createPipelineStore } from "../lib/qa/pipeline-store";
 import { startNext } from "./next-step";
 
@@ -21,12 +21,18 @@ export const TECHNICAL_QA_TASK = {
   retry: { maxAttempts: 2, minTimeoutInMs: 30_000, maxTimeoutInMs: 120_000, factor: 2 },
 } as const;
 
+/** p5-b1 (QA SF1): the run failed for good → a video still in final_qa (and its post) → team_review. */
+export async function technicalQaFailed({ payload, error }: { payload: { videoId: string }; error: unknown }): Promise<void> {
+  await gateCrashed("technical", payload.videoId, error, createPipelineStore());
+}
+
 export const technicalQaTask = schemaTask({
   id: "technical-qa",
   schema: technicalQaPayload,
   machine: TECHNICAL_QA_TASK.machine,
   maxDuration: TECHNICAL_QA_TASK.maxDuration,
   retry: TECHNICAL_QA_TASK.retry,
+  onFailure: technicalQaFailed,
   run: async ({ videoId }) => {
     try {
       const { outcome, next } = await afterEdit(videoId, { store: createPipelineStore(), files: createEditFiles() });

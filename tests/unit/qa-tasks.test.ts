@@ -16,8 +16,10 @@ vi.mock("@/lib/heygen-spend-store", () => ({ createSpendStore: vi.fn() }));
 vi.mock("@/lib/edit-store", () => ({ createEditStore: vi.fn(), createEditFiles: vi.fn() }));
 vi.mock("@/lib/qa/pipeline-store", () => ({ createPipelineStore: vi.fn() }));
 
-const { audioQaTask, audioQaPayload, AUDIO_QA_TASK } = await import("@/trigger/audio-qa");
-const { technicalQaTask, technicalQaPayload, TECHNICAL_QA_TASK } = await import("@/trigger/technical-qa");
+const { audioQaTask, audioQaPayload, AUDIO_QA_TASK, audioQaFailed } = await import("@/trigger/audio-qa");
+const { technicalQaTask, technicalQaPayload, TECHNICAL_QA_TASK, technicalQaFailed } = await import("@/trigger/technical-qa");
+const { createPipelineStore } = await import("@/lib/qa/pipeline-store");
+const { GATE_CRASH_REASONS } = await import("@/lib/qa/pipeline");
 const { startNext } = await import("@/trigger/next-step");
 
 const ID = "90000000-0000-4000-8000-000000000001";
@@ -56,5 +58,41 @@ describe("startNext", () => {
   it("nothing next → nothing triggered", async () => {
     await startNext(null);
     expect(sdk.trigger).not.toHaveBeenCalled();
+  });
+});
+
+describe("p5-b1 (QA SF1): onFailure (the run failed and will not be retried) sends the stuck row to the team", () => {
+  const fakeStore = () => {
+    const calls: unknown[][] = [];
+    const store = {
+      getGateContext: vi.fn(async () => ({ video: { id: ID, kind: "post", post_id: "post-1" } })),
+      moveVideo: vi.fn(async (...args: unknown[]) => {
+        calls.push(["moveVideo", ...args]);
+        return true;
+      }),
+      setPostStatus: vi.fn(async (...args: unknown[]) => {
+        calls.push(["setPostStatus", ...args]);
+      }),
+    };
+    vi.mocked(createPipelineStore).mockReturnValue(store as never);
+    return calls;
+  };
+
+  it("audio-qa: audio_qa → team_review (video and post)", async () => {
+    const calls = fakeStore();
+    await audioQaFailed({ payload: { videoId: ID }, error: new Error("ENOENT") });
+    expect(calls).toEqual([
+      ["moveVideo", ID, "team_review", ["audio_qa"], GATE_CRASH_REASONS.audio],
+      ["setPostStatus", "post-1", "team_review", GATE_CRASH_REASONS.audio],
+    ]);
+  });
+
+  it("technical-qa: final_qa → team_review (video and post)", async () => {
+    const calls = fakeStore();
+    await technicalQaFailed({ payload: { videoId: ID }, error: new Error("killed") });
+    expect(calls).toEqual([
+      ["moveVideo", ID, "team_review", ["final_qa"], GATE_CRASH_REASONS.technical],
+      ["setPostStatus", "post-1", "team_review", GATE_CRASH_REASONS.technical],
+    ]);
   });
 });

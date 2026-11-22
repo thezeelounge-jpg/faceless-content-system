@@ -1,6 +1,7 @@
+import { logAdminError } from "@/lib/admin-errors";
 import type { EditJob } from "@/lib/edit-flow";
 import { runAudioGate, type AudioGateDeps, type AudioGateOutcome } from "@/lib/qa/audio-gate";
-import type { GateContext } from "@/lib/qa/pipeline-types";
+import type { GateContext, PipelineStore } from "@/lib/qa/pipeline-types";
 import { runTechnicalGate, type TechnicalGateDeps, type TechnicalGateOutcome } from "@/lib/qa/technical-gate";
 
 // The QA pipeline orchestrator (Phase 5, p5-a2): which gate runs after which step, and what runs
@@ -69,6 +70,35 @@ export async function afterEdit(
   const ctx = await deps.store.getGateContext(videoId);
   if (!ctx) return { outcome, next: null };
   return { outcome, next: { taskId: "edit-video", payload: editJobFor(ctx), key: `edit-${videoId}-rebuild-1` } };
+}
+
+export const GATE_CRASH_REASONS = {
+  audio: "The audio check stopped with an error. The team will look at this video.",
+  technical: "The technical check stopped with an error. The team will look at this video.",
+} as const;
+
+/** The status a video waits in while each gate runs: only a row still there is moved. */
+const GATE_STATUS = { audio: "audio_qa", technical: "final_qa" } as const;
+
+/**
+ * p5-b1 (QA SF1): the audio-qa / technical-qa task crashed and will not be retried (the task's
+ * onFailure hook). The video (still in that gate's status) and its post go to team_review with a
+ * plain reason, so nothing is left stuck. Safe to run more than once: a row that already left the
+ * gate's status (a later run moved it on, or this ran before) is never touched. True = it moved.
+ */
+export async function gateCrashed(
+  gate: keyof typeof GATE_CRASH_REASONS,
+  videoId: string,
+  error: unknown,
+  store: PipelineStore,
+): Promise<boolean> {
+  logAdminError(`[${gate}-qa] the gate crashed and will not be retried`, { videoId }, error);
+  const ctx = await store.getGateContext(videoId);
+  if (!ctx || ctx.video.kind !== "post") return false;
+  const reason = GATE_CRASH_REASONS[gate];
+  if (!(await store.moveVideo(videoId, "team_review", [GATE_STATUS[gate]], reason))) return false;
+  await store.setPostStatus(ctx.video.post_id, "team_review", reason);
+  return true;
 }
 
 /** poll-render finished: a post render that is now 'rendered' goes to Gate 3. */
