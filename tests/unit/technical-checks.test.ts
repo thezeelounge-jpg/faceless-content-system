@@ -89,7 +89,7 @@ describe("parsers", () => {
 const DISPLAY = "Stop scrolling! Grow your WhatsApp sales today. Book a free call now.";
 const TRANSCRIPT = transcriptFor("stop scrolling grow your whatsapp sales today book a free call now", 6);
 const goodManifest = (): EditManifest => ({
-  version: 1, raw_duration_s: 6, format: "talking", caption_style: "big_words",
+  version: 1, raw_duration_s: 6, format: "talking", caption_style: "big_words", avoid_clips: [],
   captions: groupPages(alignWords(DISPLAY, TRANSCRIPT), "big_words"),
   broll: [{ start_s: 2, duration_s: 1.5, clip: "cafe-green" }],
   protected: { hook_end_s: 1.5, cta_start_s: 4 },

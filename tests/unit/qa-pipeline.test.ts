@@ -134,10 +134,10 @@ describe("render → Gate 3 → edit → Gate 4 → ready for Gate 5", () => {
     expect(p.extra(p.video(second)!).transcript).toEqual(transcriptBefore);
     expect(afterEditTask(edited, second, "run_1")).toEqual({ taskId: "technical-qa", payload: { videoId: second }, key: `technical-qa-${second}-run_1` });
 
-    // Gate 4 passes → ready for Gate 5.
+    // Gate 4 passes → Gate 5 next (p5-b2), one key per edit run.
     const r3 = await afterEdit(second, gate4());
     expect(r3.outcome.status).toBe("passed");
-    expect(r3.next).toBeNull(); // Gate 5 is part 5b
+    expect(r3.next).toEqual({ taskId: "visual-qa", payload: { videoId: second }, key: `visual-qa-${second}-run_1` });
     expect(p.video(second)).toMatchObject({ status: "final_qa", counts_toward_plan: false });
     expect(p.v.posts[0]).toMatchObject({ status: "final_qa", status_reason: null });
     expect(p.reports.map((r) => [r.video_id, r.gate, r.passed])).toEqual([

@@ -72,6 +72,8 @@ export const editJobSchema = z.object({
   cta: z.string().trim().min(1).max(1000),
   /** scripts.broll_keywords: extra cuts when fewer than 2 edit_plan moments fit. */
   brollKeywords: z.array(z.string().min(1)).max(10).default([]),
+  /** p5-b2: b-roll clip ids Gate 5 rejected (stray text/logo): never picked again for this video. */
+  avoidBrollClips: z.array(z.string().min(1).max(200)).max(20).default([]),
 });
 export type EditJob = z.input<typeof editJobSchema>;
 
@@ -365,8 +367,10 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     const broll: BrollCut[] = [];
     const brollClips: string[] = [];
     const usedClips = new Set<string>();
+    // p5-b2: clips Gate 5 rejected (stray text/logo) are never picked again for this video.
+    const avoided = new Set(job.avoidBrollClips);
     for (const cut of plan.cuts) {
-      const clips = await provider.search(cut.keyword, { orientation: "portrait", minDuration_s: cut.duration_s });
+      const clips = (await provider.search(cut.keyword, { orientation: "portrait", minDuration_s: cut.duration_s })).filter((c) => !avoided.has(c.id));
       const clip = clips.find((c) => !usedClips.has(c.id)) ?? clips[0];
       if (!clip) continue;
       usedClips.add(clip.id);
@@ -431,6 +435,7 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
       ai_label: extras.ai_label === true,
       watermark: extras.watermark === true,
       not_applied: notApplied,
+      avoid_clips: job.avoidBrollClips,
     };
     if (notApplied.length > 0 || brollProblem) {
       const reason = [notApplied.length > 0 ? missingExtrasMessage(notApplied) : null, brollProblem].filter(Boolean).join(" ");

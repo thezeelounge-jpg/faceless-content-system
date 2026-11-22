@@ -32,6 +32,8 @@ export const editManifestSchema = z.object({
   watermark: z.boolean(),
   /** Requested extras missing from the real ffmpeg argv (lib/edit.ts notYetApplied). */
   not_applied: z.array(z.string()),
+  /** p5-b2: b-roll clips Gate 5 rejected (never used again in this video's edits). Older manifests: none. */
+  avoid_clips: z.array(z.string()).default([]),
 });
 
 export type EditManifest = z.infer<typeof editManifestSchema>;

@@ -285,6 +285,23 @@ describe("runEditJob", () => {
     expect(graph).toContain("[v1]subtitles="); // captions on top of the b-roll
   });
 
+  it("p5-b2 (Gate 5 re-edit): avoidBrollClips swaps the clip Gate 5 rejected; the manifest records the avoid list and the caption style", async () => {
+    const m = memory();
+    await runEditJob({ ...job, avoidBrollClips: ["cafe-green"], captionStyle: "small_box" }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    const inputs = seenArgs.flatMap((a, i) => (a === "-i" ? [seenArgs[i + 1]] : []));
+    expect(inputs.some((f) => f.endsWith("cafe-green.mp4"))).toBe(false);
+    const manifest = editManifestSchema.parse((m.row as Record<string, unknown>).edit_manifest);
+    expect(manifest).toMatchObject({ caption_style: "small_box", avoid_clips: ["cafe-green"] });
+    expect(manifest.broll.every((c) => c.clip !== "cafe-green")).toBe(true);
+  });
+
+  it("p5-b2: a cut whose only clips are all avoided is dropped (never the rejected clip again)", async () => {
+    const m = memory();
+    const broll = { search: vi.fn(async (keyword: string) => [{ id: "only", keyword, file: "/tmp/only.mp4", width: 540, height: 960, duration_s: 4, source: "mock" as const }]) };
+    await runEditJob({ ...job, avoidBrollClips: ["only"] }, { ...m, broll, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(seenArgs).not.toContain("/tmp/only.mp4");
+  });
+
   it("p4-b2: the music bed (mock set) is looped under the voice and ducked by it", async () => {
     const m = memory();
     await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });

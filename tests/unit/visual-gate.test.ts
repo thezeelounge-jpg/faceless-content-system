@@ -20,7 +20,7 @@ const HOOK = "Hi, I'm Ayesha from Bright Smile Dental.";
 const CTA = "Book your free check-up today.";
 
 const manifestFor = (style: EditManifest["caption_style"] = "big_words", over: Partial<EditManifest> = {}): EditManifest => ({
-  version: 1, raw_duration_s: 7.8, format: "talking", caption_style: style,
+  version: 1, raw_duration_s: 7.8, format: "talking", caption_style: style, avoid_clips: [],
   captions: [{ start_s: 0.2, end_s: 2.2, scale: 1, lines: [[{ text: "Hi,", start_s: 0.2, end_s: 0.5, source: "matched", stt_indexes: [0] }]] }],
   broll: [{ start_s: 3, duration_s: 2, clip: "clip-coffee" }], protected: { hook_end_s: 2, cta_start_s: 6 },
   music: null, ai_label: true, watermark: false, not_applied: [], ...over,

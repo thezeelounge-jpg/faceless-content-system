@@ -26,7 +26,7 @@ import { drawBand } from "@/tests/helpers/visual-frames";
 // issues, the one automatic fix, and the human-review rules (QA-SPEC Gates 5 and 6).
 
 const manifest = (over: Partial<EditManifest> = {}): EditManifest => ({
-  version: 1, raw_duration_s: 7.8, format: "talking", caption_style: "big_words",
+  version: 1, raw_duration_s: 7.8, format: "talking", caption_style: "big_words", avoid_clips: [],
   captions: [
     { start_s: 0.2, end_s: 1.9, scale: 1, lines: [[{ text: "Hi,", start_s: 0.2, end_s: 0.5, source: "matched", stt_indexes: [0] }], [{ text: "I'm", start_s: 0.6, end_s: 0.9, source: "matched", stt_indexes: [1] }]] },
     { start_s: 2.0, end_s: 3.0, scale: 1, lines: [[{ text: "Brush", start_s: 2.0, end_s: 2.4, source: "matched", stt_indexes: [2] }, { text: "twice", start_s: 2.5, end_s: 2.9, source: "matched", stt_indexes: [3] }]] },

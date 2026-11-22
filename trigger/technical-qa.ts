@@ -9,7 +9,7 @@ import { startNext } from "./next-step";
 
 // Gate 4 (technical QA) for one finished edit. All logic lives in lib/qa/technical-gate.ts and
 // lib/qa/pipeline.ts; this task runs them and starts the one rebuild of the edit when the first
-// check fails. Passed = ready for Gate 5 (part 5b). Started by edit-video (key technical-qa-<video>-<edit run>).
+// check fails. Passed → visual-qa (Gate 5, p5-b2; key visual-qa-<video>-<edit run>). Started by edit-video (key technical-qa-<video>-<edit run>).
 // ffmpeg decodes the whole 1080x1920 reel (black/freeze/loudness), so it gets 2 GB.
 
 export const technicalQaPayload = z.object({ videoId: z.string().uuid() });

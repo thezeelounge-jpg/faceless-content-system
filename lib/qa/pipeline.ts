@@ -1,8 +1,10 @@
 import { logAdminError } from "@/lib/admin-errors";
 import type { EditJob } from "@/lib/edit-flow";
 import { runAudioGate, type AudioGateDeps, type AudioGateOutcome } from "@/lib/qa/audio-gate";
+import { editManifestSchema } from "@/lib/qa/edit-manifest";
 import type { GateContext, PipelineStore } from "@/lib/qa/pipeline-types";
 import { runTechnicalGate, type TechnicalGateDeps, type TechnicalGateOutcome } from "@/lib/qa/technical-gate";
+import { runVisualGate, type VisualGateDeps, type VisualGateOutcome } from "@/lib/qa/visual-gate";
 
 // The QA pipeline orchestrator (Phase 5, p5-a2): which gate runs after which step, and what runs
 // next. The Trigger.dev tasks stay thin: they call these and trigger the task named in `next`
@@ -24,11 +26,44 @@ export type NextTask =
   | { taskId: "poll-render"; payload: { videoId: string }; key: string }
   | { taskId: "render-video"; payload: { videoId: string }; key: string }
   | { taskId: "audio-qa"; payload: { videoId: string }; key: string }
-  | { taskId: "technical-qa"; payload: { videoId: string }; key: string };
+  | { taskId: "technical-qa"; payload: { videoId: string }; key: string }
+  | { taskId: "visual-qa"; payload: { videoId: string }; key: string };
 
-/** The edit-video payload from the rows: posts.format, scripts.* and videos.ai_label / watermark. */
+/**
+ * Gate 5 on an edit that passed Gate 4, then the next step: the one re-edit (edit-video with the
+ * fixed caption style / the rejected b-roll clip avoided), the poll for the one re-render (or
+ * render-video when all slots are busy), or nothing (delivered, in the QA queue, or the team has it).
+ */
+export async function afterVisual(videoId: string, deps: VisualGateDeps): Promise<{ outcome: VisualGateOutcome; next: NextTask | null }> {
+  const outcome = await runVisualGate(videoId, deps);
+  if (outcome.status === "reedit") {
+    const ctx = await deps.store.getGateContext(videoId);
+    if (!ctx) return { outcome, next: null };
+    const job = editJobFor(ctx);
+    const payload: EditJob = {
+      ...job,
+      captionStyle: outcome.captionStyle ?? job.captionStyle,
+      avoidBrollClips: [...new Set([...(job.avoidBrollClips ?? []), ...outcome.avoidClips])],
+    };
+    return { outcome, next: { taskId: "edit-video", payload, key: `edit-${videoId}-visual-1` } };
+  }
+  if (outcome.status === "rerendering") {
+    const id = outcome.videoId;
+    if (outcome.render.status === "waiting") return { outcome, next: { taskId: "render-video", payload: { videoId: id }, key: `render-${id}` } };
+    return { outcome, next: { taskId: "poll-render", payload: { videoId: id }, key: `poll-render-${id}` } };
+  }
+  return { outcome, next: null };
+}
+
+/**
+ * The edit-video payload from the rows: posts.format, scripts.* and videos.ai_label / watermark.
+ * p5-b2: when the video was already edited, its manifest's caption style and avoided b-roll clips are
+ * kept, so a Gate 4 rebuild after a Gate 5 re-edit never undoes the Gate 5 fix.
+ */
 export function editJobFor(ctx: GateContext): EditJob {
+  const manifest = editManifestSchema.safeParse(ctx.video.edit_manifest);
   return {
+    ...(manifest.success ? { captionStyle: manifest.data.caption_style, avoidBrollClips: manifest.data.avoid_clips } : {}),
     videoId: ctx.video.id,
     rawPath: ctx.video.raw_path ?? "",
     displayText: ctx.script.display_text,
@@ -66,19 +101,25 @@ export async function afterEdit(
   deps: TechnicalGateDeps,
 ): Promise<{ outcome: TechnicalGateOutcome; next: NextTask | null }> {
   const outcome = await runTechnicalGate(videoId, deps);
-  if (outcome.status !== "rebuild") return { outcome, next: null };
+  if (outcome.status !== "rebuild" && outcome.status !== "passed") return { outcome, next: null };
   const ctx = await deps.store.getGateContext(videoId);
   if (!ctx) return { outcome, next: null };
+  // p5-b2: passed → Gate 5, one key per edit run (a retry of Gate 4 never starts Gate 5 twice;
+  // the re-edit after a Gate 5 fix is a new edit run, so it gets its own Gate 5).
+  if (outcome.status === "passed") {
+    return { outcome, next: { taskId: "visual-qa", payload: { videoId }, key: `visual-qa-${videoId}-${ctx.video.edit_run_id ?? "edit"}` } };
+  }
   return { outcome, next: { taskId: "edit-video", payload: editJobFor(ctx), key: `edit-${videoId}-rebuild-1` } };
 }
 
 export const GATE_CRASH_REASONS = {
   audio: "The audio check stopped with an error. The team will look at this video.",
   technical: "The technical check stopped with an error. The team will look at this video.",
+  visual: "The visual check stopped with an error. The team will look at this video.",
 } as const;
 
-/** The status a video waits in while each gate runs: only a row still there is moved. */
-const GATE_STATUS = { audio: "audio_qa", technical: "final_qa" } as const;
+/** The status a video waits in while each gate runs: only a row still there is moved. Gate 5 runs while it is final_qa. */
+const GATE_STATUS = { audio: "audio_qa", technical: "final_qa", visual: "final_qa" } as const;
 
 /**
  * p5-b1 (QA SF1): the audio-qa / technical-qa task crashed and will not be retried (the task's
