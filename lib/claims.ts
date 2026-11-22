@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { PlainError } from "@/lib/plain-error";
-import { RENDER } from "@/lib/qa/config";
+import { RENDER, TWIN_POLL_MAX_S } from "@/lib/qa/config";
 
 // Decision (b) (Rowan, p3-fix2): "Clear stuck claim", admin only.
 //
@@ -62,20 +62,32 @@ export interface ClaimStore {
  */
 export const CLAIM_CLEAR_WAIT_S = RENDER.poll_max_s;
 
+/**
+ * p4-b1 (Rowan 5c): twins have their own wait, the twin poll's maximum
+ * (TWIN_POLL_MAX_S in lib/qa/config.ts, about 27.5 hours). The SQL function
+ * clear_stuck_claim holds the same number (tests/db/rls.test.ts checks).
+ */
+export const TWIN_CLAIM_CLEAR_WAIT_S = TWIN_POLL_MAX_S;
+
+/** The wait for a claim: renders and likeness tests 30 min, twins the twin poll maximum. */
+export function claimWaitS(target: StuckClaim["target"]): number {
+  return target === "twin" ? TWIN_CLAIM_CLEAR_WAIT_S : CLAIM_CLEAR_WAIT_S;
+}
+
 /** When this claim may be cleared. */
-export function clearableAt(startedAt: string): Date {
-  return new Date(Date.parse(startedAt) + CLAIM_CLEAR_WAIT_S * 1000);
+export function clearableAt(startedAt: string, target: StuckClaim["target"] = "video"): Date {
+  return new Date(Date.parse(startedAt) + claimWaitS(target) * 1000);
 }
 
 /** True once the wait is over, or at once when the row already failed (the poll gave up). */
-export function canClearClaim(claim: Pick<StuckClaim, "startedAt" | "status">, now: Date): boolean {
+export function canClearClaim(claim: Pick<StuckClaim, "startedAt" | "status"> & { target?: StuckClaim["target"] }, now: Date): boolean {
   if (claim.status === "failed") return true;
-  return now.getTime() >= clearableAt(claim.startedAt).getTime();
+  return now.getTime() >= clearableAt(claim.startedAt, claim.target).getTime();
 }
 
 /** Adds when each claim may be cleared; the admin pages show the button only when canClear. */
 export function withClearTiming(claims: StuckClaim[], now: Date): StuckClaimView[] {
-  return claims.map((c) => ({ ...c, clearableAt: clearableAt(c.startedAt).toISOString(), canClear: canClearClaim(c, now) }));
+  return claims.map((c) => ({ ...c, clearableAt: clearableAt(c.startedAt, c.target).toISOString(), canClear: canClearClaim(c, now) }));
 }
 
 /** "14:35" in Karachi time. */
@@ -83,8 +95,14 @@ export function karachiTime(at: Date): string {
   return at.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
-export function tooSoonMessage(at: Date): string {
-  return `HeyGen may still be making this. It can be cleared after ${karachiTime(at)} (Karachi time). Nothing was changed.`;
+/** "22/11/2026 14:35" in Karachi time (twin waits are about a day long). */
+export function karachiDateTime(at: Date): string {
+  return `${at.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi" })} ${karachiTime(at)}`;
+}
+
+export function tooSoonMessage(at: Date, withDate = false): string {
+  const when = withDate ? karachiDateTime(at) : karachiTime(at);
+  return `HeyGen may still be making this. It can be cleared after ${when} (Karachi time). Nothing was changed.`;
 }
 
 export const clearClaimSchema = z.object({
@@ -117,9 +135,10 @@ export async function clearStuckClaim(
   const claim = await deps.claims.getStuck(target, id);
   if (!claim) throw new PlainError(NO_STUCK_CLAIM);
   const now = (deps.now ?? (() => new Date()))();
-  if (!canClearClaim(claim, now)) throw new PlainError(tooSoonMessage(clearableAt(claim.startedAt)));
+  const tooSoon = () => new PlainError(tooSoonMessage(clearableAt(claim.startedAt, target), target === "twin"));
+  if (!canClearClaim({ ...claim, target }, now)) throw tooSoon();
   const cleared = await deps.claims.clear(target, id, deps.adminEmail);
   if (cleared === "none") throw new PlainError(NO_STUCK_CLAIM);
-  if (cleared === "too_soon") throw new PlainError(tooSoonMessage(clearableAt(claim.startedAt)));
+  if (cleared === "too_soon") throw tooSoon();
   return DONE[cleared];
 }

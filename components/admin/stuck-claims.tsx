@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ClearClaimForm } from "@/components/admin/clear-claim-form";
 import { requireAdmin } from "@/lib/auth";
-import { karachiTime, withClearTiming } from "@/lib/claims";
+import { karachiDateTime, karachiTime, withClearTiming } from "@/lib/claims";
 import { createClaimStore } from "@/lib/claims-store";
 
 /**
@@ -28,7 +28,9 @@ export async function StuckClaims() {
             <ClearClaimForm target={claim.target} id={claim.id} />
           ) : (
             <p className="text-muted-foreground">
-              HeyGen may still be making this. It can be cleared after {karachiTime(new Date(claim.clearableAt))} (Karachi time).
+              HeyGen may still be making this. It can be cleared after{" "}
+              {claim.target === "twin" ? karachiDateTime(new Date(claim.clearableAt)) : karachiTime(new Date(claim.clearableAt))} (Karachi
+              time).
             </p>
           )}
         </li>

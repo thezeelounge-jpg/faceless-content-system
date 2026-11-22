@@ -2,14 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHeygenClient } from "@/lib/heygen";
 import {
   CLAIM_CLEAR_WAIT_S,
+  TWIN_CLAIM_CLEAR_WAIT_S,
   canClearClaim,
+  claimWaitS,
   clearStuckClaim,
   clearableAt,
   tooSoonMessage,
   withClearTiming,
 } from "@/lib/claims";
 import { prepareLikenessTest } from "@/lib/likeness";
-import { RENDER } from "@/lib/qa/config";
+import { RENDER, TWIN_POLL_MAX_S } from "@/lib/qa/config";
 import { createPostRender } from "@/lib/render";
 import { BRAND_ID } from "@/tests/helpers/consent-memory";
 import { CLEARED_VIDEO_ERROR, memoryClaimStore } from "@/tests/helpers/claims-memory";
@@ -87,7 +89,8 @@ async function stuckLikenessRow() {
 }
 
 /** A twin whose create POST answer was lost: claim held, no group id. */
-async function stuckTwin(startedAt = STARTED) {
+/** Default: just past the twin wait (p4-b1 5c: TWIN_POLL_MAX_S, not 30 minutes), so it may be cleared. */
+async function stuckTwin(startedAt = minutesAgo(TWIN_POLL_MAX_S / 60 + 1)) {
   const consent = await mem.consentMem.store.insertConsent({
     brand_id: BRAND_ID,
     person_legal_name: "Ayesha Khan",
@@ -187,14 +190,32 @@ describe("c1: the wait before a claim can be cleared (Sunny's blocker)", () => {
     );
   });
 
-  it("a 5-minute-old twin claim is refused; a 31-minute-old one clears", async () => {
-    const young = await stuckTwin(YOUNG);
-    await expect(clearStuckClaim(confirmed("twin", young.id), { claims: claimMem.claims, adminEmail: ADMIN })).rejects.toThrow(
-      "HeyGen may still be making this.",
+  it("p4-b1 5c: twins wait the whole twin poll (TWIN_POLL_MAX_S, about 27.5 h), not 30 minutes", () => {
+    expect(TWIN_CLAIM_CLEAR_WAIT_S).toBe(TWIN_POLL_MAX_S);
+    expect(TWIN_POLL_MAX_S).toBe(60 + 120 + 240 + 480 + 960 + 54 * 1800); // 99060 s
+    expect(claimWaitS("twin")).toBe(TWIN_POLL_MAX_S);
+    expect(claimWaitS("video")).toBe(RENDER.poll_max_s);
+  });
+
+  it("p4-b1 5c: a 31-minute-old twin claim is now TOO SOON (lib refuses, store never called); after the twin wait it clears", async () => {
+    const twin = await stuckTwin(minutesAgo(31));
+    const clear = vi.spyOn(claimMem.claims, "clear");
+    const startedAt = mem.consentMem.avatars[0].create_started_at!;
+    await expect(clearStuckClaim(confirmed("twin", twin.id), { claims: claimMem.claims, adminEmail: ADMIN })).rejects.toThrow(
+      tooSoonMessage(clearableAt(startedAt, "twin"), true),
     );
-    expect(mem.consentMem.avatars[0].create_started_at).toBe(YOUNG);
-    mem.consentMem.avatars[0].create_started_at = minutesAgo(31);
-    expect(await clearStuckClaim(confirmed("twin", young.id), { claims: claimMem.claims, adminEmail: ADMIN })).toContain("Claim cleared");
+    expect(clear).not.toHaveBeenCalled();
+    expect(mem.consentMem.avatars[0].create_started_at).toBe(startedAt);
+    mem.consentMem.avatars[0].create_started_at = minutesAgo(TWIN_POLL_MAX_S / 60 + 1);
+    expect(await clearStuckClaim(confirmed("twin", twin.id), { claims: claimMem.claims, adminEmail: ADMIN })).toContain("Claim cleared");
+  });
+
+  it("p4-b1 5c: canClearClaim for twins: false at 31 min and just before the twin wait, true after it or once failed", () => {
+    const twin = (minutes: number, status = "consent_pending") => ({ startedAt: at(minutes), status, target: "twin" as const });
+    expect(canClearClaim(twin(31), NOW)).toBe(false);
+    expect(canClearClaim(twin(TWIN_POLL_MAX_S / 60 - 1), NOW)).toBe(false);
+    expect(canClearClaim(twin(TWIN_POLL_MAX_S / 60), NOW)).toBe(true);
+    expect(canClearClaim(twin(1, "failed"), NOW)).toBe(true);
   });
 
   it("canClearClaim: only after 30 minutes, or at once when the row already failed", () => {

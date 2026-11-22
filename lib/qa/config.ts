@@ -75,6 +75,28 @@ export const RENDER = {
 } as const;
 
 /**
+ * Waiting for a twin (lib/twin.ts pollTwinUntilReady, trigger/poll-twin.ts):
+ * the first check waits first_wait_s, each next wait doubles up to max_wait_s,
+ * at most max_attempts checks (about a day: HeyGen's consent link lasts 24 hours).
+ */
+export const TWIN_POLL = {
+  first_wait_s: 60,
+  max_wait_s: 1800,
+  max_attempts: 60,
+} as const;
+
+/**
+ * The longest the twin poll waits in total (seconds): the sum of the waits
+ * between its max_attempts checks = 60+120+240+480+960 + 54 × 1800 = 99060 s
+ * (about 27.5 hours). p4-b1 (Rowan 5c): a twin claim may be cleared only after
+ * this long (or once the twin failed). The SQL clear_stuck_claim holds the same
+ * number (tests/db/rls.test.ts checks).
+ */
+export const TWIN_POLL_MAX_S = Array.from({ length: TWIN_POLL.max_attempts - 1 }, (_, i) =>
+  Math.min(TWIN_POLL.first_wait_s * 2 ** i, TWIN_POLL.max_wait_s),
+).reduce((sum, wait) => sum + wait, 0);
+
+/**
  * The editor (Phase 4, lib/edit-flow.ts). Not a quality gate; the time limits
  * of one edit. A 60 s reel encodes in about real time on 4 vCPUs (large-1x);
  * the limit leaves room for a slow machine. The task's maxDuration is longer.

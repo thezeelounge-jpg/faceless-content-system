@@ -1,10 +1,10 @@
-import { CLAIM_CLEAR_WAIT_S, type ClaimStore, type ClearedClaim, type StuckClaim } from "@/lib/claims";
+import { claimWaitS, type ClaimStore, type ClearedClaim, type StuckClaim } from "@/lib/claims";
 import type { memoryVideoStore } from "@/tests/helpers/video-memory";
 
 // In-memory ClaimStore over the video + consent memory stores, mirroring the
 // clear_stuck_claim database function (migration 20261122130000):
 //   - a claim is cleared ONLY while it has no HeyGen id;
-//   - only after CLAIM_CLEAR_WAIT_S from the claim, or once the row failed
+//   - only after claimWaitS(target) from the claim (twins: the twin poll maximum, p4-b1), or once the row failed
 //     ('too_soon' otherwise, nothing written);
 //   - a cleared video is retired (claim_cleared_at) and never claimed again;
 //   - a cleared POST render puts its post back to 'approved' (from
@@ -27,8 +27,8 @@ export const CLEARED_VIDEO_ERROR = "Claim cleared by an admin after checking Hey
 
 export function memoryClaimStore(mem: ReturnType<typeof memoryVideoStore>) {
   const audit: ClaimAuditRow[] = [];
-  const tooSoon = (startedAt: string, status: string) =>
-    status !== "failed" && Date.now() - Date.parse(startedAt) < CLAIM_CLEAR_WAIT_S * 1000;
+  const tooSoon = (startedAt: string, status: string, target: "video" | "twin") =>
+    status !== "failed" && Date.now() - Date.parse(startedAt) < claimWaitS(target) * 1000;
 
   function stuck(): StuckClaim[] {
     const out: StuckClaim[] = [];
@@ -65,7 +65,7 @@ export function memoryClaimStore(mem: ReturnType<typeof memoryVideoStore>) {
       if (target === "video") {
         const v = mem.videos.find((row) => row.id === id && row.render_started_at && !row.heygen_video_id);
         if (!v) return "none";
-        if (tooSoon(v.render_started_at!, v.status)) return "too_soon";
+        if (tooSoon(v.render_started_at!, v.status, "video")) return "too_soon";
         Object.assign(v, { render_started_at: null, status: "failed", error: CLEARED_VIDEO_ERROR });
         mem.clearedAt.set(v.id, new Date().toISOString());
         kind = v.kind === "likeness_test" ? "likeness_test" : "render";
@@ -77,7 +77,7 @@ export function memoryClaimStore(mem: ReturnType<typeof memoryVideoStore>) {
       } else {
         const a = mem.consentMem.avatars.find((row) => row.id === id && row.create_started_at && !row.heygen_group_id);
         if (!a) return "none";
-        if (tooSoon(a.create_started_at!, a.status)) return "too_soon";
+        if (tooSoon(a.create_started_at!, a.status, "twin")) return "too_soon";
         Object.assign(a, { create_started_at: null, error: null });
         kind = "twin";
       }

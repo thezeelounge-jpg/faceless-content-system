@@ -5,7 +5,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { RENDER } from "@/lib/qa/config";
+import { RENDER, TWIN_POLL_MAX_S } from "@/lib/qa/config";
 
 // Every migration, in file-name order, exactly as `supabase db push` runs them.
 const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
@@ -720,7 +720,7 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
     await asRole("service_role", null, async () => {
       const id = (
         await db.query<{ id: string }>(
-          `insert into public.avatars (brand_id, create_started_at, error) values ('${BRAND_A}', now() - interval '31 minutes', 'A twin may already exist') returning id`,
+          `insert into public.avatars (brand_id, create_started_at, error) values ('${BRAND_A}', now() - interval '28 hours', 'A twin may already exist') returning id`,
         )
       ).rows[0].id;
       expect((await clear("twin", id)).rows[0].result).toBe("twin");
@@ -785,7 +785,33 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
     });
   });
 
-  it("c1: a 5-minute-old twin claim is refused; a 31-minute-old one clears", async () => {
+  it("p4-b1 5c: twins wait TWIN_POLL_MAX_S in SQL too (same number as TS): 31 min and just before → too_soon; just after → clears", async () => {
+    const src = await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = 'clear_stuck_claim'");
+    expect(src.rows[0].src).toContain(`interval '${TWIN_POLL_MAX_S} seconds'`);
+    expect(src.rows[0].src).toContain(`interval '${RENDER.poll_max_s} seconds'`);
+    await asRole("service_role", null, async () => {
+      const insert = async (seconds: number, status = "consent_pending") =>
+        (
+          await db.query<{ id: string }>(
+            `insert into public.avatars (brand_id, status, create_started_at) values ('${BRAND_A}', $2, now() - make_interval(secs => $1)) returning id`,
+            [seconds, status],
+          )
+        ).rows[0].id;
+      const thirtyOne = await insert(31 * 60);
+      const justBefore = await insert(TWIN_POLL_MAX_S - 60);
+      const justAfter = await insert(TWIN_POLL_MAX_S + 60);
+      const failed = await insert(60, "failed");
+      expect((await clear("twin", thirtyOne)).rows[0].result).toBe("too_soon");
+      expect((await clear("twin", justBefore)).rows[0].result).toBe("too_soon");
+      expect((await clear("twin", justAfter)).rows[0].result).toBe("twin");
+      expect((await clear("twin", failed)).rows[0].result).toBe("twin");
+      const ids = [thirtyOne, justBefore, justAfter, failed];
+      await db.query("delete from public.provider_usage where avatar_id = any($1::uuid[])", [ids]);
+      await db.query("delete from public.avatars where id = any($1::uuid[])", [ids]);
+    });
+  });
+
+  it("c1: a 5-minute-old twin claim is refused; one older than the twin wait clears", async () => {
     await asRole("service_role", null, async () => {
       const insert = async (minutes: number) =>
         (
@@ -795,7 +821,7 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
           )
         ).rows[0].id;
       const young = await insert(5);
-      const old = await insert(31);
+      const old = await insert(TWIN_POLL_MAX_S / 60 + 1);
       expect((await clear("twin", young)).rows[0].result).toBe("too_soon");
       expect((await clear("twin", old)).rows[0].result).toBe("twin");
       const row = await db.query<{ claimed: boolean }>("select create_started_at is not null as claimed from public.avatars where id = $1", [young]);
