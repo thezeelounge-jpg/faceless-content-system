@@ -317,6 +317,15 @@ export const QUALITY = {
 } as const;
 
 /**
+ * p5-b3: calibration (PROMPTS Phase 5 item 8, read only). The page shows each gate's scores and a
+ * proposed threshold only once this many REAL videos (a non-mock, succeeded HeyGen render) exist.
+ * Proposals are never written: the owner agrees, then a person edits this file.
+ */
+export const CALIBRATION = {
+  min_real_videos: 10,
+} as const;
+
+/**
  * brands.words_per_second: the rolling average of the last 10 real post
  * renders (words in spoken_text / real duration). Samples outside these
  * bounds are ignored as absurd (a broken duration, an empty script).
