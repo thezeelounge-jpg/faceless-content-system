@@ -27,6 +27,8 @@ type Extra = {
   rerender_of: string | null;
   qa_fix_note: string | null;
   edit_run_id: string | null;
+  /** p5-b2: which gate's automatic fix made this video. */
+  rerender_gate: "audio" | "visual" | null;
 };
 
 type ScriptExtra = Omit<GateContext["script"], "id" | "post_id" | "spoken_text" | "display_text">;
@@ -50,6 +52,8 @@ export function memoryPipeline(opts: { personName?: string; language?: string; m
   const scriptExtras = new Map<string, ScriptExtra>();
   const postFormat = new Map<string, "talking" | "story">();
   const reports: VideoQaReport[] = [];
+  /** brand_qa_settings.team_reviews_every_video (no entry = true). */
+  const brandQaSettings = new Map<string, boolean>();
   const pronunciations: (PronunciationEntry & { brand_id: string; source: "manual" | "qa" })[] = [];
   const brandInfo = {
     offers: "Free check-up for new patients" as string | null,
@@ -65,7 +69,7 @@ export function memoryPipeline(opts: { personName?: string; language?: string; m
     if (!e) {
       e = {
         post_id: postOf(row), transcript: null, final_path: null, ai_label: true, watermark: false,
-        edit_manifest: null, rerender_of: null, qa_fix_note: null, edit_run_id: null,
+        edit_manifest: null, rerender_of: null, qa_fix_note: null, edit_run_id: null, rerender_gate: null,
       };
       extras.set(row.id, e);
     }
@@ -147,9 +151,67 @@ export function memoryPipeline(opts: { personName?: string; language?: string; m
       Object.assign(video(made.id)!, { attempt: row.attempt + 1, counts_toward_plan: false });
       extras.set(made.id, {
         post_id: postId, transcript: null, final_path: null, ai_label: old.ai_label, watermark: old.watermark, edit_manifest: null,
-        rerender_of: row.id, qa_fix_note: fixNote, edit_run_id: null,
+        rerender_of: row.id, qa_fix_note: fixNote, edit_run_id: null, rerender_gate: "audio",
       });
       return { outcome: "created", videoId: made.id };
+    },
+    // p5-b2 (Gate 5, human review, usage rule).
+    async countFailedScriptReports(scriptId, gate) {
+      return reports.filter((r) => r.script_id === scriptId && r.gate === gate && !r.passed).length;
+    },
+    async countBrandPostsPassed(brandId, gate, excludePostId) {
+      const posts = new Set<string>();
+      for (const r of reports) {
+        const row = video(r.video_id);
+        if (!row || row.brand_id !== brandId || r.gate !== gate || !r.passed) continue;
+        const post = extra(row).post_id;
+        if (post !== excludePostId) posts.add(post);
+      }
+      return posts.size;
+    },
+    async teamReviewsEveryVideo(brandId) {
+      return brandQaSettings.get(brandId) ?? true;
+    },
+    async prepareReedit(videoId, fixNote, reason) {
+      const row = video(videoId);
+      if (!row || row.status !== "final_qa") return false;
+      Object.assign(row, { status: "audio_qa", error: reason });
+      extra(row).qa_fix_note = fixNote;
+      return true;
+    },
+    // Mirrors create_visual_rerender (migration 20261123000000).
+    async createVisualRerender(videoId, fixNote) {
+      const row = video(videoId);
+      if (!row || row.kind !== "post") return { outcome: "not_found", videoId: null };
+      if (row.status !== "final_qa") return { outcome: "not_allowed", videoId: null };
+      const postId = postOf(row);
+      const latest = v.scripts.filter((s) => s.post_id === postId).sort((a, b) => b.version - a.version)[0];
+      if (latest?.id !== row.script_id) return { outcome: "not_allowed", videoId: null };
+      if (v.videos.filter((x) => x.script_id === row.script_id && extra(x).rerender_gate === "visual").length >= 1) {
+        return { outcome: "limit", videoId: null };
+      }
+      const old = extra(row);
+      Object.assign(row, { status: "failed", error: "Failed the visual check (Gate 5); re-rendered once at our cost." });
+      const made = await v.store.insertVideo({
+        brand_id: row.brand_id, script_id: row.script_id, avatar_id: row.avatar_id, kind: "post", engine: row.engine, spoken_words: row.spoken_words,
+      });
+      Object.assign(video(made.id)!, { attempt: row.attempt + 1, counts_toward_plan: false });
+      extras.set(made.id, {
+        post_id: postId, transcript: null, final_path: null, ai_label: old.ai_label, watermark: old.watermark, edit_manifest: null,
+        rerender_of: row.id, qa_fix_note: fixNote, edit_run_id: null, rerender_gate: "visual",
+      });
+      return { outcome: "created", videoId: made.id };
+    },
+    // Mirrors deliver_post_video (migration 20261123000000).
+    async deliverVideo(videoId) {
+      const row = video(videoId);
+      if (!row || row.kind !== "post") return "not_found";
+      if (row.status !== "final_qa") return "not_allowed";
+      const postId = postOf(row);
+      for (const other of v.videos) if (other.id !== row.id && postOf(other) === postId) other.counts_toward_plan = false;
+      Object.assign(row, { status: "ready", counts_toward_plan: true, error: null });
+      await v.store.setPostStatus(postId, "ready", null);
+      return "delivered";
     },
   };
 
@@ -242,7 +304,7 @@ export function memoryPipeline(opts: { personName?: string; language?: string; m
   }
 
   return {
-    v, spend, bucket, heygen, store, editStore, files, extras, reports, pronunciations, brandInfo, postFormat,
+    v, spend, bucket, heygen, store, editStore, files, extras, reports, pronunciations, brandInfo, postFormat, brandQaSettings,
     seedPost, makeVideo, finishRender, render: (id: string) => renderVideo(id, renderDeps()), video, extra,
   };
 }

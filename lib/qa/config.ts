@@ -252,6 +252,44 @@ export const TECH_QA = {
 } as const;
 
 /**
+ * Gate 5: Visual and realism QA (p5-b2, lib/qa/visual-checks.ts, lib/qa/visual-gate.ts). Claude (MAIN)
+ * with image input on frames sampled from the final video, plus pixel checks without AI.
+ */
+export const VISUAL_QA = {
+  /** QA-SPEC: one frame every 2 s, plus the first and last frames, plus one from each b-roll cut-in. */
+  frame_every_s: 2,
+  /** Never send more frames than this (a 60 s reel needs about 35). */
+  max_frames: 40,
+  /** Frames go to Claude as JPEGs this wide (9:16, so 960 tall); Claude downsizes larger images anyway. */
+  claude_frame_width: 540,
+  /** realism_score (1 to 10, "would a viewer believe this is a real recording?"): this or more passes. */
+  pass_realism_score: 8,
+  /** One automatic fix per gate (a re-edit or a re-render), counted per script (SQL create_visual_rerender holds the same number). */
+  max_fixes: 1,
+  /** Captions over the mouth / unreadable: re-edit with the first of these whose 2-line box starts lower than the current style's. */
+  caption_fix_styles: ["small_box", "minimal"],
+  /** Frame extraction (one ffmpeg pass over the final file) is stopped after this long. */
+  extract_timeout_s: 120,
+  /**
+   * Pixel checks of the AI label and the trial corner tag (luma 0-255 of the drawn box, no AI).
+   * pad strip = the box rows above the text (only the dark box there): its mean must be at most
+   * box_max_luma. text area = the text rows: at least text_min_share of its pixels at least text_min_luma.
+   * text_width_em = the shortest text width we expect, per px of font size per letter.
+   */
+  pixel: { box_max_luma: 130, text_min_luma: 180, text_min_share: 0.02, text_width_em: 0.45 },
+} as const;
+
+/** Gate 6: which videos a person watches before the customer sees them (QA-SPEC "Gate 6: Human review"). */
+export const HUMAN_REVIEW = {
+  /** The first 5 videos of every new brand. */
+  first_videos_per_brand: 5,
+  /** Any video with realism_score below 9 (it passed Gate 5 at 8). */
+  below_realism_score: 9,
+  /** A random 1 in 5 of all other videos (stable per video id, so a retry decides the same). */
+  random_one_in: 5,
+} as const;
+
+/**
  * brands.words_per_second: the rolling average of the last 10 real post
  * renders (words in spoken_text / real duration). Samples outside these
  * bounds are ignored as absurd (a broken duration, an empty script).

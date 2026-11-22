@@ -97,6 +97,13 @@ function oneVideo(finalPath: string) {
     saveQaRespelling: async () => {},
     updateSpokenText: async () => {},
     createQaRerender: async () => ({ outcome: "not_allowed", videoId: null }),
+    // p5-b2: Gate 5 methods (not used by Gate 4).
+    countFailedScriptReports: async () => 0,
+    countBrandPostsPassed: async () => 0,
+    teamReviewsEveryVideo: async () => true,
+    prepareReedit: async () => false,
+    createVisualRerender: async () => ({ outcome: "not_allowed", videoId: null }),
+    deliverVideo: async () => "not_allowed",
   };
   const files = {
     download: async (p: string) => new Uint8Array(await readFile(p === REAL_RAW ? rawFile : p === "final/good.mp4" ? goodFile : badFile)),

@@ -61,7 +61,7 @@ export type GateContext = {
 export type VideoQaReport = {
   video_id: string;
   script_id: string;
-  gate: "audio" | "technical";
+  gate: "audio" | "technical" | "visual";
   passed: boolean;
   score: number | null;
   issues: QaIssue[];
@@ -69,6 +69,9 @@ export type VideoQaReport = {
 };
 
 export type RerenderOutcome = { outcome: "created" | "limit" | "not_allowed" | "not_found"; videoId: string | null };
+
+/** p5-b2: rpc deliver_post_video. */
+export type DeliverOutcome = "delivered" | "not_allowed" | "not_found";
 
 export interface PipelineStore {
   getGateContext(videoId: string): Promise<GateContext | null>;
@@ -84,4 +87,18 @@ export interface PipelineStore {
   updateSpokenText(scriptId: string, spokenText: string): Promise<void>;
   /** rpc create_qa_rerender: the one automatic re-render (attempt 2, counts_toward_plan = false). */
   createQaRerender(videoId: string, spokenWords: number, fixNote: string): Promise<RerenderOutcome>;
+
+  // p5-b2: Gate 5 (visual and realism) and the human-review / usage rules.
+  /** FAILED reports of this gate for the SCRIPT (all its videos): Gate 5's one fix is per script, re-renders included. */
+  countFailedScriptReports(scriptId: string, gate: VideoQaReport["gate"]): Promise<number>;
+  /** How many OTHER posts of the brand have a video that passed this gate (the first-5 rule). */
+  countBrandPostsPassed(brandId: string, gate: VideoQaReport["gate"], excludePostId: string): Promise<number>;
+  /** brand_qa_settings.team_reviews_every_video (no row = true). Only used for managed brands. */
+  teamReviewsEveryVideo(brandId: string): Promise<boolean>;
+  /** Gate 5 re-edit: final_qa → audio_qa (the edit can start), qa_fix_note = the fix. False = the video moved on. */
+  prepareReedit(videoId: string, fixNote: string, reason: string): Promise<boolean>;
+  /** rpc create_visual_rerender: Gate 5's one re-render per script (counts_toward_plan = false). */
+  createVisualRerender(videoId: string, fixNote: string): Promise<RerenderOutcome>;
+  /** rpc deliver_post_video: final_qa → ready; this video counts, every other video of the post does not; post → ready. */
+  deliverVideo(videoId: string): Promise<DeliverOutcome>;
 }

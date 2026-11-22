@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import type { PronunciationEntry } from "@/lib/pronunciation/dictionary";
-import type { GateContext, PipelineStore, RerenderOutcome } from "@/lib/qa/pipeline-types";
+import type { DeliverOutcome, GateContext, PipelineStore, RerenderOutcome } from "@/lib/qa/pipeline-types";
 import { maxSecondsFor } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -20,6 +20,25 @@ export function rerenderResult(data: unknown): RerenderOutcome {
     throw new Error("Could not make the QA re-render: unexpected answer");
   }
   return { outcome: parsed.data.outcome, videoId: parsed.data.outcome === "created" ? parsed.data.video_id : null };
+}
+
+const deliverAnswer = z.object({ outcome: z.enum(["delivered", "not_allowed", "not_found"]) });
+
+/** p5-b2: the deliver_post_video answer. */
+export function deliverResult(data: unknown): DeliverOutcome {
+  const parsed = deliverAnswer.safeParse(data);
+  if (!parsed.success) throw new Error("Could not deliver the video: unexpected answer");
+  return parsed.data.outcome;
+}
+
+/** p5-b2: distinct posts in qa_reports rows (joined videos.post_id), never `excludePostId`. */
+export function distinctPosts(rows: { videos: { post_id: string | null } | null }[], excludePostId: string): number {
+  const posts = new Set<string>();
+  for (const row of rows) {
+    const post = row.videos?.post_id;
+    if (post && post !== excludePostId) posts.add(post);
+  }
+  return posts.size;
 }
 
 const fail = (what: string, error: { message: string }): never => {
@@ -156,6 +175,54 @@ export function createPipelineStore(): PipelineStore {
       const { data, error } = await db.rpc("create_qa_rerender", { p_video_id: videoId, p_spoken_words: spokenWords, p_fix_note: fixNote });
       if (error) fail("make the QA re-render", error);
       return rerenderResult(data);
+    },
+    async countFailedScriptReports(scriptId, gate) {
+      const { count, error } = await db
+        .from("qa_reports")
+        .select("id", { count: "exact", head: true })
+        .eq("script_id", scriptId)
+        .eq("gate", gate)
+        .eq("passed", false);
+      if (error) fail("count QA reports", error);
+      return count ?? 0;
+    },
+    async countBrandPostsPassed(brandId, gate, excludePostId) {
+      // Only the first few matter (HUMAN_REVIEW.first_videos_per_brand); 1000 rows is far more than enough.
+      const { data, error } = await db
+        .from("qa_reports")
+        .select("videos!inner(post_id, brand_id)")
+        .eq("gate", gate)
+        .eq("passed", true)
+        .eq("videos.brand_id", brandId)
+        .limit(1000);
+      if (error) fail("count passed videos", error);
+      return distinctPosts((data ?? []) as unknown as { videos: { post_id: string | null } | null }[], excludePostId);
+    },
+    async teamReviewsEveryVideo(brandId) {
+      const { data, error } = await db.from("brand_qa_settings").select("team_reviews_every_video").eq("brand_id", brandId).maybeSingle();
+      if (error) fail("load brand QA settings", error);
+      return data?.team_reviews_every_video ?? true; // no row = on (QA-SPEC: until the operator turns it off)
+    },
+    async prepareReedit(videoId, fixNote, reason) {
+      const { data, error } = await db
+        .from("videos")
+        .update({ status: "audio_qa", qa_fix_note: fixNote.slice(0, 1000), error: reason })
+        .eq("id", videoId)
+        .eq("status", "final_qa")
+        .select("id")
+        .maybeSingle();
+      if (error) fail("prepare the re-edit", error);
+      return data !== null;
+    },
+    async createVisualRerender(videoId, fixNote) {
+      const { data, error } = await db.rpc("create_visual_rerender", { p_video_id: videoId, p_fix_note: fixNote });
+      if (error) fail("make the visual re-render", error);
+      return rerenderResult(data);
+    },
+    async deliverVideo(videoId) {
+      const { data, error } = await db.rpc("deliver_post_video", { p_video_id: videoId });
+      if (error) fail("deliver the video", error);
+      return deliverResult(data);
     },
   };
 }
