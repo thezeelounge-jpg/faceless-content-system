@@ -217,7 +217,8 @@ export async function runTechnicalGate(videoId: string, deps: TechnicalGateDeps)
     }
   }
   const reason = `Technical check failed${failedBefore > 0 ? " after one rebuild" : ""}: ${problems}`.slice(0, 1000);
-  await deps.store.moveVideo(video.id, "team_review", ["final_qa"], reason);
+  // p5-b1 (QA NICE 6): the post follows only when THIS run moved the video (else it moved on).
+  if (!(await deps.store.moveVideo(video.id, "team_review", ["final_qa"], reason))) return { status: "skipped", videoId: video.id, why: "it moved on" };
   await deps.store.setPostStatus(video.post_id, "team_review", reason);
   return { status: "team_review", videoId: video.id, reason };
 }

@@ -289,6 +289,32 @@ describe("forced failures end in the team queue, never with the customer, never 
     expect(p.v.posts[0]).toMatchObject({ status: "team_review", status_reason: RESYNC_TEAM_REASON });
   });
 
+  it("p5-b1 (QA NICE 6): Gate 3 → team, but the video moved on meanwhile: the post is NOT touched", async () => {
+    const { p, gate3 } = pipeline({ maxSeconds: 5 }); // too long for the plan → straight to the team
+    const { postId } = await p.seedPost({ ...AYESHA, dictionary: [{ written: "Ayesha", say_as: "Aa-ee-sha", status: "approved" }] });
+    const videoId = await p.makeVideo(postId);
+    const realMove = p.store.moveVideo;
+    p.store.moveVideo = async (id, to, from, error) => (to === "team_review" ? false : realMove(id, to, from, error));
+    const out = await afterRender(videoId, gate3);
+    expect(out.outcome.status).toBe("skipped");
+    expect(p.v.posts[0].status).toBe("audio_qa");
+  });
+
+  it("p5-b1 (QA NICE 6): Gate 4 → team, but the video moved on meanwhile: the post is NOT touched", async () => {
+    const { p, gate3, gate4, edit } = pipeline();
+    const { postId } = await p.seedPost({ ...AYESHA, dictionary: [{ written: "Ayesha", say_as: "Aa-ee-sha", status: "approved" }] });
+    const videoId = await p.makeVideo(postId);
+    const r1 = await afterRender(videoId, gate3);
+    await edit((r1.next as { payload: Parameters<typeof runEditJob>[0] }).payload);
+    const realMove = p.store.moveVideo;
+    // No rebuild possible either (both moves refused): the team route must not move the post.
+    p.store.moveVideo = async () => false;
+    const out = await afterEdit(videoId, gate4("25/1"));
+    expect(out.outcome.status).toBe("skipped");
+    expect(p.v.posts[0].status).toBe("final_qa");
+    p.store.moveVideo = realMove;
+  });
+
   it("a finished likeness test or a failed poll starts nothing", () => {
     expect(afterPoll({ done: true, status: "rendered" }, { id: "v", kind: "likeness_test" })).toBeNull();
     expect(afterPoll({ done: true, status: "failed" }, { id: "v", kind: "post" })).toBeNull();

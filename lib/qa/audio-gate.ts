@@ -213,7 +213,8 @@ export async function runAudioGate(videoId: string, deps: AudioGateDeps): Promis
 
   const toTeam = async (reason: string): Promise<AudioGateOutcome> => {
     const text = reason.slice(0, 1000);
-    await deps.store.moveVideo(video.id, "team_review", ["audio_qa"], text);
+    // p5-b1 (QA NICE 6): the post follows only when THIS run moved the video (else it moved on).
+    if (!(await deps.store.moveVideo(video.id, "team_review", ["audio_qa"], text))) return { status: "skipped", videoId: video.id, why: "it moved on" };
     await deps.store.setPostStatus(video.post_id, "team_review", text);
     return { status: "team_review", videoId: video.id, reason: text };
   };
