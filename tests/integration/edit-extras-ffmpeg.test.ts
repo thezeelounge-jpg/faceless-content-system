@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { REAL_BRAND, REAL_VIDEO, editForReal, transcriptFor } from "@/tests/helpers/edit-real";
 import {
   FACE_RGB,
   hasFfmpeg,
@@ -16,15 +17,7 @@ import {
 } from "@/tests/helpers/ffmpeg-local";
 import { buildAss } from "@/lib/captions";
 import { EDIT_OVERLAYS, buildEditArgs } from "@/lib/edit";
-import {
-  captionFontsDir,
-  runEditJob,
-  runFfmpeg,
-  type EditFiles,
-  type EditStore,
-  type EditVideoRow,
-  type FfmpegRunner,
-} from "@/lib/edit-flow";
+import { captionFontsDir, runFfmpeg } from "@/lib/edit-flow";
 import { audioFilterGraph, getMusicLibrary } from "@/lib/music";
 import { LOUDNESS, MUSIC } from "@/lib/qa/config";
 import type { Transcript } from "@/lib/stt";
@@ -38,9 +31,8 @@ import type { Transcript } from "@/lib/stt";
 // music set: no network, nothing paid. Work folder name holds : ' [ ] , ; \.
 
 const FFMPEG = hasFfmpeg();
-const BRAND = "10000000-0000-4000-8000-000000000001";
-const VIDEO = "90000000-0000-4000-8000-0000000000b2";
-const RAW = `raw/${BRAND}/${VIDEO}.mp4`;
+const BRAND = REAL_BRAND;
+const VIDEO = REAL_VIDEO;
 
 const B_GREEN: [number, number, number] = [0x1e, 0x8c, 0x3a]; // tests/fixtures/broll/cafe-green.mp4
 const B_MAGENTA: [number, number, number] = [0xc2, 0x18, 0x7a]; // tests/fixtures/broll/phone-magenta.mp4
@@ -50,14 +42,6 @@ const CENTRE = { x: 540, y: 760 }; // the face zone: no captions, no label
 const DISPLAY = "Stop scrolling now. Here is how small cafes grow on WhatsApp every week with one simple message. Book a free call today.";
 const HOOK = "Stop scrolling now.";
 const CTA = "Book a free call today.";
-function transcriptFor(text: string, durationS: number, step = 0.42): Transcript {
-  const words = text.split(" ").map((w, i) => ({
-    text: w.toLowerCase().replace(/[^a-z]/g, ""),
-    start_s: Math.round((0.2 + i * step) * 1000) / 1000,
-    end_s: Math.round((0.2 + i * step + 0.36) * 1000) / 1000,
-  }));
-  return { language: "en", duration_s: durationS, words };
-}
 // Hook ends 1.40 s; "small cafes grow" 2.72 s; "with one simple" 5.66 s; the CTA starts 7.34 s.
 // Story plan: cut 1 = 2.72 → 5.16 (shortened to leave a 0.5 s face gap), cut 2 = 5.66 → 7.34.
 const EDIT_PLAN = {
@@ -81,37 +65,14 @@ afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-/** runEditJob with real ffmpeg/ffprobe; the "storage" is the local raw file and a captured upload. */
-async function editForReal(rawFile: string, name: string, job: { displayText: string; hook: string; cta: string; transcript: Transcript; format: "talking" | "story"; watermark?: boolean }) {
-  const row: EditVideoRow = {
-    id: VIDEO, brand_id: BRAND, kind: "post", status: "rendered", raw_path: RAW, final_path: null,
-    transcript: null, error: null, ai_label: true, watermark: false,
-  };
-  const store: EditStore = {
-    getVideo: async () => ({ ...row }),
-    startEdit: async () => ((row.status = "editing"), true),
-    saveTranscript: async () => {},
-    finishEdit: async (_id, _run, patch) => (Object.assign(row, patch), true),
-    setPostStatusForVideo: async () => {},
-  };
-  const output = path.join(work, `${name}.mp4`);
-  const files: EditFiles = {
-    download: async () => new Uint8Array(await readFile(rawFile)),
-    upload: async (_p, bytes) => writeFile(output, bytes),
-    remove: async () => {},
-  };
-  const calls: string[][] = [];
-  const ffmpeg: FfmpegRunner = (args, options) => (calls.push(args), runFfmpeg(args, options));
-  const outcome = await runEditJob(
-    {
-      videoId: VIDEO, rawPath: RAW, displayText: job.displayText, editPlan: EDIT_PLAN, hook: job.hook, cta: job.cta,
-      transcript: job.transcript, format: job.format, captionStyle: "big_words", brandColour: "#FF5A1F",
-      aiLabel: true, watermark: job.watermark ?? false,
-    },
-    { store, files, ffmpeg, tmpRoot: work, fontsDir: captionFontsDir() },
-  );
-  return { outcome, row, output, calls };
-}
+/** runEditJob with real ffmpeg/ffprobe (tests/helpers/edit-real.ts). */
+const editReal = (rawFile: string, name: string, job: { displayText: string; hook: string; cta: string; transcript: Transcript; format: "talking" | "story" }) =>
+  editForReal({
+    rawFile,
+    outFile: path.join(work, `${name}.mp4`),
+    tmpRoot: work,
+    job: { ...job, editPlan: EDIT_PLAN, captionStyle: "big_words", brandColour: "#FF5A1F", aiLabel: true, watermark: false },
+  });
 
 const close = (got: number[], want: number[], tol = 22) => got.every((v, i) => Math.abs(v - want[i]) <= tol);
 
@@ -124,7 +85,7 @@ describe.skipIf(!FFMPEG)("p4-b2 editor extras with real ffmpeg", () => {
   beforeAll(async () => {
     raw = path.join(work, "talking.mp4");
     makeTalkingInput(raw, 10, "speech");
-    full = await editForReal(raw, "story-full", {
+    full = await editReal(raw, "story-full", {
       displayText: DISPLAY, hook: HOOK, cta: CTA, transcript: transcriptFor(DISPLAY, 10), format: "story",
     });
   }, 60_000);
@@ -203,7 +164,7 @@ describe.skipIf(!FFMPEG)("p4-b2 editor extras with real ffmpeg", () => {
     const peaky = path.join(work, "peaky.mp4");
     makeTalkingInput(peaky, 4, "peaky");
     const text = "Stop now. Book today.";
-    const r = await editForReal(peaky, "peaky-final", { displayText: text, hook: "Stop now.", cta: "Book today.", transcript: transcriptFor(text, 4, 0.9), format: "talking" });
+    const r = await editReal(peaky, "peaky-final", { displayText: text, hook: "Stop now.", cta: "Book today.", transcript: transcriptFor(text, 4, 0.9), format: "talking" });
     expect(r.outcome.status).toBe("edited");
     const l = loudnessOfFile(r.output);
     console.info(`[loudness] peaky I=${l.i} LUFS TP=${l.tp} dBTP (input ${JSON.stringify(loudnessOfFile(peaky))})`);

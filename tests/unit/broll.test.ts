@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import script from "@/tests/fixtures/stt/sample-script.json";
@@ -243,6 +244,11 @@ describe("B-roll provider", () => {
     expect((await p.search("coffee shop", { orientation: "portrait", minDuration_s: 3.4 })).map((c) => c.id)).toEqual(["cafe-green"]);
     expect((await p.search("WhatsApp chat", { orientation: "portrait", minDuration_s: 1.5 })).map((c) => c.id)).toEqual(["phone-magenta"]);
     expect((await p.search("purple elephants", { orientation: "portrait", minDuration_s: 1.5 }))[0].id).toBe("city-orange");
+  });
+
+  it("mock with no catalogue (e.g. a deployed task without tests/fixtures) → the same plain 'not set up yet' error", async () => {
+    const empty = mkdtempSync(path.join(os.tmpdir(), "no-broll-"));
+    await expect(mockBrollProvider(empty).search("coffee", { orientation: "portrait", minDuration_s: 1.5 })).rejects.toThrow(BROLL_NOT_SET_UP);
   });
 
   it("MOCK_PEXELS=false: a plain 'not set up yet' error and never a network call", async () => {

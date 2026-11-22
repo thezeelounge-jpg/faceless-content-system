@@ -59,7 +59,13 @@ export const MOCK_BROLL_DIR = path.join(process.cwd(), "tests", "fixtures", "bro
 export function mockBrollProvider(dir: string = MOCK_BROLL_DIR): BrollProvider {
   return {
     async search(keyword, options) {
-      const catalogue = JSON.parse(readFileSync(path.join(dir, "catalogue.json"), "utf8")) as Catalogue;
+      let catalogue: Catalogue;
+      try {
+        catalogue = JSON.parse(readFileSync(path.join(dir, "catalogue.json"), "utf8")) as Catalogue;
+      } catch (error) {
+        // No mock catalogue here (a deployed task has no tests/fixtures): same plain message.
+        throw new PlainError(BROLL_NOT_SET_UP, { cause: error });
+      }
       const usable = (ids: string[]) =>
         ids
           .map((id) => ({ id, clip: catalogue.clips[id] }))
