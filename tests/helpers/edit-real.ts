@@ -11,6 +11,8 @@ import type { Transcript } from "@/lib/stt";
 export const REAL_BRAND = "10000000-0000-4000-8000-000000000001";
 export const REAL_VIDEO = "90000000-0000-4000-8000-0000000000b2";
 export const REAL_RAW = `raw/${REAL_BRAND}/${REAL_VIDEO}.mp4`;
+/** p4-b3: a fixed run id, so the run-scoped final path is known. */
+export const REAL_RUN = "run_real";
 
 /** Words of `text`, one every `step` seconds from 0.2 s, each 0.36 s long: STT-style (lowercase, no punctuation). */
 export function transcriptFor(text: string, durationS: number, step = 0.42): Transcript {
@@ -58,7 +60,7 @@ export async function editForReal(input: RealEditInput) {
   };
   const outcome = await runEditJob(
     { videoId: REAL_VIDEO, rawPath: REAL_RAW, ...input.job },
-    { store, files, ffmpeg, tmpRoot: input.tmpRoot, fontsDir: captionFontsDir() },
+    { store, files, ffmpeg, tmpRoot: input.tmpRoot, fontsDir: captionFontsDir(), runToken: REAL_RUN },
   );
   return { outcome, row, output: input.outFile, calls };
 }

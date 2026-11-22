@@ -66,12 +66,16 @@ afterAll(async () => {
 });
 
 /** runEditJob with real ffmpeg/ffprobe (tests/helpers/edit-real.ts). */
-const editReal = (rawFile: string, name: string, job: { displayText: string; hook: string; cta: string; transcript: Transcript; format: "talking" | "story" }) =>
+type RealJob = {
+  displayText: string; hook: string; cta: string; transcript: Transcript; format: "talking" | "story";
+  editPlan?: { broll_moments: { at_words: string; keyword: string }[]; emphasis_words: string[] };
+};
+const editReal = (rawFile: string, name: string, job: RealJob) =>
   editForReal({
     rawFile,
     outFile: path.join(work, `${name}.mp4`),
     tmpRoot: work,
-    job: { ...job, editPlan: EDIT_PLAN, captionStyle: "big_words", brandColour: "#FF5A1F", aiLabel: true, watermark: false },
+    job: { editPlan: EDIT_PLAN, ...job, captionStyle: "big_words", brandColour: "#FF5A1F", aiLabel: true, watermark: false },
   });
 
 const close = (got: number[], want: number[], tol = 22) => got.every((v, i) => Math.abs(v - want[i]) <= tol);
@@ -91,7 +95,7 @@ describe.skipIf(!FFMPEG)("p4-b2 editor extras with real ffmpeg", () => {
   }, 60_000);
 
   it("the job finishes into final_qa (every requested extra is in the real argv): 2 ffmpeg runs", () => {
-    expect(full.outcome).toEqual({ status: "edited", finalPath: `final/${BRAND}/${VIDEO}.mp4`, notApplied: [] });
+    expect(full.outcome).toEqual({ status: "edited", finalPath: `final/${BRAND}/${VIDEO}/runs/run_real.mp4`, notApplied: [] });
     expect(full.row.status).toBe("final_qa");
     expect(full.calls).toHaveLength(2);
   });
@@ -160,16 +164,31 @@ describe.skipIf(!FFMPEG)("p4-b2 editor extras with real ffmpeg", () => {
     expect(voice.i - music.i).toBeGreaterThanOrEqual(MUSIC.min_voice_over_music_db);
   });
 
-  it("a peaky, quiet voice (big gain needed) still lands on -14 ±1 LUFS with true peak ≤ -1.0 dBTP", async () => {
+  // PERMANENT REGRESSION (p4-b3, Rowan item 5): the hard loudness case. A quiet voice (~-27 LUFS)
+  // with full-scale clicks (0 dBTP) needs ~13 dB of gain AND a peak cut: loudnorm falls back to
+  // dynamic mode here. The fixture is deterministic (tests/helpers/ffmpeg-local.ts makeTalkingInput
+  // "peaky": an aevalsrc formula, no noise, no random seed). Bounds are literal numbers on purpose,
+  // so a config change can't quietly loosen them: integrated -14 ±1 LUFS, true peak ≤ -1.0 dBTP.
+  it("REGRESSION hard case: quiet voice + full-scale clicks → -15 ≤ I ≤ -13 LUFS and TP ≤ -1.0 dBTP", async () => {
     const peaky = path.join(work, "peaky.mp4");
     makeTalkingInput(peaky, 4, "peaky");
+    const input = loudnessOfFile(peaky);
+    // The fixture must stay HARD: quiet and peaking at full scale (else this test proves nothing).
+    expect(input.i).toBeLessThanOrEqual(-25);
+    expect(input.tp).toBeGreaterThanOrEqual(-0.5);
     const text = "Stop now. Book today.";
-    const r = await editReal(peaky, "peaky-final", { displayText: text, hook: "Stop now.", cta: "Book today.", transcript: transcriptFor(text, 4, 0.9), format: "talking" });
+    const r = await editReal(peaky, "peaky-final", {
+      displayText: text, hook: "Stop now.", cta: "Book today.", transcript: transcriptFor(text, 4, 0.9), format: "talking",
+      editPlan: { broll_moments: [], emphasis_words: [] }, // face only: this case is about the audio
+    });
     expect(r.outcome.status).toBe("edited");
     const l = loudnessOfFile(r.output);
-    console.info(`[loudness] peaky I=${l.i} LUFS TP=${l.tp} dBTP (input ${JSON.stringify(loudnessOfFile(peaky))})`);
-    expect(Math.abs(l.i - LOUDNESS.target_i)).toBeLessThanOrEqual(LOUDNESS.tolerance_lu);
-    expect(l.tp).toBeLessThanOrEqual(LOUDNESS.max_true_peak_db);
+    console.info(`[loudness] REGRESSION peaky I=${l.i} LUFS TP=${l.tp} dBTP (input I=${input.i} TP=${input.tp})`);
+    expect(l.i).toBeGreaterThanOrEqual(-15);
+    expect(l.i).toBeLessThanOrEqual(-13);
+    expect(l.tp).toBeLessThanOrEqual(-1.0);
+    // And the shared config agrees with those literal bounds.
+    expect([LOUDNESS.target_i, LOUDNESS.tolerance_lu, LOUDNESS.max_true_peak_db]).toEqual([-14, 1, -1]);
   }, 30_000);
 });
 

@@ -35,7 +35,8 @@ import { getSttProvider, transcriptSchema, type SttProvider, type Transcript } f
 //  7. ffmpeg with the args from lib/edit.ts (execFile, no shell, time limit).
 //     AI label when the payload OR the row says so (default on); watermark when
 //     the payload OR videos.watermark says trial; +faststart always.
-//  8. Upload to final/<brand>/<video>.mp4; status → final_qa (Gate 4 is next),
+//  8. Upload to this run's own final/<brand>/<video>/runs/<run>.mp4 (p4-b3, QA SF1);
+//     only then does finishEdit point videos.final_path at it; status → final_qa (Gate 4 is next),
 //     but only if every requested extra is in the real ffmpeg argv; otherwise
 //     team_review with a plain reason (p4-b1 publish guard: e.g. "AI label not added yet.").
 //  On any failure: a plain error on the row, status team_review (video and
@@ -142,7 +143,7 @@ export type EditOutcome =
   | { status: "edited"; finalPath: string; notApplied: string[] }
   | { status: "failed"; error: string }
   /** p4-b1 (QA SF3): edited, but a requested extra was not applied → team_review, never final_qa. */
-  | { status: "needs_team"; finalPath: string; notApplied: string[] }
+  | { status: "needs_team"; finalPath: string; notApplied: string[]; reason: string }
   /** p4-b1: another run took over this video's edit; this run changed nothing it does not own. */
   | { status: "superseded" };
 
@@ -163,6 +164,17 @@ export const TEAM_EDIT_REASON = "The edit failed. Open the video to see why.";
  */
 export const EXTRAS_TEAM_REASON = "The edit is missing something it needs (for example the AI label). Open the video to see what.";
 
+/**
+ * p4-b3 (QA SF2): b-roll was asked for (edit_plan moments or broll_keywords) but none ended up
+ * in the video. The edit is kept for the team (team_review), never final_qa. Team wording, saved
+ * on videos.error and posts.status_reason.
+ */
+export const BROLL_TEAM_REASONS = {
+  hook_cta_not_found: "B-roll couldn't be placed: hook/CTA not found in the transcript.",
+  none_fit: "B-roll couldn't be placed: none of the planned moments fit between the hook and the CTA.",
+  no_clips: "No B-roll clips found.",
+} as const;
+
 /** One plain sentence per missing extra, saved on videos.error (admin wording). */
 const MISSING_EXTRA: Record<string, string> = {
   ai_label: "AI label not added yet.",
@@ -177,8 +189,20 @@ export function missingExtrasMessage(names: string[]): string {
   return names.map((n) => MISSING_EXTRA[n] ?? `${n} not added yet.`).join(" ");
 }
 
-export function finalPathFor(brandId: string, videoId: string): string {
-  return `final/${brandId}/${videoId}.mp4`;
+/** Claim tokens become a path segment: Trigger.dev run ids (run_…) and UUIDs fit. */
+const RUN_TOKEN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * p4-b3 (QA SF1): every run uploads to its OWN object, final/<brand>/<video>/runs/<run>.mp4.
+ * A retry of the same run (same run id) overwrites it; another run can never write to,
+ * overwrite or delete it. videos.final_path points at it only after finishEdit (the
+ * claim re-check, one conditional UPDATE) succeeded, so the row never points at a file
+ * from a run that lost the claim. No copy/promote step: Storage has no atomic
+ * "copy if I still own the claim", so a copy would reopen the race.
+ */
+export function finalPathFor(brandId: string, videoId: string, run: string): string {
+  if (!RUN_TOKEN.test(run)) throw new Error("The edit run id must be letters, digits, _ or -.");
+  return `final/${brandId}/${videoId}/runs/${run}.mp4`;
 }
 
 /**
@@ -247,13 +271,23 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
   if (!video.raw_path || video.raw_path !== job.rawPath) throw refuse("the raw file does not match this video");
   if (!(EDITABLE_STATUSES as readonly string[]).includes(video.status)) throw refuse(`it is ${video.status}`);
   const run = deps.runToken ?? randomUUID();
+  if (!RUN_TOKEN.test(run)) throw refuse("the edit run id is not valid");
   if (!(await deps.store.startEdit(video.id, run))) throw refuse("it is not waiting for an edit (or another edit is running)");
   await deps.store.setPostStatusForVideo(video.id, "editing", null);
 
-  const finalPath = finalPathFor(video.brand_id, video.id);
+  const finalPath = finalPathFor(video.brand_id, video.id, run);
+  /** Only ever our own run-scoped object (never another run's file). */
+  const removeOurFile = () =>
+    deps.files.remove(finalPath).catch((e) => logAdminError("[edit] cleanup failed", { videoId: video.id }, e));
   const workDir = await mkdtemp(path.join(deps.tmpRoot ?? os.tmpdir(), "edit-"));
   let stage: Stage = "download";
   let uploadStarted = false;
+  /** This run lost the claim: it changes nothing it does not own; its own upload (if any) goes. */
+  const superseded = async (): Promise<EditOutcome> => {
+    console.warn(`[edit] superseded video=${video.id} stage=${stage}`);
+    if (uploadStarted) await removeOurFile();
+    return { status: "superseded" };
+  };
   try {
     const rawFile = path.join(workDir, "raw.mp4");
     await writeFile(rawFile, await deps.files.download(video.raw_path));
@@ -317,6 +351,17 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     console.info(
       `[edit] broll video=${video.id} cuts=${broll.length} coverage=${plan.coverage_s}s/${plan.max_coverage_s}s skipped=${plan.skipped.map((s) => s.why).join(",") || "none"}`,
     );
+    // p4-b3 (QA SF2): b-roll was asked for but none made it in → the team looks (never final_qa).
+    // Nothing asked for at all (no moments, no keywords) = a face-only reel by design: unchanged.
+    const brollAsked = job.editPlan.broll_moments.length > 0 || job.brollKeywords.length > 0;
+    const brollProblem: string | null =
+      !brollAsked || broll.length > 0
+        ? null
+        : plan.protected === null
+          ? BROLL_TEAM_REASONS.hook_cta_not_found
+          : plan.cuts.length > 0
+            ? BROLL_TEAM_REASONS.no_clips
+            : BROLL_TEAM_REASONS.none_fit;
 
     stage = "music";
     const bed = (deps.music ?? getMusicLibrary()).pick(video.id);
@@ -343,25 +388,22 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
 
     stage = "upload";
     uploadStarted = true;
+    // p4-b3 (QA SF1): our own run-scoped object; the row points at it only after finishEdit below.
     await deps.files.upload(finalPath, new Uint8Array(await readFile(finalFile)), "video/mp4");
     // p4-b1 (QA SF3): never final_qa while a requested extra (the AI label above all) is missing
     // from the command ffmpeg actually ran. The file is kept (final_path saved) for the team.
     const notApplied = notYetApplied(extras, args);
-    if (notApplied.length > 0) {
-      const saved = await deps.store.finishEdit(video.id, run, {
-        status: "team_review",
-        final_path: finalPath,
-        error: missingExtrasMessage(notApplied),
-      });
-      if (!saved) return { status: "superseded" };
-      await deps.store.setPostStatusForVideo(video.id, "team_review", EXTRAS_TEAM_REASON);
-      return { status: "needs_team", finalPath, notApplied };
+    if (notApplied.length > 0 || brollProblem) {
+      const reason = [notApplied.length > 0 ? missingExtrasMessage(notApplied) : null, brollProblem].filter(Boolean).join(" ");
+      const saved = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: finalPath, error: reason });
+      if (!saved) return superseded();
+      await deps.store.setPostStatusForVideo(video.id, "team_review", notApplied.length > 0 ? EXTRAS_TEAM_REASON : brollProblem);
+      return { status: "needs_team", finalPath, notApplied, reason };
     }
     if (!(await deps.store.finishEdit(video.id, run, { status: "final_qa", final_path: finalPath, error: null }))) {
-      // Another run took over (our claim went stale). Our file is a valid edit on the same
-      // path; the row and post belong to the other run now, so touch nothing else.
-      console.warn(`[edit] superseded after upload video=${video.id}`);
-      return { status: "superseded" };
+      // Another run took over (our claim went stale): the row, the post and the other run's
+      // file are not ours. Remove only our own run-scoped upload.
+      return superseded();
     }
     await deps.store.setPostStatusForVideo(video.id, "final_qa", null);
     return { status: "edited", finalPath, notApplied: [] };
@@ -371,9 +413,9 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
     // p4-b1 (QA SF2): record the failure only while THIS run still owns the claim. If another
     // run took over (and maybe finished: final_qa), its row, post and final file are not ours.
     const owned = await deps.store.finishEdit(video.id, run, { status: "team_review", final_path: null, error: message });
-    if (!owned) return { status: "superseded" };
-    // Never leave a half-written or unrecorded final in storage (ours: the row is team_review now).
-    if (uploadStarted) await deps.files.remove(finalPath).catch((e) => logAdminError("[edit] cleanup failed", { videoId: video.id }, e));
+    if (!owned) return superseded();
+    // Never leave a half-written or unrecorded final in storage (only our own run-scoped object).
+    if (uploadStarted) await removeOurFile();
     await deps.store.setPostStatusForVideo(video.id, "team_review", TEAM_EDIT_REASON);
     return { status: "failed", error: message };
   } finally {

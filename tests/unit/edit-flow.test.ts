@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import script from "@/tests/fixtures/stt/sample-script.json";
 import fixture from "@/tests/fixtures/stt/sample-transcript.json";
 import {
+  BROLL_TEAM_REASONS,
   EDIT_ERRORS,
   EXTRAS_TEAM_REASON,
   TEAM_EDIT_REASON,
@@ -30,7 +31,10 @@ import { NO_STT_PROVIDER, type SttProvider } from "@/lib/stt";
 const BRAND = "10000000-0000-4000-8000-000000000001";
 const VIDEO = "90000000-0000-4000-8000-000000000001";
 const RAW = `raw/${BRAND}/${VIDEO}.mp4`;
-const FINAL = `final/${BRAND}/${VIDEO}.mp4`;
+const RUN = "run_test";
+/** p4-b3: each run uploads to its own object (QA SF1). */
+const FINAL = `final/${BRAND}/${VIDEO}/runs/${RUN}.mp4`;
+const finalOf = (run: string) => `final/${BRAND}/${VIDEO}/runs/${run}.mp4`;
 const RAW_BYTES = new Uint8Array([1, 2, 3, 4]);
 const FINAL_BYTES = Buffer.from("finished mp4 bytes");
 
@@ -85,7 +89,7 @@ function memory(overrides: Partial<EditVideoRow> = {}) {
   };
   // p4-b2: the raw bytes here are not a real video, so the length comes from a fake ffprobe.
   const probeDurationS = async () => 6;
-  return { row, store, files, stored, removed, postStatuses, probeDurationS };
+  return { row, store, files, stored, removed, postStatuses, probeDurationS, runToken: RUN };
 }
 
 /** What ffmpeg prints for loudness pass 1 (loudnorm print_format=json). */
@@ -158,7 +162,8 @@ describe("runEditJob", () => {
     const m = memory();
     const outcome = await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
     expect(outcome).toEqual({ status: "edited", finalPath: FINAL, notApplied: [] });
-    expect(finalPathFor(BRAND, VIDEO)).toBe(FINAL);
+    expect(finalPathFor(BRAND, VIDEO, RUN)).toBe(FINAL);
+    expect(() => finalPathFor(BRAND, VIDEO, "../x")).toThrow(/run id/);
     expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, error: null });
     expect(Buffer.from(m.stored.get(FINAL)!.bytes).toString()).toBe("finished mp4 bytes");
     expect(m.stored.get(FINAL)!.type).toBe("video/mp4");
@@ -186,7 +191,9 @@ describe("runEditJob", () => {
     await runEditJob({ ...job, displayText: "Stop", transcript: short }, { ...m1, stt, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
     expect(seenAss).toContain("STOP");
     const m2 = memory({ transcript: short });
-    const out = await runEditJob({ ...job, displayText: "Stop" }, { ...m2, stt, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    // One word: no room for b-roll, so none is asked for (p4-b3: asked-for b-roll that can't be placed → team).
+    const faceOnly = { ...job.editPlan, broll_moments: [] };
+    const out = await runEditJob({ ...job, displayText: "Stop", editPlan: faceOnly }, { ...m2, stt, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
     expect(out.status).toBe("edited");
     expect(stt.transcribe).not.toHaveBeenCalled();
   });
@@ -289,10 +296,40 @@ describe("runEditJob", () => {
     expect(silent.row.error).toBe(LOUDNORM_SILENT);
   });
 
-  it("p4-b2: the hook and CTA not found in the words → no b-roll (face stays), the edit still finishes", async () => {
+  it("p4-b3 (QA SF2): the hook/CTA not found in the words → no b-roll (face stays), file kept, video + post → team_review with a plain reason", async () => {
     const m = memory();
     const out = await runEditJob({ ...job, hook: "Something else entirely." }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
-    expect(out.status).toBe("edited");
+    expect(seenArgs.join(" ")).not.toContain("overlay=");
+    expect(out).toEqual({ status: "needs_team", finalPath: FINAL, notApplied: [], reason: BROLL_TEAM_REASONS.hook_cta_not_found });
+    expect(BROLL_TEAM_REASONS.hook_cta_not_found).toBe("B-roll couldn't be placed: hook/CTA not found in the transcript.");
+    expect(m.row).toMatchObject({ status: "team_review", final_path: FINAL, error: BROLL_TEAM_REASONS.hook_cta_not_found });
+    expect(m.stored.has(FINAL)).toBe(true); // the team can watch it
+    expect(m.postStatuses.at(-1)).toEqual({ status: "team_review", reason: BROLL_TEAM_REASONS.hook_cta_not_found });
+  });
+
+  it("p4-b3 (QA SF2): cuts planned but the provider found no clips → team_review 'No B-roll clips found.'", async () => {
+    const m = memory();
+    const broll = { search: vi.fn(async () => []) };
+    const out = await runEditJob(job, { ...m, broll, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(broll.search).toHaveBeenCalled();
+    expect(out).toMatchObject({ status: "needs_team", reason: "No B-roll clips found." });
+    expect(m.row).toMatchObject({ status: "team_review", error: "No B-roll clips found." });
+    expect(m.postStatuses.at(-1)).toEqual({ status: "team_review", reason: "No B-roll clips found." });
+  });
+
+  it("p4-b3 (QA SF2): moments asked for but none fit between the hook and the CTA → team_review", async () => {
+    const m = memory();
+    const editPlan = { ...job.editPlan, broll_moments: [{ at_words: "words nobody said", keyword: "coffee" }] };
+    const out = await runEditJob({ ...job, editPlan }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toMatchObject({ status: "needs_team", reason: BROLL_TEAM_REASONS.none_fit });
+    expect(m.row.status).toBe("team_review");
+  });
+
+  it("p4-b3: no b-roll moments and no keywords asked for at all → a face-only edit still goes to final_qa", async () => {
+    const m = memory();
+    const editPlan = { ...job.editPlan, broll_moments: [] };
+    const out = await runEditJob({ ...job, editPlan, brollKeywords: [] }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toEqual({ status: "edited", finalPath: FINAL, notApplied: [] });
     expect(seenArgs.join(" ")).not.toContain("overlay=");
   });
 
@@ -392,7 +429,7 @@ describe("runEditJob", () => {
     expect(ffmpegB).not.toHaveBeenCalled();
     release();
     expect((await runA).status).toBe("edited");
-    expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, edit_run_id: "run_a" });
+    expect(m.row).toMatchObject({ status: "final_qa", final_path: finalOf("run_a"), edit_run_id: "run_a" });
   });
 
   it("p4-b1 SF2: run B took over a stale claim and finished; run A then fails after its upload → B's final file stays", async () => {
@@ -421,10 +458,51 @@ describe("runEditJob", () => {
     failUpload();
     const outcomeA = await runA;
     expect(outcomeA.status).toBe("superseded");
-    expect(m.removed).toEqual([]); // A never deletes a file it does not own
-    expect(Buffer.from(m.stored.get(FINAL)!.bytes).toString()).toBe("finished mp4 bytes");
-    expect(m.row).toMatchObject({ status: "final_qa", final_path: FINAL, error: null, edit_run_id: "run_b" });
+    // A never deletes a file it does not own (p4-b3: it removes only its own run-scoped object).
+    expect(m.removed).toEqual([finalOf("run_a")]);
+    expect(Buffer.from(m.stored.get(finalOf("run_b"))!.bytes).toString()).toBe("finished mp4 bytes");
+    expect(m.row).toMatchObject({ status: "final_qa", final_path: finalOf("run_b"), error: null, edit_run_id: "run_b" });
     expect(m.postStatuses.at(-1)).toEqual({ status: "final_qa", reason: null }); // A did not touch the post either
+  });
+
+  it("p4-b3 (QA SF1): run A goes stale, run B finishes, THEN A's slow upload succeeds → the row still points at B's bytes", async () => {
+    const m = memory();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    // Run A's ffmpeg writes different bytes, and its upload hangs until we let it land.
+    const ffmpegA: FfmpegRunner = async (args) => {
+      if (isMeasurePass(args)) return { stderr: PASS1 };
+      await writeFile(args.at(-1)!, "run A bytes");
+      return { stderr: "" };
+    };
+    let landA!: () => void;
+    const aMayLand = new Promise<void>((resolve) => (landA = resolve));
+    let aUploading!: () => void;
+    const inUploadA = new Promise<void>((resolve) => (aUploading = resolve));
+    let pathA = "";
+    const filesA: EditFiles = {
+      ...m.files,
+      async upload(p, bytes, type) {
+        pathA = p;
+        aUploading();
+        await aMayLand;
+        await m.files.upload(p, bytes, type); // the slow upload SUCCEEDS
+      },
+    };
+    const runA = runEditJob(job, { ...m, files: filesA, ffmpeg: ffmpegA, tmpRoot, fontsDir: captionFontsDir(), runToken: "run_a" });
+    await inUploadA;
+    m.row.edit_started_at = Date.now() - (EDIT.claim_stale_s + 60) * 1000; // A's claim is stale
+    const outB = await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir(), runToken: "run_b" });
+    expect(outB.status).toBe("edited");
+    const pathB = m.row.final_path!;
+    landA();
+    expect(await runA).toEqual({ status: "superseded" });
+    // The row points at B's file, and that file still holds B's bytes.
+    expect(m.row).toMatchObject({ status: "final_qa", edit_run_id: "run_b", final_path: pathB, error: null });
+    expect(Buffer.from(m.stored.get(pathB)!.bytes).toString()).toBe("finished mp4 bytes");
+    // A never wrote to B's path, and cleaned up only its own object.
+    expect(pathA).not.toBe(pathB);
+    expect(m.removed).toEqual([pathA]);
+    expect(m.stored.has(pathA)).toBe(false);
   });
 
   it("an unknown video id is refused", async () => {
