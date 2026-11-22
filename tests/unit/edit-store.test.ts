@@ -89,6 +89,10 @@ describe("edit storage: timeout + bounded retry", () => {
   it("the worst case (download + upload, every try timing out) still fits inside the task's maxDuration with ffmpeg", () => {
     const backoff = EDIT.storage_backoff_ms * (1 + 2) * 2; // two waits, jitter at most one backoff each
     const oneCall = EDIT.storage_max_attempts * EDIT.storage_timeout_s * 1000 + backoff;
-    expect(2 * oneCall + EDIT.ffmpeg_timeout_s * 1000).toBeLessThan(EDIT.task_max_duration_s * 1000);
+    // p4-b2: plus ffprobe (video length) and the loudness pass 1 (audio only), each with its own limit.
+    const tools = EDIT.ffmpeg_timeout_s + EDIT.loudness_timeout_s + EDIT.probe_timeout_s;
+    expect(EDIT.loudness_timeout_s).toBeGreaterThan(0);
+    expect(EDIT.probe_timeout_s).toBeGreaterThan(0);
+    expect(2 * oneCall + tools * 1000).toBeLessThan(EDIT.task_max_duration_s * 1000);
   });
 });

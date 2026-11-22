@@ -11,12 +11,16 @@ import {
   captionFontsDir,
   editJobSchema,
   finalPathFor,
+  missingExtrasMessage,
   runEditJob,
   type EditFiles,
   type EditStore,
   type EditVideoRow,
   type FfmpegRunner,
 } from "@/lib/edit-flow";
+import { BROLL_NOT_SET_UP } from "@/lib/broll";
+import { notYetApplied } from "@/lib/edit";
+import { LOUDNORM_SILENT, MUSIC_NOT_SET_UP, fixtureMusicLibrary } from "@/lib/music";
 import { EDIT } from "@/lib/qa/config";
 import { NO_STT_PROVIDER, type SttProvider } from "@/lib/stt";
 
@@ -33,6 +37,7 @@ const FINAL_BYTES = Buffer.from("finished mp4 bytes");
 function memory(overrides: Partial<EditVideoRow> = {}) {
   const row: EditVideoRow & { edit_run_id: string | null; edit_started_at: number | null } = {
     id: VIDEO, brand_id: BRAND, kind: "post", status: "rendered", raw_path: RAW, final_path: null, transcript: null, error: null,
+    ai_label: true, watermark: false, // the videos table defaults
     edit_run_id: null, edit_started_at: null,
     ...overrides,
   };
@@ -78,13 +83,22 @@ function memory(overrides: Partial<EditVideoRow> = {}) {
       stored.delete(p);
     },
   };
-  return { row, store, files, stored, removed, postStatuses };
+  // p4-b2: the raw bytes here are not a real video, so the length comes from a fake ffprobe.
+  const probeDurationS = async () => 6;
+  return { row, store, files, stored, removed, postStatuses, probeDurationS };
 }
+
+/** What ffmpeg prints for loudness pass 1 (loudnorm print_format=json). */
+const PASS1 = `[Parsed_loudnorm_5 @ 0x1] \n{\n\t"input_i" : "-19.43",\n\t"input_tp" : "-6.02",\n\t"input_lra" : "3.10",\n\t"input_thresh" : "-29.61",\n\t"target_offset" : "0.05"\n}\n`;
+const isMeasurePass = (args: string[]) => args.at(-1) === "-" && args.includes("null");
 
 let tmpRoot: string;
 let seenAss: string;
 let seenArgs: string[];
+let calls: string[][];
 const okFfmpeg: FfmpegRunner = async (args) => {
+  calls.push(args);
+  if (isMeasurePass(args)) return { stderr: PASS1 };
   seenArgs = args;
   const output = args.at(-1)!;
   seenAss = await readFile(path.join(path.dirname(output), "captions.ass"), "utf8");
@@ -96,6 +110,8 @@ const job = {
   rawPath: RAW,
   displayText: script.display_text,
   editPlan: script.edit_plan,
+  hook: "Stop scrolling!",
+  cta: "Book a free call today.",
   brandColour: "#FF5A1F",
   captionStyle: "big_words" as const,
   aiLabel: false,
@@ -106,6 +122,7 @@ beforeEach(async () => {
   tmpRoot = await mkdtemp(path.join(os.tmpdir(), "edit-flow-test-"));
   seenAss = "";
   seenArgs = [];
+  calls = [];
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -124,8 +141,10 @@ describe("captionFontsDir (the ffmpeg fontsdir)", () => {
 
 describe("editJobSchema (the task payload)", () => {
   it("accepts a raw path in the videos bucket only, and fills defaults", () => {
-    const parsed = editJobSchema.parse({ videoId: VIDEO, rawPath: RAW, displayText: "Hi", editPlan: script.edit_plan });
-    expect(parsed).toMatchObject({ captionStyle: "big_words", aiLabel: true, watermark: false });
+    const parsed = editJobSchema.parse({ videoId: VIDEO, rawPath: RAW, displayText: "Hi", editPlan: script.edit_plan, hook: "Hi", cta: "Bye" });
+    expect(parsed).toMatchObject({ captionStyle: "big_words", aiLabel: true, watermark: false, format: "talking", brollKeywords: [] });
+    expect(editJobSchema.safeParse({ ...job, format: "dance" }).success).toBe(false);
+    expect(editJobSchema.safeParse({ ...job, hook: "" }).success).toBe(false);
     for (const rawPath of ["../secret.mp4", `final/${BRAND}/${VIDEO}.mp4`, `raw/${BRAND}/${VIDEO}.mov`, "/etc/passwd"]) {
       expect(editJobSchema.safeParse({ ...job, rawPath }).success).toBe(false);
     }
@@ -173,31 +192,114 @@ describe("runEditJob", () => {
   });
 
   // p4-b1 (QA SF3), a PERMANENT guard: a video that asked for the AI label never reaches
-  // final_qa without it. Today the label is not drawn yet, so it goes to the team; once
-  // p4-b2 draws it, notApplied is empty and final_qa is allowed. Same for any requested extra.
-  it("AI label on but not applied → NEVER final_qa: team_review with a plain team reason", async () => {
+  // final_qa without it. p4-b2 draws it, and the guard checks the REAL ffmpeg argv
+  // (lib/edit.ts notYetApplied), so final_qa is allowed only because the label is in it.
+  it("AI label on → drawn in the real argv → final_qa (and the guard would have caught it missing)", async () => {
     const m = memory();
     const out = await runEditJob({ ...job, aiLabel: true }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
-    const labelMissing = out.status === "edited" ? out.notApplied.includes("ai_label") : true;
-    expect(m.row.status === "final_qa" && labelMissing).toBe(false);
-    if (labelMissing) {
-      expect(out).toEqual({ status: "needs_team", finalPath: FINAL, notApplied: ["ai_label"] });
-      expect(m.row).toMatchObject({ status: "team_review", final_path: FINAL, error: "AI label not added yet." });
-      expect(m.postStatuses.at(-1)).toEqual({ status: "team_review", reason: EXTRAS_TEAM_REASON });
-    }
+    expect(out).toEqual({ status: "edited", finalPath: FINAL, notApplied: [] });
+    expect(m.row).toMatchObject({ status: "final_qa", error: null });
+    expect(seenArgs.join(" ")).toContain(":text=AI-generated:");
+    expect(m.postStatuses.at(-1)).toEqual({ status: "final_qa", reason: null });
+    // The guard input: the same extras with the label taken OUT of the argv → named, so team_review.
+    const withoutLabel = seenArgs.map((a) => a.replace(/,drawtext=[^,;]*text=AI-generated[^,;]*/, ""));
+    expect(notYetApplied({ ai_label: true }, withoutLabel)).toEqual(["ai_label"]);
+    expect(missingExtrasMessage(["ai_label"])).toBe("AI label not added yet.");
+    expect(EXTRAS_TEAM_REASON).toMatch(/AI label/);
   });
 
-  it("the trial watermark asked for but not applied → team_review too (both extras named)", async () => {
+  it("trial watermark: drawn when the payload or the video row says trial (videos.watermark); never otherwise", async () => {
+    const fromPayload = memory();
+    await runEditJob({ ...job, watermark: true }, { ...fromPayload, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(seenArgs.join(" ")).toContain(":text=TRIAL PREVIEW:");
+    expect(fromPayload.row.status).toBe("final_qa");
+    const fromRow = memory({ watermark: true });
+    await runEditJob({ ...job, watermark: false }, { ...fromRow, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(seenArgs.join(" ")).toContain(":text=TRIAL PREVIEW:");
+    const paid = memory();
+    await runEditJob(job, { ...paid, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(seenArgs.join(" ")).not.toContain("TRIAL PREVIEW");
+  });
+
+  it("AI label off on BOTH the payload and the row → no label (the customer turned it off)", async () => {
+    const m = memory({ ai_label: false });
+    const out = await runEditJob({ ...job, aiLabel: false }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out.status).toBe("edited");
+    expect(seenArgs.join(" ")).not.toContain("AI-generated");
+    // The row default (ai_label true) wins over a payload that forgot it.
+    const n = memory();
+    await runEditJob({ ...job, aiLabel: false }, { ...n, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(seenArgs.join(" ")).toContain(":text=AI-generated:");
+  });
+
+  it("p4-b2: two ffmpeg runs: loudness pass 1 (measure, -f null), then the final edit with pass 2 numbers", async () => {
     const m = memory();
-    const out = await runEditJob({ ...job, aiLabel: true, watermark: true }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
-    expect(m.row.status).not.toBe("final_qa");
-    expect(out).toEqual({ status: "needs_team", finalPath: FINAL, notApplied: ["ai_label", "watermark"] });
-    expect(m.row.error).toBe("AI label not added yet. Trial watermark not added yet.");
+    await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(calls).toHaveLength(2);
+    expect(calls[0].join(" ")).toContain("loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[aout]");
+    expect(calls[1].join(" ")).toContain(
+      "measured_I=-19.43:measured_TP=-6.02:measured_LRA=3.1:measured_thresh=-29.61:offset=0.05:linear=true",
+    );
+    expect(calls[1].slice(-3)).toEqual(["-movflags", "+faststart", calls[1].at(-1)]);
+  });
+
+  it("p4-b2: B-roll from the mock provider at the planned moment, after the hook and before the CTA", async () => {
+    const m = memory();
+    await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    const inputs = seenArgs.flatMap((a, i) => (a === "-i" ? [seenArgs[i + 1]] : []));
+    // raw, one b-roll clip for "grow your café" (keyword "coffee shop"), the music bed.
+    expect(inputs).toHaveLength(3);
+    expect(inputs[1]).toBe(path.join(process.cwd(), "tests", "fixtures", "broll", "cafe-green.mp4"));
+    const graph = seenArgs[seenArgs.indexOf("-filter_complex") + 1];
+    expect(graph).toContain("[base][b1]overlay=enable='between(t,2.72,4.22)':eof_action=pass[v1]");
+    expect(graph).toContain("[v1]subtitles="); // captions on top of the b-roll
+  });
+
+  it("p4-b2: the music bed (mock set) is looped under the voice and ducked by it", async () => {
+    const m = memory();
+    await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    const at = seenArgs.indexOf("-stream_loop");
+    expect(seenArgs.slice(at, at + 3)).toEqual(["-stream_loop", "-1", "-i"]);
+    expect(seenArgs[at + 3]).toMatch(/tests\/fixtures\/music\/bed-(calm|bright|soft)\.m4a$/);
+    expect(seenArgs.join(" ")).toContain("[bed][sc]sidechaincompress=");
+    expect(seenArgs.join(" ")).toContain("afade=t=out:st=4.5:d=1.5"); // the 6 s video's end
+  });
+
+  it("p4-b2: MOCK_PEXELS=false → the plain 'B-roll search is not set up yet' error is saved (no network)", async () => {
+    vi.stubEnv("MOCK_PEXELS", "false");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const m = memory();
+    const out = await runEditJob(job, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out).toEqual({ status: "failed", error: BROLL_NOT_SET_UP });
+    expect(m.row).toMatchObject({ status: "team_review", error: BROLL_NOT_SET_UP });
+    expect(calls).toEqual([]);
+  });
+
+  it("p4-b2: no music beds → plain error; a silent voice (loudness -inf) → plain error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const noMusic = memory();
+    const empty = await mkdtemp(path.join(os.tmpdir(), "no-music-"));
+    const out1 = await runEditJob(job, { ...noMusic, music: fixtureMusicLibrary(empty), ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out1).toEqual({ status: "failed", error: MUSIC_NOT_SET_UP });
+    const silent = memory();
+    const silentFfmpeg: FfmpegRunner = async (args) =>
+      isMeasurePass(args) ? { stderr: PASS1.replace('"-19.43"', '"-inf"') } : okFfmpeg(args);
+    const out2 = await runEditJob(job, { ...silent, ffmpeg: silentFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out2).toEqual({ status: "failed", error: LOUDNORM_SILENT });
+    expect(silent.row.error).toBe(LOUDNORM_SILENT);
+  });
+
+  it("p4-b2: the hook and CTA not found in the words → no b-roll (face stays), the edit still finishes", async () => {
+    const m = memory();
+    const out = await runEditJob({ ...job, hook: "Something else entirely." }, { ...m, ffmpeg: okFfmpeg, tmpRoot, fontsDir: captionFontsDir() });
+    expect(out.status).toBe("edited");
+    expect(seenArgs.join(" ")).not.toContain("overlay=");
   });
 
   it("ffmpeg failure: plain error on the row, no final file anywhere, post to the team", async () => {
     const m = memory();
     const failing: FfmpegRunner = async (args) => {
+      if (isMeasurePass(args)) return { stderr: PASS1 };
       await writeFile(args.at(-1)!, "half a video"); // a partial output, as a killed ffmpeg leaves
       throw new Error("ffmpeg failed: [Parsed_subtitles_0] /tmp/secret/path Invalid data");
     };

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { audioFilterGraph, type LoudnormMeasured } from "@/lib/music";
 
 // The ffmpeg command builder for the editor (Phase 4, docs/EDITOR-NOTES.md).
 // Pure functions only: no files, no processes. lib/edit-flow.ts runs the
@@ -6,9 +7,13 @@ import path from "node:path";
 //
 // Part A: scale + crop to 1080x1920, 30 fps, square pixels, burned-in
 // captions (lib/captions.ts .ass file + our bundled fonts), H.264 yuv420p and
-// AAC 48 kHz. Part B (b-roll, music + loudness, AI label, watermark,
-// +faststart) plugs into EditExtras; until then notYetApplied() lists any
-// extra a caller asked for, and the args do not change.
+// AAC 48 kHz.
+// Part B (p4-b2): b-roll cut-ins (overlay, only in their time window, under
+// the captions), music bed ducked under the voice + two-pass loudnorm
+// (lib/music.ts), the "AI-generated" label, the trial watermark, and
+// -movflags +faststart (always). notYetApplied() checks the REAL argv for
+// each requested extra: the p4-b1 publish guard.
+// Option names checked against the installed ffmpeg 7.1 (`ffmpeg -h filter=overlay|drawtext`).
 
 /** The finished reel (QA-SPEC Gate 4: 1080x1920, 30 fps, H.264 yuv420p, AAC 48 kHz). */
 export const EDIT_OUTPUT = {
@@ -27,14 +32,36 @@ export const EDIT_OUTPUT = {
   audio_channels: 2,
 } as const;
 
-/** Part B extension points. Typed now so callers and the task payload don't change later. */
+/**
+ * The label and watermark (1080x1920 pixels). Both sit in the top row of the
+ * caption safe zone (lib/captions.ts CAPTION_LAYOUT: below the top 250 px,
+ * inside the 140 px side margins), far above the caption band (y 1150-1500),
+ * so they never cover captions or the mouth. Label top-left, watermark
+ * top-right. Fonts: our bundled Poppins (assets/fonts, OFL).
+ */
+export const EDIT_OVERLAYS = {
+  /** Shown when ai_label is on (default on; PRODUCT.md "an AI label on every video"). */
+  label: {
+    text: "AI-generated", font_file: "Poppins-SemiBold.ttf", size: 34, colour: "white",
+    box_colour: "black@0.55", pad: 12, x: 152, y: 262, chars: 12,
+  },
+  /** Trial videos only (videos.watermark; PRODUCT.md: the free trial preview is watermarked). */
+  watermark: {
+    text: "TRIAL PREVIEW", font_file: "Poppins-Bold.ttf", size: 44, colour: "white@0.8",
+    border: 3, border_colour: "black@0.6", pad: 3, x: 140, y: 258, chars: 13,
+  },
+} as const;
+
 export type BrollCut = { path: string; start_s: number; duration_s: number };
-export type MusicBed = { path: string; gain_db: number };
+export type MusicBed = { path: string };
 export type EditExtras = {
   broll?: BrollCut[];
   music?: MusicBed | null;
+  /** Loudness pass-1 numbers: pass 2 (loudnorm linear) is built into the final command. */
+  loudness?: LoudnormMeasured | null;
   ai_label?: boolean;
   watermark?: boolean;
+  /** Always applied (QA-SPEC Gate 4); kept so the guard can check it. */
   faststart?: boolean;
 };
 
@@ -47,6 +74,8 @@ export type EditArgsInput = {
   captionsPath: string;
   /** The folder holding the caption fonts (assets/fonts, absolute path). */
   fontsDir: string;
+  /** The raw video's length in seconds (needed for the music fade out). */
+  durationS?: number;
   extras?: EditExtras;
 };
 
@@ -79,20 +108,98 @@ function checkPath(file: string, what: string): string {
   return file;
 }
 
-/**
- * [0:v] → cover 1080x1920 (scale up until both sides fill, crop the rest from
- * the centre) → square pixels → constant 30 fps → captions (libass, fonts
- * from fontsDir only add to what the system has) → [vout].
- */
-export function videoFilterGraph(captionsPath: string, fontsDir: string): string {
-  const { width: w, height: h, fps } = EDIT_OUTPUT;
+const round = (s: number) => Math.round(s * 1000) / 1000;
+
+/** Any input → 1080x1920 cover (scale up until both sides fill, crop the centre), square pixels, 30 fps. */
+const COVER = `scale=${EDIT_OUTPUT.width}:${EDIT_OUTPUT.height}:force_original_aspect_ratio=increase,crop=${EDIT_OUTPUT.width}:${EDIT_OUTPUT.height},setsar=1,fps=${EDIT_OUTPUT.fps}`;
+
+function labelFilter(fontsDir: string): string {
+  const l = EDIT_OVERLAYS.label;
   return [
-    `[0:v]scale=${w}:${h}:force_original_aspect_ratio=increase`,
-    `crop=${w}:${h}`,
-    "setsar=1",
-    `fps=${fps}`,
-    `subtitles=filename=${escapeFilterValue(captionsPath)}:fontsdir=${escapeFilterValue(fontsDir)}[vout]`,
+    `drawtext=fontfile=${escapeFilterValue(path.join(fontsDir, l.font_file))}`,
+    `text=${escapeFilterValue(l.text)}`,
+    "expansion=none", // no %{...} expansion: the text is drawn exactly as written
+    `fontsize=${l.size}`,
+    `fontcolor=${l.colour}`,
+    "box=1",
+    `boxcolor=${l.box_colour}`,
+    `boxborderw=${l.pad}`,
+    `x=${l.x}`,
+    `y=${l.y}`,
+  ].join(":");
+}
+
+function watermarkFilter(fontsDir: string): string {
+  const w = EDIT_OVERLAYS.watermark;
+  return [
+    `drawtext=fontfile=${escapeFilterValue(path.join(fontsDir, w.font_file))}`,
+    `text=${escapeFilterValue(w.text)}`,
+    "expansion=none",
+    `fontsize=${w.size}`,
+    `fontcolor=${w.colour}`,
+    `borderw=${w.border}`,
+    `bordercolor=${w.border_colour}`,
+    `x=w-tw-${w.x}`, // right-aligned: w = frame width, tw = text width
+    `y=${w.y}`,
+  ].join(":");
+}
+
+export type VideoGraphOptions = {
+  /** input = the clip's index on the ffmpeg command line. */
+  broll?: { input: number; start_s: number; duration_s: number }[];
+  aiLabel?: boolean;
+  watermark?: boolean;
+};
+
+/**
+ * [0:v] → cover 1080x1920 → square pixels → 30 fps → b-roll cut-ins (each
+ * overlaid only between its start and end; the voice is untouched) →
+ * captions (libass, our fonts; on top of the b-roll) → AI label → trial
+ * watermark → [vout].
+ */
+export function videoFilterGraph(captionsPath: string, fontsDir: string, options: VideoGraphOptions = {}): string {
+  const finish = [
+    `subtitles=filename=${escapeFilterValue(captionsPath)}:fontsdir=${escapeFilterValue(fontsDir)}`,
+    ...(options.aiLabel ? [labelFilter(fontsDir)] : []),
+    ...(options.watermark ? [watermarkFilter(fontsDir)] : []),
   ].join(",");
+  const cuts = options.broll ?? [];
+  if (cuts.length === 0) return `[0:v]${COVER},${finish}[vout]`;
+  const parts = [`[0:v]${COVER}[base]`];
+  let last = "base";
+  cuts.forEach((cut, i) => {
+    const start = round(cut.start_s);
+    const duration = round(cut.duration_s);
+    const label = `b${i + 1}`;
+    // setpts shifts the clip so its first frame lands at `start`; enable keeps it to its window.
+    parts.push(`[${cut.input}:v]${COVER},trim=duration=${duration},setpts=PTS-STARTPTS+${start}/TB[${label}]`);
+    parts.push(`[${last}][${label}]overlay=enable='between(t,${start},${round(start + duration)})':eof_action=pass[v${i + 1}]`);
+    last = `v${i + 1}`;
+  });
+  parts.push(`[${last}]${finish}[vout]`);
+  return parts.join(";");
+}
+
+const LEAD = ["-nostdin", "-hide_banner", "-nostats", "-loglevel", "info"];
+
+/** The music bed input: looped forever (-stream_loop -1); the filter trims it to the video. */
+const musicInput = (file: string) => ["-stream_loop", "-1", "-i", file];
+
+/**
+ * Loudness pass 1: the same audio chain as the final command, ending in
+ * loudnorm print_format=json; nothing is written (-f null). lib/music.ts
+ * parseLoudnormJson reads the numbers from stderr.
+ */
+export function buildLoudnessMeasureArgs(input: { input: string; musicPath: string | null; durationS: number }): string[] {
+  const source = checkPath(input.input, "input video");
+  const music = input.musicPath ? checkPath(input.musicPath, "music file") : null;
+  return [
+    ...LEAD,
+    "-i", source,
+    ...(music ? musicInput(music) : []),
+    "-filter_complex", audioFilterGraph({ music: music ? { input: 1, durationS: input.durationS } : null, loudness: "measure" }),
+    "-map", "[aout]", "-f", "null", "-",
+  ];
 }
 
 export function buildEditArgs(input: EditArgsInput): string[] {
@@ -101,28 +208,59 @@ export function buildEditArgs(input: EditArgsInput): string[] {
   const captions = checkPath(input.captionsPath, "captions file");
   const fonts = checkPath(input.fontsDir, "fonts folder");
   if (path.resolve(source) === path.resolve(output)) throw new Error("The output video must differ from the input.");
+  const extras = input.extras ?? {};
+  const broll = (extras.broll ?? []).map((cut) => ({ ...cut, path: checkPath(cut.path, "b-roll clip") }));
+  const music = extras.music ? checkPath(extras.music.path, "music file") : null;
+  if (music && !(input.durationS && input.durationS > 0)) throw new Error("The video length is needed to add music.");
+  const musicIndex = 1 + broll.length;
+  const graph = [
+    videoFilterGraph(captions, fonts, {
+      broll: broll.map((cut, i) => ({ input: 1 + i, start_s: cut.start_s, duration_s: cut.duration_s })),
+      aiLabel: extras.ai_label === true,
+      watermark: extras.watermark === true,
+    }),
+    audioFilterGraph({ music: music ? { input: musicIndex, durationS: input.durationS! } : null, loudness: extras.loudness ?? null }),
+  ].join(";");
   const o = EDIT_OUTPUT;
   return [
     // -loglevel info: libass prints which font file it picked (we check that in tests).
-    "-nostdin", "-hide_banner", "-nostats", "-loglevel", "info", "-y", // -y: our own temp output only
+    ...LEAD, "-y", // -y: our own temp output only
     "-i", source,
-    "-filter_complex", videoFilterGraph(captions, fonts),
-    "-map", "[vout]", "-map", "0:a:0", // the voice track is required: no sound = an error, not a silent reel
+    ...broll.flatMap((cut) => ["-i", cut.path]),
+    ...(music ? musicInput(music) : []),
+    "-filter_complex", graph,
+    "-map", "[vout]", "-map", "[aout]", // the voice track is required: no sound = an error, not a silent reel
     "-c:v", o.video_codec, "-preset", o.preset, "-crf", String(o.crf), "-pix_fmt", o.pix_fmt,
     "-c:a", o.audio_codec, "-b:a", o.audio_bitrate, "-ar", String(o.audio_rate), "-ac", String(o.audio_channels),
+    // QA-SPEC Gate 4: the moov atom goes before the media data, so the video starts playing at once.
+    "-movflags", "+faststart",
     output,
   ];
 }
 
-/** The part B extras a caller asked for that this version does not build yet. */
-export function notYetApplied(extras: EditExtras | undefined): string[] {
+/**
+ * p4-b1 publish guard (permanent): the extras a caller asked for that are NOT
+ * in the argv ffmpeg actually runs. Checked on the real command, not on a
+ * list of what we meant to do, so removing a filter from the builder makes the
+ * edit go to the team (team_review), never to final_qa.
+ */
+export function notYetApplied(extras: EditExtras | undefined, args: string[]): string[] {
   if (!extras) return [];
-  const asked: [string, boolean][] = [
-    ["broll", (extras.broll?.length ?? 0) > 0],
-    ["music", Boolean(extras.music)],
-    ["ai_label", extras.ai_label === true],
-    ["watermark", extras.watermark === true],
-    ["faststart", extras.faststart === true],
+  const graphAt = args.indexOf("-filter_complex");
+  const graph = graphAt >= 0 ? (args[graphAt + 1] ?? "") : "";
+  const inputs = args.flatMap((a, i) => (a === "-i" && i + 1 < args.length ? [args[i + 1]] : []));
+  const cuts = extras.broll ?? [];
+  const checks: [string, boolean, () => boolean][] = [
+    [
+      "broll",
+      cuts.length > 0,
+      () => cuts.every((c) => inputs.includes(c.path)) && (graph.match(/\]overlay=enable='between\(t,/g) ?? []).length === cuts.length,
+    ],
+    ["music", Boolean(extras.music), () => inputs.includes(extras.music!.path) && graph.includes("sidechaincompress=") && graph.includes("amix=")],
+    ["loudness", Boolean(extras.loudness), () => /loudnorm=[^,;]*measured_I=[^,;]*:linear=true/.test(graph)],
+    ["ai_label", extras.ai_label === true, () => graph.includes(`:text=${escapeFilterValue(EDIT_OVERLAYS.label.text)}:`)],
+    ["watermark", extras.watermark === true, () => graph.includes(`:text=${escapeFilterValue(EDIT_OVERLAYS.watermark.text)}:`)],
+    ["faststart", extras.faststart === true, () => args.some((a, i) => a === "-movflags" && args[i + 1] === "+faststart")],
   ];
-  return asked.filter(([, on]) => on).map(([name]) => name);
+  return checks.filter(([, asked, applied]) => asked && !applied()).map(([name]) => name);
 }

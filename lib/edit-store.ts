@@ -20,7 +20,7 @@ export function createEditStore(): EditStore {
     async getVideo(id) {
       const { data, error } = await db
         .from("videos")
-        .select("id, brand_id, kind, status, raw_path, final_path, transcript, error")
+        .select("id, brand_id, kind, status, raw_path, final_path, transcript, error, ai_label, watermark")
         .eq("id", id)
         .maybeSingle();
       if (error) fail("load video", error);

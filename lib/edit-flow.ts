@@ -7,15 +7,18 @@ import path from "node:path";
 import { z } from "zod";
 import { logAdminError } from "@/lib/admin-errors";
 import { scriptOutput } from "@/lib/ai-schemas";
-import { CAPTION_STYLES, CAPTION_STYLE_NAMES, buildAss } from "@/lib/captions";
-import { ffmpegBin } from "@/lib/clip-checks/media";
-import { buildEditArgs, notYetApplied } from "@/lib/edit";
+import { getBrollProvider, planBroll, type BrollProvider } from "@/lib/broll";
+import { CAPTION_STYLES, CAPTION_STYLE_NAMES, alignWords, buildAss } from "@/lib/captions";
+import { ffprobeBin, ffmpegBin, parseProbe, probeArgs } from "@/lib/clip-checks/media";
+import { buildEditArgs, buildLoudnessMeasureArgs, notYetApplied, type BrollCut, type EditExtras } from "@/lib/edit";
+import { getMusicLibrary, parseLoudnormJson, type MusicLibrary } from "@/lib/music";
 import { PlainError } from "@/lib/plain-error";
 import { EDIT } from "@/lib/qa/config";
 import { getSttProvider, transcriptSchema, type SttProvider, type Transcript } from "@/lib/stt";
 
 // The edit job (Phase 4, docs/EDITOR-NOTES.md): raw HeyGen MP4 → finished
-// 1080x1920 reel with word-by-word captions. Run by trigger/edit-video.ts.
+// 1080x1920 reel with word-by-word captions, b-roll, music, the AI label
+// (and the trial watermark), normalised to -14 LUFS. Run by trigger/edit-video.ts.
 //
 //  1. Check the video row: a post render, status rendered / audio_qa / editing
 //     (a retry), and the raw path in the payload is the row's own raw_path.
@@ -26,10 +29,15 @@ import { getSttProvider, transcriptSchema, type SttProvider, type Transcript } f
 //     will save it in Phase 5), else speech-to-text (MOCK in this phase),
 //     which is then saved to videos.transcript.
 //  5. Captions (.ass) from display_text + transcript (lib/captions.ts).
-//  6. ffmpeg with the args from lib/edit.ts (execFile, no shell, time limit).
-//  7. Upload to final/<brand>/<video>.mp4; status → final_qa (Gate 4 is next),
-//     but only if every requested extra was applied; otherwise team_review
-//     with a plain reason (p4-b1 publish guard: e.g. "AI label not added yet.").
+//  6. p4-b2: the video's length (ffprobe); b-roll plan (lib/broll.ts) + one
+//     clip per cut from the b-roll provider (MOCK_PEXELS); a music bed
+//     (lib/music.ts); loudness pass 1 (ffmpeg, measure only).
+//  7. ffmpeg with the args from lib/edit.ts (execFile, no shell, time limit).
+//     AI label when the payload OR the row says so (default on); watermark when
+//     the payload OR videos.watermark says trial; +faststart always.
+//  8. Upload to final/<brand>/<video>.mp4; status → final_qa (Gate 4 is next),
+//     but only if every requested extra is in the real ffmpeg argv; otherwise
+//     team_review with a plain reason (p4-b1 publish guard: e.g. "AI label not added yet.").
 //  On any failure: a plain error on the row, status team_review (video and
 //  post), no final file left in storage, the temp folder always deleted.
 //  All saves are only for the run that owns the claim (p4-b1).
@@ -45,8 +53,23 @@ export const editJobSchema = z.object({
   editPlan: scriptOutput.shape.edit_plan,
   brandColour: z.string().regex(/^#[0-9a-f]{6}$/i).nullable().optional(),
   captionStyle: z.enum(CAPTION_STYLE_NAMES).default("big_words"),
+  /** videos.ai_label (on by default). The label is drawn if this OR the row says so. */
   aiLabel: z.boolean().default(true),
+  /**
+   * Trial videos only. Where "trial" comes from: the video row's `watermark`
+   * column (initial schema), set to true when a trial preview's video row is
+   * made (PRODUCT.md: the free trial's one preview is watermarked; Phase 7
+   * sets it from profiles.plan_status = 'trial'). The editor draws the
+   * watermark if this OR videos.watermark is true, so a payload can never remove it.
+   */
   watermark: z.boolean().default(false),
+  /** posts.format: b-roll coverage limit (talking ≤ 25%, story ≤ 60%). */
+  format: z.enum(["talking", "story"]).default("talking"),
+  /** scripts.hook and scripts.cta: the face stays on screen while they are said. */
+  hook: z.string().trim().min(1).max(1000),
+  cta: z.string().trim().min(1).max(1000),
+  /** scripts.broll_keywords: extra cuts when fewer than 2 edit_plan moments fit. */
+  brollKeywords: z.array(z.string().min(1)).max(10).default([]),
 });
 export type EditJob = z.input<typeof editJobSchema>;
 
@@ -59,6 +82,8 @@ export type EditVideoRow = {
   final_path: string | null;
   transcript: unknown;
   error: string | null;
+  ai_label: boolean;
+  watermark: boolean;
 };
 
 /** Video statuses an edit may start from ('editing' = a retry of a crashed run). */
@@ -90,7 +115,8 @@ export interface EditFiles {
   remove(path: string): Promise<void>;
 }
 
-export type FfmpegRunner = (args: string[]) => Promise<{ stderr: string }>;
+/** timeoutS: default EDIT.ffmpeg_timeout_s (the final encode). */
+export type FfmpegRunner = (args: string[], options?: { timeoutS?: number }) => Promise<{ stderr: string }>;
 
 export type EditDeps = {
   store: EditStore;
@@ -104,6 +130,12 @@ export type EditDeps = {
   tmpRoot?: string;
   /** This run's claim token (the task passes ctx.run.id, the same on a retry). Default: a fresh UUID. */
   runToken?: string;
+  /** Default: getBrollProvider() (the mock unless MOCK_PEXELS is exactly "false"). */
+  broll?: BrollProvider;
+  /** Default: getMusicLibrary() (the mock set). */
+  music?: MusicLibrary;
+  /** The raw video's length in seconds. Default: ffprobe. */
+  probeDurationS?: (file: string) => Promise<number>;
 };
 
 export type EditOutcome =
@@ -138,6 +170,7 @@ const MISSING_EXTRA: Record<string, string> = {
   broll: "B-roll not added yet.",
   music: "Music not added yet.",
   faststart: "Fast start not set yet.",
+  loudness: "Loudness not set yet.",
 };
 
 export function missingExtrasMessage(names: string[]): string {
@@ -159,12 +192,18 @@ export function captionFontsDir(): string {
 }
 
 /** Runs ffmpeg (FFMPEG_PATH, as the clip checks do) without a shell, with a time limit. */
-export const runFfmpeg: FfmpegRunner = (args) =>
+export const runFfmpeg: FfmpegRunner = (args, options) =>
   new Promise((resolve, reject) => {
     execFile(
       ffmpegBin(),
       args,
-      { encoding: "utf8", timeout: EDIT.ffmpeg_timeout_s * 1000, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024, shell: false },
+      {
+        encoding: "utf8",
+        timeout: (options?.timeoutS ?? EDIT.ffmpeg_timeout_s) * 1000,
+        killSignal: "SIGKILL",
+        maxBuffer: 32 * 1024 * 1024,
+        shell: false,
+      },
       (error, _stdout, stderr) => {
         if (error) reject(new Error(`ffmpeg failed: ${stderr.slice(-800)}`, { cause: error }));
         else resolve({ stderr });
@@ -172,14 +211,30 @@ export const runFfmpeg: FfmpegRunner = (args) =>
     );
   });
 
+/** The video's length in seconds (ffprobe, FFPROBE_PATH, no shell, time limit). */
+export const probeDurationS = (file: string): Promise<number> =>
+  new Promise((resolve, reject) => {
+    execFile(
+      ffprobeBin(),
+      probeArgs(file),
+      { encoding: "utf8", timeout: EDIT.probe_timeout_s * 1000, killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024, shell: false },
+      (error, stdout, stderr) => {
+        if (error) return reject(new Error(`ffprobe failed: ${stderr.slice(-400)}`, { cause: error }));
+        const { durationS } = parseProbe(stdout);
+        if (!(durationS > 0)) return reject(new Error("ffprobe found no length"));
+        resolve(durationS);
+      },
+    );
+  });
+
 const refuse = (why: string) => new PlainError(`This video can't be edited: ${why}.`);
 
-type Stage = "download" | "transcript" | "fonts" | "ffmpeg" | "upload";
+type Stage = "download" | "transcript" | "fonts" | "probe" | "broll" | "music" | "loudness" | "ffmpeg" | "upload";
 
 function plainMessage(error: unknown, stage: Stage): string {
   if (error instanceof PlainError) return error.message;
   if (stage === "download") return EDIT_ERRORS.download;
-  if (stage === "ffmpeg") return EDIT_ERRORS.ffmpeg;
+  if (stage === "probe" || stage === "loudness" || stage === "ffmpeg") return EDIT_ERRORS.ffmpeg;
   if (stage === "upload") return EDIT_ERRORS.upload;
   return EDIT_ERRORS.generic;
 }
@@ -234,18 +289,64 @@ export async function runEditJob(input: EditJob, deps: EditDeps): Promise<EditOu
       throw new PlainError(EDIT_ERRORS.fonts, { cause: error });
     }
 
+    stage = "probe";
+    const durationS = await (deps.probeDurationS ?? probeDurationS)(rawFile);
+
+    // p4-b2: b-roll. The plan is pure (lib/broll.ts); each cut gets the provider's best clip
+    // that is long enough, a different clip per cut when there is one. A cut with no clip is dropped.
+    stage = "broll";
+    const plan = planBroll({
+      words: alignWords(job.displayText, transcript),
+      moments: job.editPlan.broll_moments,
+      keywords: job.brollKeywords,
+      format: job.format,
+      durationS,
+      hook: job.hook,
+      cta: job.cta,
+    });
+    const provider = deps.broll ?? getBrollProvider();
+    const broll: BrollCut[] = [];
+    const usedClips = new Set<string>();
+    for (const cut of plan.cuts) {
+      const clips = await provider.search(cut.keyword, { orientation: "portrait", minDuration_s: cut.duration_s });
+      const clip = clips.find((c) => !usedClips.has(c.id)) ?? clips[0];
+      if (!clip) continue;
+      usedClips.add(clip.id);
+      broll.push({ path: clip.file, start_s: cut.start_s, duration_s: cut.duration_s });
+    }
+    console.info(
+      `[edit] broll video=${video.id} cuts=${broll.length} coverage=${plan.coverage_s}s/${plan.max_coverage_s}s skipped=${plan.skipped.map((s) => s.why).join(",") || "none"}`,
+    );
+
+    stage = "music";
+    const bed = (deps.music ?? getMusicLibrary()).pick(video.id);
+
+    // p4-b2: loudness pass 1 (the same audio chain, measure only); pass 2 is in the final command.
+    stage = "loudness";
+    const measured = parseLoudnormJson(
+      (await deps.ffmpeg(buildLoudnessMeasureArgs({ input: rawFile, musicPath: bed.file, durationS }), { timeoutS: EDIT.loudness_timeout_s })).stderr,
+    );
+
     stage = "ffmpeg";
     const finalFile = path.join(workDir, "final.mp4");
-    const extras = { ai_label: job.aiLabel, watermark: job.watermark };
-    await deps.ffmpeg(buildEditArgs({ input: rawFile, output: finalFile, captionsPath: captionsFile, fontsDir, extras }));
+    const extras: EditExtras = {
+      broll,
+      music: { path: bed.file },
+      loudness: measured,
+      ai_label: job.aiLabel || video.ai_label,
+      watermark: job.watermark || video.watermark,
+      faststart: true,
+    };
+    const args = buildEditArgs({ input: rawFile, output: finalFile, captionsPath: captionsFile, fontsDir, durationS, extras });
+    await deps.ffmpeg(args);
     if ((await stat(finalFile)).size === 0) throw new Error("ffmpeg wrote an empty file");
 
     stage = "upload";
     uploadStarted = true;
     await deps.files.upload(finalPath, new Uint8Array(await readFile(finalFile)), "video/mp4");
-    // p4-b1 (QA SF3): never final_qa while a requested extra (the AI label above all) is missing.
-    // The file is kept (final_path saved) so the team can look at it.
-    const notApplied = notYetApplied(extras);
+    // p4-b1 (QA SF3): never final_qa while a requested extra (the AI label above all) is missing
+    // from the command ffmpeg actually ran. The file is kept (final_path saved) for the team.
+    const notApplied = notYetApplied(extras, args);
     if (notApplied.length > 0) {
       const saved = await deps.store.finishEdit(video.id, run, {
         status: "team_review",
