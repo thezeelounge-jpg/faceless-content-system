@@ -1,0 +1,8 @@
+{
+  "note": "Mock music set (until the real royalty-free set is in Storage). Made by scripts/make-fixtures.sh from sine/triangle tones (ours, CC0), normalised to about -14 LUFS, each loops without a click.",
+  "beds": [
+    { "id": "bed-calm", "file": "bed-calm.m4a", "duration_s": 24 },
+    { "id": "bed-bright", "file": "bed-bright.m4a", "duration_s": 20 },
+    { "id": "bed-soft", "file": "bed-soft.m4a", "duration_s": 30 }
+  ]
+}

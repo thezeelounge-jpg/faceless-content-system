@@ -1,3 +1,4 @@
+import dns from "node:dns";
 import http from "node:http";
 import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
@@ -115,8 +116,68 @@ export function installSocketGuard(): void {
   patch(tls, ["connect"]);
   patch(http, ["request", "get"]);
   patch(https, ["request", "get"]);
+  installDnsGuard();
   // Make `import { request } from "node:http"` see the patched functions too.
   syncBuiltinESMExports();
+}
+
+// ---------------------------------------------------------------------------
+// DNS guard (p4-fix a). DNS does not go through net.Socket (c-ares and
+// getaddrinfo), so node:dns is patched on its shared module objects:
+//   - `dns` (callback API): lookup, lookupService, resolve, resolve4/6/Any/…,
+//     reverse. With a callback the error is handed to it on the next tick
+//     (like a real failure); without one it throws.
+//   - `dns.promises` (the SAME object as `node:dns/promises` and the named
+//     `promises` export): the same names reject.
+//   - `dns.Resolver` and `dns.promises.Resolver` prototypes (and their base
+//     classes): the same names, for every instance.
+// Every name starting with lookup / resolve / reverse is patched, so a new
+// resolve* added by Node is covered too. setServers / getServers stay real.
+// Only exception: `lookup` of a literal IP (no query is sent).
+
+const DNS_CALL = /^(lookup|resolve|reverse)/;
+
+function dnsTarget(name: string, args: unknown[]): string {
+  if (name === "lookupService") return `${text(args[0]) ?? "unknown host"}:${text(args[1]) ?? ""}`;
+  return text(args[0]) ?? "unknown host";
+}
+
+function blockedDnsCall(real: AnyFn, name: string, style: "callback" | "promise"): AnyFn {
+  return function (this: unknown, ...args: unknown[]) {
+    if (!state().blocked) return real.apply(this, args);
+    // `lookup` of a literal IP sends no query (Node answers it itself), and a
+    // local stub server needs it to LISTEN on 127.0.0.1. Names never pass.
+    if (name === "lookup" && typeof args[0] === "string" && net.isIP(args[0])) return real.apply(this, args);
+    const error = new Error(`${NETWORK_DISABLED}: ${dnsTarget(name, args)}`);
+    if (style === "promise") return Promise.reject(error);
+    const callback = args[args.length - 1];
+    if (typeof callback === "function") {
+      process.nextTick(callback as AnyFn, error);
+      return undefined;
+    }
+    throw error;
+  };
+}
+
+function patchDnsObject(target: object, style: "callback" | "promise", done: Set<object>): void {
+  // Walk the prototype chain (Resolver methods may sit on a base class).
+  for (let obj: object | null = target; obj && obj !== Object.prototype && !done.has(obj); obj = Object.getPrototypeOf(obj)) {
+    done.add(obj);
+    for (const name of Object.getOwnPropertyNames(obj)) {
+      if (!DNS_CALL.test(name)) continue;
+      const desc = Object.getOwnPropertyDescriptor(obj, name);
+      if (!desc || typeof desc.value !== "function" || !desc.writable) continue;
+      (obj as Record<string, AnyFn>)[name] = blockedDnsCall(desc.value as AnyFn, name, style);
+    }
+  }
+}
+
+function installDnsGuard(): void {
+  const done = new Set<object>();
+  patchDnsObject(dns, "callback", done);
+  patchDnsObject(dns.Resolver.prototype, "callback", done);
+  patchDnsObject(dns.promises, "promise", done);
+  patchDnsObject(dns.promises.Resolver.prototype, "promise", done);
 }
 
 /** Switches the socket guard on (true) or off (false, staging opt-in only). */

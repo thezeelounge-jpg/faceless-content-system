@@ -58,7 +58,20 @@ export type RenderablePost = {
 /** One finished post render, for brands.words_per_second. */
 export type RenderSample = { words: number; durationS: number };
 
-export type ClaimResult = "claimed" | "taken" | "busy" | "missing";
+export type NewPostVideo = {
+  postId: string;
+  scriptId: string;
+  brandId: string;
+  avatarId: string;
+  engine: string;
+  spokenWords: number;
+};
+/** other_script (p4-b3, Q8): the post already has an active video for an older script version. */
+export type PostRenderOutcome = { outcome: "created" | "existing" | "other_script" | "not_approved"; videoId: string | null };
+
+export type ClaimResult ="claimed" | "taken" | "busy" | "missing";
+/** adopt_late_render (p4-fix c2): what happened to a HeyGen success that arrived after the claim was cleared. */
+export type LateRender = "adopted" | "moved_on" | "not_late";
 export type WebhookSave = "new" | "unprocessed" | "processed";
 
 export interface VideoStore {
@@ -70,8 +83,21 @@ export interface VideoStore {
   claimRenderSlot(id: string, max: number): Promise<ClaimResult>;
   /** Saves the result only while the video is still 'rendering'. Null when someone else already finished it. */
   finishRender(id: string, patch: VideoPatch): Promise<VideoRow | null>;
+  /**
+   * adopt_late_render: a failed row that reached HeyGen with no id (claim cleared, or the wait ran
+   * out) gets HeyGen's late success. 'adopted' = id saved, back to 'rendering' (download next);
+   * 'moved_on' = a newer render exists, only the late id is recorded; 'not_late' = nothing done.
+   * Never writes provider_usage.
+   */
+  adoptLateRender(id: string, heygenVideoId: string): Promise<LateRender>;
   /** A video for this script that is not failed or skipped (newest), or null. */
   findActiveVideoForScript(scriptId: string): Promise<VideoRow | null>;
+  /**
+   * create_post_render (p4-b1): the ONLY "Make video" insert path. Under the per-post lock
+   * (shared with adopt_late_render): post still approved and this its newest script, else
+   * 'not_approved'; an active video for the script → 'existing'; otherwise a new queued row.
+   */
+  createPostVideo(input: NewPostVideo): Promise<PostRenderOutcome>;
   listLikenessVideos(avatarId: string): Promise<VideoRow[]>;
 
   getRenderablePost(postId: string): Promise<RenderablePost | null>;

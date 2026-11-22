@@ -1,0 +1,61 @@
+[Script Info]
+; Made by lib/captions.ts
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+LayoutResX: 1080
+LayoutResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: None
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: small_box,Poppins Bold,60,&H00FFFFFF,&H00FFFFFF,&H00141414,&H80000000,0,0,0,0,100,100,0,0,3,14,0,2,140,140,434,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.10,0:00:01.20,small_box,,0,0,0,,Stop scrolling!
+Dialogue: 0,0:00:01.20,0:00:03.16,small_box,,0,0,0,,Here are 3 quick\Ntips to grow your
+Dialogue: 0,0:00:03.16,0:00:04.40,small_box,,0,0,0,,café on WhatsApp.
+Dialogue: 0,0:00:04.40,0:00:05.90,small_box,,0,0,0,,Book a free call\Ntoday.
+
+;-----
+[Script Info]
+; Made by lib/captions.ts
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+LayoutResX: 1080
+LayoutResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: None
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: small_box,Poppins Bold,60,&H00FFFFFF,&H00FFFFFF,&H00141414,&H80000000,0,0,0,0,100,100,0,0,3,14,0,2,140,140,434,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:04.94,0:00:05.90,small_box,,0,0,0,,{\fscx65\fscy65}Supercalifragilisticexpialidocious\Nworks
+
+;-----
+[Script Info]
+; Made by lib/captions.ts
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+LayoutResX: 1080
+LayoutResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: None
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: small_box,Poppins Bold,60,&H00FFFFFF,&H00FFFFFF,&H00141414,&H80000000,0,0,0,0,100,100,0,0,3,14,0,2,140,140,434,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:05.20,0:00:05.90,small_box,,0,0,0,,Hi

@@ -13,8 +13,10 @@ describe("trigger.config.ts", () => {
     expect(config.retries?.default?.maxAttempts).toBe(3);
   });
 
-  it("adds the ffmpeg build extension (sets FFMPEG_PATH and FFPROBE_PATH)", () => {
-    expect(config.build?.extensions?.map((e) => e.name)).toEqual(["ffmpeg"]);
+  it("adds the ffmpeg build extension (sets FFMPEG_PATH and FFPROBE_PATH) and copies the caption fonts", () => {
+    // Phase 4 part A: additionalFiles copies assets/fonts into the build so the
+    // edit task finds them at path.join(process.cwd(), "assets/fonts").
+    expect(config.build?.extensions?.map((e) => e.name)).toEqual(["ffmpeg", "additionalFiles"]);
   });
 
   it("adds the react-server condition so server-only does not throw in tasks", () => {

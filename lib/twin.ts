@@ -7,6 +7,7 @@ import type { AvatarRow, AvatarStatus, ClipStorage, ConsentStore } from "@/lib/c
 import { HeygenError, type CreatedTwin, type HeygenClient, type HeygenErrorCode } from "@/lib/heygen";
 import { SpendGuardError, withHeygenSpend, type SpendStore } from "@/lib/heygen-spend";
 import { PlainError } from "@/lib/plain-error";
+import { TWIN_POLL } from "@/lib/qa/config";
 
 // Creating the digital twin after the admin approves the consent clip, and
 // waiting until it is ready. Plain functions, so they are tested with mock
@@ -21,12 +22,8 @@ import { PlainError } from "@/lib/plain-error";
 //   reshoot_needed   HeyGen could not train from this clip
 //   failed           HeyGen consent rejected, or the group failed
 
-export const TWIN_POLL = {
-  first_wait_s: 60,
-  max_wait_s: 1800,
-  /** About a day of checks at most (HeyGen's consent link lasts 24 hours). */
-  max_attempts: 60,
-};
+/** The poll's waits now live in lib/qa/config.ts (p4-b1: the twin claim wait is derived from them). */
+export { TWIN_POLL };
 
 const STILL_WAITING =
   "Still waiting for HeyGen after many checks. Check the consent email was completed, then press “Check twin again”.";

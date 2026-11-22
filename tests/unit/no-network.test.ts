@@ -1,3 +1,5 @@
+import dns, { promises as dnsPromisesNamed } from "node:dns";
+import dnsPromisesModule, { lookup as lookupNamed, resolve4 as resolve4Named } from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -144,6 +146,76 @@ describe("sockets are blocked too: http, https, net, tls, undici (SF1)", () => {
     expect(String((cause as Error | undefined)?.message)).toContain("network disabled in tests");
     expect(requests).toBe(0);
     expect(connections).toBe(0);
+  });
+});
+
+describe("DNS is blocked too: node:dns, dns.promises, node:dns/promises, Resolver (p4-fix a)", () => {
+  // No real lookup can happen: every call must fail with our own message, not
+  // with EAI_AGAIN / ECONNREFUSED from a real resolver.
+  const HOST = "api.heygen.com";
+  const DISABLED = `network disabled in tests: ${HOST}`;
+
+  it("dns.lookup (callback) fails with the disabled message", async () => {
+    const error = await new Promise<unknown>((resolve) => {
+      try {
+        dns.lookup(HOST, (err) => resolve(err));
+      } catch (thrown) {
+        resolve(thrown);
+      }
+    });
+    expect(String((error as Error | null)?.message)).toBe(DISABLED);
+  });
+
+  it("dns.resolve4 / resolve / lookupService (callback) fail with the disabled message", async () => {
+    const viaCallback = (start: (cb: (err: unknown) => void) => void) =>
+      new Promise<unknown>((resolve) => {
+        try {
+          start((err) => resolve(err));
+        } catch (thrown) {
+          resolve(thrown);
+        }
+      });
+    expect(String(((await viaCallback((cb) => dns.resolve4(HOST, cb))) as Error).message)).toBe(DISABLED);
+    expect(String(((await viaCallback((cb) => dns.resolve(HOST, cb))) as Error).message)).toBe(DISABLED);
+    expect(String(((await viaCallback((cb) => dns.lookupService("8.8.8.8", 53, cb))) as Error).message)).toContain(
+      "network disabled in tests",
+    );
+  });
+
+  it("dns.promises.lookup rejects with the disabled message (default import)", async () => {
+    await expect(dns.promises.lookup(HOST)).rejects.toThrow(DISABLED);
+    await expect(dns.promises.resolveAny(HOST)).rejects.toThrow(DISABLED);
+  });
+
+  it("`import { promises } from 'node:dns'` sees the guard", async () => {
+    await expect(dnsPromisesNamed.lookup(HOST, { all: true })).rejects.toThrow(DISABLED);
+    await expect(dnsPromisesNamed.resolve6(HOST)).rejects.toThrow(DISABLED);
+  });
+
+  it("node:dns/promises resolve4 rejects (default and named imports)", async () => {
+    await expect(dnsPromisesModule.resolve4(HOST)).rejects.toThrow(DISABLED);
+    await expect(resolve4Named(HOST)).rejects.toThrow(DISABLED);
+    await expect(lookupNamed(HOST)).rejects.toThrow(DISABLED);
+  });
+
+  it("only `lookup` of a literal IP passes (Node answers it without a query); names and 'localhost' do not", async () => {
+    await expect(dns.promises.lookup("127.0.0.1")).resolves.toMatchObject({ address: "127.0.0.1", family: 4 });
+    await expect(dns.promises.lookup("localhost")).rejects.toThrow("network disabled in tests: localhost");
+    await expect(dns.promises.resolve4("127.0.0.1")).rejects.toThrow("network disabled in tests: 127.0.0.1");
+  });
+
+  it("new dns.Resolver().resolve4 and new dns.promises.Resolver().resolve4 fail", async () => {
+    const resolver = new dns.Resolver();
+    const error = await new Promise<unknown>((resolve) => {
+      try {
+        resolver.resolve4(HOST, (err) => resolve(err));
+      } catch (thrown) {
+        resolve(thrown);
+      }
+    });
+    expect(String((error as Error | null)?.message)).toBe(DISABLED);
+    await expect(new dns.promises.Resolver().resolve4(HOST)).rejects.toThrow(DISABLED);
+    await expect(new dnsPromisesModule.Resolver().resolveTxt(HOST)).rejects.toThrow(DISABLED);
   });
 });
 

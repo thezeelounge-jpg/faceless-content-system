@@ -20,6 +20,10 @@ import {
 //    "network disabled in tests: <host>". That covers node:http, node:https,
 //    net, tls and undici (Node's real fetch), whatever a library uses.
 //    PGlite is in-process and needs no socket.
+// 3. DNS (p4-fix a): node:dns lookup / lookupService / resolve* / reverse,
+//    dns.promises (= node:dns/promises) and every dns.Resolver /
+//    dns.promises.Resolver instance fail with the same message. Only
+//    `lookup` of a literal IP passes (no query; local stubs need it).
 //
 // Tests that need an answer inject a fake (createHeygenClient({ fetch }) etc.).
 // Exception: tests/staging/*, only when RUN_STAGING_TESTS=1 (opt-in, never in npm test).

@@ -41,6 +41,9 @@ const HEX = /^[0-9a-f]+$/i;
 
 const answer = (status: number, ok: boolean, message: string): WebhookResult => ({ status, body: { ok, message } });
 
+/** HeyGen's id for a log line: plain id characters only, short. */
+const logSafe = (value: string) => value.replace(/[^\w.-]/g, "?").slice(0, 100);
+
 /** Constant-time check of HeyGen's hex HMAC-SHA256 signature. Never throws. */
 export function verifyHeygenSignature(rawBody: string, signature: string | null, secret: string): boolean {
   if (!signature || !secret) return false;
@@ -89,6 +92,25 @@ export async function handleHeygenWebhook(
       await deps.videos.markWebhookProcessed(eventKey);
       return answer(200, true, "Unknown video (ignored).");
     }
+    // p4-fix c2: HeyGen finished a render AFTER we gave up on it (an admin cleared the claim, or
+    // the 30-minute wait ran out). It was paid for: never ignore it silently. adopt_late_render
+    // decides atomically: adopt it (id saved, back to 'rendering', downloaded below) or, when a
+    // newer render exists, only record the late id. It never reserves spend, never writes a
+    // provider_usage row and never starts a render. A cleared row is never claimed again, so
+    // this callback can only be the old render.
+    if (type === "avatar_video.success" && !video.heygen_video_id && video.status === "failed") {
+      const late = await deps.videos.adoptLateRender(video.id, data.video_id);
+      const ids = `video=${video.id} heygen=${logSafe(data.video_id)}`;
+      if (late === "moved_on") {
+        console.warn(`[webhook] late HeyGen success recorded (a newer render was kept) ${ids}`);
+        await deps.videos.markWebhookProcessed(eventKey);
+        return answer(200, true, "Late video recorded; a newer render was kept.");
+      }
+      if (late === "adopted") console.warn(`[webhook] late HeyGen success adopted ${ids}`);
+    } else if (type === "avatar_video.fail" && !video.heygen_video_id && video.status === "failed") {
+      console.warn(`[webhook] late HeyGen failure for a video we already gave up on video=${video.id} (nothing to do)`);
+    }
+
     // The webhook beat us to saving HeyGen's id (POST answered, our save not done yet).
     if (!video.heygen_video_id && video.status === "rendering") {
       await deps.videos.updateVideo(video.id, { heygen_video_id: data.video_id });

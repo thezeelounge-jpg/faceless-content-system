@@ -7,7 +7,8 @@ import type { SpendKind, SpendStore } from "@/lib/heygen-spend";
 export type SpendRow = {
   id: string;
   provider: "heygen";
-  kind: SpendKind;
+  /** 'renders_resumed' = the audit row of an admin un-pause (p4-fix e), never counted. */
+  kind: SpendKind | "renders_resumed";
   avatar_id: string | null;
   video_id: string | null;
   status: "reserved" | "succeeded" | "failed";
@@ -57,6 +58,24 @@ export function memorySpendStore(
     },
     async pauseRenders() {
       settings.rendersPaused = true;
+    },
+    // Mirrors resume_renders (migration 20261122140000): flag off + one audit row, or nothing.
+    async resumeRenders(adminEmail) {
+      if (!settings.rendersPaused) return "not_paused";
+      settings.rendersPaused = false;
+      rows.push({
+        id: `50000000-0000-4000-8000-${String(++n).padStart(12, "0")}`,
+        provider: "heygen",
+        kind: "renders_resumed",
+        avatar_id: null,
+        video_id: null,
+        status: "succeeded",
+        cost_usd: 0,
+        note: `renders resumed by ${adminEmail} after checking today's HeyGen spend`,
+        mock: false,
+        created_at: new Date().toISOString(),
+      });
+      return "resumed";
     },
     async queueCapAlert(alert) {
       let added = 0;

@@ -5,6 +5,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RENDER, TWIN_POLL_MAX_S } from "@/lib/qa/config";
 
 // Every migration, in file-name order, exactly as `supabase db push` runs them.
 const MIGRATIONS_DIR = path.resolve(process.cwd(), "supabase/migrations");
@@ -591,6 +592,11 @@ describe("SF2: customers read only the safe columns of their own post videos", (
     "spoken_words",
     "render_started_at",
     "rendered_at",
+    "claim_cleared_at",
+    "late_heygen_video_id",
+    "edit_run_id",
+    "edit_started_at",
+    "post_id", // p4-b3 (Q8): server only like every new column
   ];
   const canSelect = async (role: string, column: string) =>
     (
@@ -659,12 +665,13 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
       `select kind, status, cost_usd::float as cost, mock, note from public.provider_usage where ${column} = $1`,
       [id],
     );
-  const stuckVideo = async (kind: string, heygenId: string | null = null) =>
+  // p4-fix c1: a claim may be cleared only after the render wait (31 min old here) or once failed.
+  const stuckVideo = async (kind: string, heygenId: string | null = null, ageMinutes = 31) =>
     (
       await db.query<{ id: string }>(
         `insert into public.videos (brand_id, kind, status, render_started_at, heygen_video_id)
-         values ('${BRAND_A}', $1, 'rendering', now(), $2) returning id`,
-        [kind, heygenId],
+         values ('${BRAND_A}', $1, 'rendering', now() - make_interval(mins => $3), $2) returning id`,
+        [kind, heygenId, ageMinutes],
       )
     ).rows[0].id;
 
@@ -684,9 +691,9 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
     });
   });
 
-  it("a likeness-test row holding a claim: cleared and audited as likeness_test", async () => {
+  it("a likeness-test row holding a claim that already FAILED: cleared at once (no wait) and audited as likeness_test", async () => {
     await asRole("service_role", null, async () => {
-      const id = await stuckVideo("likeness_test");
+      const id = await stuckVideo("likeness_test", null, 0);
       await db.query("update public.videos set status = 'failed' where id = $1", [id]);
       expect((await clear("video", id)).rows[0].result).toBe("likeness_test");
       expect((await audits("video_id", id)).rows.map((r) => r.note)).toEqual([
@@ -714,7 +721,7 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
     await asRole("service_role", null, async () => {
       const id = (
         await db.query<{ id: string }>(
-          `insert into public.avatars (brand_id, create_started_at, error) values ('${BRAND_A}', now(), 'A twin may already exist') returning id`,
+          `insert into public.avatars (brand_id, create_started_at, error) values ('${BRAND_A}', now() - interval '28 hours', 'A twin may already exist') returning id`,
         )
       ).rows[0].id;
       expect((await clear("twin", id)).rows[0].result).toBe("twin");
@@ -746,6 +753,312 @@ describe("clear_stuck_claim: clears a claim without a HeyGen id and audits it in
     });
     await asRole("anon", null, async () => {
       await expect(clear("twin", "90000000-0000-4000-8000-000000000999")).rejects.toThrow(/permission denied/);
+    });
+  });
+
+  // ---- p4-fix c1: the wait (HeyGen may still be making it) ----
+
+  it("c1: a 5-minute-old render claim is REFUSED by the function itself ('too_soon', nothing written); a 31-minute-old one clears", async () => {
+    await asRole("service_role", null, async () => {
+      const young = await stuckVideo("post", null, 5);
+      expect((await clear("video", young)).rows[0].result).toBe("too_soon");
+      const kept = await db.query("select status, render_started_at is not null as claimed, claim_cleared_at from public.videos where id = $1", [young]);
+      expect(kept.rows).toEqual([{ status: "rendering", claimed: true, claim_cleared_at: null }]);
+      expect((await audits("video_id", young)).rows).toEqual([]);
+
+      const old = await stuckVideo("post", null, 31);
+      expect((await clear("video", old)).rows[0].result).toBe("render");
+      await db.query("delete from public.provider_usage where video_id in ($1, $2)", [young, old]);
+      await db.query("delete from public.videos where id in ($1, $2)", [young, old]);
+    });
+  });
+
+  it("c1: the SQL wait equals RENDER.poll_max_s (source and behaviour on both sides of the line)", async () => {
+    const src = await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = 'clear_stuck_claim'");
+    expect(src.rows[0].src).toContain(`interval '${RENDER.poll_max_s} seconds'`);
+    await asRole("service_role", null, async () => {
+      const justBefore = await stuckVideo("post", null, RENDER.poll_max_s / 60 - 1);
+      const justAfter = await stuckVideo("post", null, RENDER.poll_max_s / 60 + 1);
+      expect((await clear("video", justBefore)).rows[0].result).toBe("too_soon");
+      expect((await clear("video", justAfter)).rows[0].result).toBe("render");
+      await db.query("delete from public.provider_usage where video_id in ($1, $2)", [justBefore, justAfter]);
+      await db.query("delete from public.videos where id in ($1, $2)", [justBefore, justAfter]);
+    });
+  });
+
+  it("p4-b1 5c: twins wait TWIN_POLL_MAX_S in SQL too (same number as TS): 31 min and just before → too_soon; just after → clears", async () => {
+    const src = await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = 'clear_stuck_claim'");
+    expect(src.rows[0].src).toContain(`interval '${TWIN_POLL_MAX_S} seconds'`);
+    expect(src.rows[0].src).toContain(`interval '${RENDER.poll_max_s} seconds'`);
+    await asRole("service_role", null, async () => {
+      const insert = async (seconds: number, status = "consent_pending") =>
+        (
+          await db.query<{ id: string }>(
+            `insert into public.avatars (brand_id, status, create_started_at) values ('${BRAND_A}', $2, now() - make_interval(secs => $1)) returning id`,
+            [seconds, status],
+          )
+        ).rows[0].id;
+      const thirtyOne = await insert(31 * 60);
+      const justBefore = await insert(TWIN_POLL_MAX_S - 60);
+      const justAfter = await insert(TWIN_POLL_MAX_S + 60);
+      const failed = await insert(60, "failed");
+      expect((await clear("twin", thirtyOne)).rows[0].result).toBe("too_soon");
+      expect((await clear("twin", justBefore)).rows[0].result).toBe("too_soon");
+      expect((await clear("twin", justAfter)).rows[0].result).toBe("twin");
+      expect((await clear("twin", failed)).rows[0].result).toBe("twin");
+      const ids = [thirtyOne, justBefore, justAfter, failed];
+      await db.query("delete from public.provider_usage where avatar_id = any($1::uuid[])", [ids]);
+      await db.query("delete from public.avatars where id = any($1::uuid[])", [ids]);
+    });
+  });
+
+  it("c1: a 5-minute-old twin claim is refused; one older than the twin wait clears", async () => {
+    await asRole("service_role", null, async () => {
+      const insert = async (minutes: number) =>
+        (
+          await db.query<{ id: string }>(
+            `insert into public.avatars (brand_id, create_started_at) values ('${BRAND_A}', now() - make_interval(mins => $1)) returning id`,
+            [minutes],
+          )
+        ).rows[0].id;
+      const young = await insert(5);
+      const old = await insert(TWIN_POLL_MAX_S / 60 + 1);
+      expect((await clear("twin", young)).rows[0].result).toBe("too_soon");
+      expect((await clear("twin", old)).rows[0].result).toBe("twin");
+      const row = await db.query<{ claimed: boolean }>("select create_started_at is not null as claimed from public.avatars where id = $1", [young]);
+      expect(row.rows).toEqual([{ claimed: true }]);
+      await db.query("delete from public.provider_usage where avatar_id in ($1, $2)", [young, old]);
+      await db.query("delete from public.avatars where id in ($1, $2)", [young, old]);
+    });
+  });
+
+  it("c2: a cleared row is retired: claim_render_slot never claims it again (a new render uses a new row)", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await stuckVideo("post");
+      expect((await clear("video", id)).rows[0].result).toBe("render");
+      const row = await db.query<{ cleared: boolean }>("select claim_cleared_at is not null as cleared from public.videos where id = $1", [id]);
+      expect(row.rows).toEqual([{ cleared: true }]);
+      const claim = await db.query<{ result: string }>("select public.claim_render_slot($1, 10) as result", [id]);
+      expect(claim.rows[0].result).toBe("taken");
+      await db.query("delete from public.provider_usage where video_id = $1", [id]);
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+});
+
+// p4-fix d: clearing a POST render claim puts the post back to 'approved'
+// (so "Make video" works again) in the same transaction. Likeness tests have no post.
+describe("clear_stuck_claim moves the post back to approved (p4-fix d)", () => {
+  const seedPost = async (postStatus: string) => {
+    const post = (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status, status_reason)
+         values ('${BRAND_A}', now(), 'Clear test', $1, 'The video could not be made. The team will look at it.') returning id`,
+        [postStatus],
+      )
+    ).rows[0].id;
+    const script = (
+      await db.query<{ id: string }>(`insert into public.scripts (post_id, spoken_text, qa_status) values ($1, 'Hello.', 'passed') returning id`, [post])
+    ).rows[0].id;
+    const video = (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, script_id, kind, status, render_started_at)
+         values ('${BRAND_A}', $1, 'post', 'failed', now() - interval '40 minutes') returning id`,
+        [script],
+      )
+    ).rows[0].id;
+    return { post, script, video };
+  };
+  const postRow = (id: string) => db.query("select status, status_reason from public.posts where id = $1", [id]);
+  const cleanup = async (post: string) => {
+    await db.query("delete from public.provider_usage where kind = 'claim_cleared'");
+    await db.query("delete from public.videos where script_id in (select id from public.scripts where post_id = $1)", [post]);
+    await db.query("delete from public.posts where id = $1", [post]);
+  };
+
+  it("team_review (after the poll timed out) → approved, reason cleared, with the clear", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seedPost("team_review");
+      const result = await db.query<{ result: string }>("select public.clear_stuck_claim('video', $1, 'admin@example.com') as result", [video]);
+      expect(result.rows[0].result).toBe("render");
+      expect((await postRow(post)).rows).toEqual([{ status: "approved", status_reason: null }]);
+      await cleanup(post);
+    });
+  });
+
+  it("rendering (unknown state) → approved", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seedPost("rendering");
+      await db.query("update public.videos set status = 'rendering' where id = $1", [video]);
+      await db.query("select public.clear_stuck_claim('video', $1, 'admin@example.com')", [video]);
+      expect((await postRow(post)).rows[0]).toMatchObject({ status: "approved" });
+      await cleanup(post);
+    });
+  });
+
+  it("a post the team already moved elsewhere (e.g. skipped) is left alone; a refused clear changes no post", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seedPost("skipped");
+      await db.query("select public.clear_stuck_claim('video', $1, 'admin@example.com')", [video]);
+      expect((await postRow(post)).rows[0]).toMatchObject({ status: "skipped" });
+      await cleanup(post);
+
+      const second = await seedPost("rendering");
+      await db.query("update public.videos set status = 'rendering', render_started_at = now() where id = $1", [second.video]);
+      const refused = await db.query<{ result: string }>("select public.clear_stuck_claim('video', $1, 'admin@example.com') as result", [second.video]);
+      expect(refused.rows[0].result).toBe("too_soon");
+      expect((await postRow(second.post)).rows[0]).toMatchObject({ status: "rendering" });
+      await cleanup(second.post);
+    });
+  });
+});
+
+// p4-fix c2: a HeyGen success webhook that arrives AFTER the claim was cleared
+// (or after the poll gave up). adopt_late_render decides atomically: adopt it
+// (save the HeyGen id, back to 'rendering' so it downloads) or, when a newer
+// render exists, only record the late id. It never touches provider_usage.
+describe("adopt_late_render (late HeyGen webhook, p4-fix c2)", () => {
+  const adopt = (id: string, heygenId: string) =>
+    db.query<{ result: string }>("select public.adopt_late_render($1, $2) as result", [id, heygenId]);
+  const seed = async () => {
+    const post = (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Late test', 'team_review') returning id`,
+      )
+    ).rows[0].id;
+    const script = (
+      await db.query<{ id: string }>(`insert into public.scripts (post_id, spoken_text, qa_status) values ($1, 'Hello.', 'passed') returning id`, [post])
+    ).rows[0].id;
+    const video = (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, script_id, kind, status, render_started_at)
+         values ('${BRAND_A}', $1, 'post', 'rendering', now() - interval '40 minutes') returning id`,
+        [script],
+      )
+    ).rows[0].id;
+    await db.query("select public.clear_stuck_claim('video', $1, 'admin@example.com')", [video]);
+    return { post, script, video };
+  };
+  const spendRows = async () => (await db.query<{ n: number }>("select count(*)::int as n from public.provider_usage")).rows[0].n;
+  const cleanup = async (post: string) => {
+    await db.query("delete from public.provider_usage");
+    await db.query("delete from public.videos where script_id in (select id from public.scripts where post_id = $1)", [post]);
+    await db.query("delete from public.posts where id = $1", [post]);
+  };
+
+  it("cleared row, nothing newer: adopted (HeyGen id saved, back to rendering, post → rendering), no provider_usage row", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, video } = await seed();
+      const before = await spendRows();
+      expect((await adopt(video, "hg_late_1")).rows[0].result).toBe("adopted");
+      const row = await db.query("select status, heygen_video_id, render_started_at, late_heygen_video_id from public.videos where id = $1", [video]);
+      expect(row.rows).toEqual([{ status: "rendering", heygen_video_id: "hg_late_1", render_started_at: null, late_heygen_video_id: null }]);
+      expect((await db.query("select status from public.posts where id = $1", [post])).rows).toEqual([{ status: "rendering" }]);
+      expect(await spendRows()).toBe(before);
+      // A second call (duplicate) is not late any more.
+      expect((await adopt(video, "hg_late_1")).rows[0].result).toBe("not_late");
+      await cleanup(post);
+    });
+  });
+
+  it("a newer render exists: only the late id is recorded; the new row is untouched; no provider_usage row", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, script, video } = await seed();
+      const newer = (
+        await db.query<{ id: string }>(
+          `insert into public.videos (brand_id, script_id, kind, status, render_started_at)
+           values ('${BRAND_A}', $1, 'post', 'rendering', now()) returning id`,
+          [script],
+        )
+      ).rows[0].id;
+      const before = await spendRows();
+      expect((await adopt(video, "hg_late_2")).rows[0].result).toBe("moved_on");
+      const old = await db.query("select status, heygen_video_id, late_heygen_video_id from public.videos where id = $1", [video]);
+      expect(old.rows).toEqual([{ status: "failed", heygen_video_id: null, late_heygen_video_id: "hg_late_2" }]);
+      const kept = await db.query<{ status: string; heygen_video_id: string | null; claimed: boolean }>(
+        "select status, heygen_video_id, render_started_at is not null as claimed from public.videos where id = $1",
+        [newer],
+      );
+      expect(kept.rows).toEqual([{ status: "rendering", heygen_video_id: null, claimed: true }]);
+      expect(await spendRows()).toBe(before);
+      await cleanup(post);
+    });
+  });
+
+  it("a row that is still rendering, or never reached HeyGen, is not late", async () => {
+    await asRole("service_role", null, async () => {
+      const rendering = await stuckVideoRow("rendering", "now()");
+      const neverSent = await stuckVideoRow("failed", "null");
+      expect((await adopt(rendering, "hg_x")).rows[0].result).toBe("not_late");
+      expect((await adopt(neverSent, "hg_y")).rows[0].result).toBe("not_late");
+      await db.query("delete from public.videos where id in ($1, $2)", [rendering, neverSent]);
+    });
+  });
+
+  const stuckVideoRow = async (status: string, startedSql: string) =>
+    (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, kind, status, render_started_at) values ('${BRAND_A}', 'post', $1, ${startedSql}) returning id`,
+        [status],
+      )
+    ).rows[0].id;
+});
+
+// p4-fix e: the only supported way to lift renders_paused. Flag off + audit
+// row (provider_usage kind 'renders_resumed') in ONE transaction.
+describe("resume_renders (audited un-pause, p4-fix e)", () => {
+  const resume = () => db.query<{ result: string }>("select public.resume_renders('admin@example.com') as result");
+  const paused = async () =>
+    (await db.query<{ value: unknown }>("select value from public.app_settings where key = 'renders_paused'")).rows[0]?.value;
+  const audits = () =>
+    db.query<{ kind: string; status: string; cost: number; mock: boolean; note: string }>(
+      "select kind, status, cost_usd::float as cost, mock, note from public.provider_usage where kind = 'renders_resumed'",
+    );
+
+  it("paused → false, and exactly one audit row (cost 0, not mock, admin email in note)", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec("update public.app_settings set value = 'true'::jsonb where key = 'renders_paused'");
+      expect((await resume()).rows[0].result).toBe("resumed");
+      expect(await paused()).toBe(false);
+      expect((await audits()).rows).toEqual([
+        {
+          kind: "renders_resumed",
+          status: "succeeded",
+          cost: 0,
+          mock: false,
+          note: "renders resumed by admin@example.com after checking today's HeyGen spend",
+        },
+      ]);
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("not paused: 'not_paused', nothing written", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec("update public.app_settings set value = 'false'::jsonb where key = 'renders_paused'");
+      expect((await resume()).rows[0].result).toBe("not_paused");
+      expect((await audits()).rows).toEqual([]);
+    });
+  });
+
+  it("renders_resumed rows never count toward a daily cap", async () => {
+    await asRole("service_role", null, async () => {
+      await db.exec(`insert into public.provider_usage (provider, kind, status) values ('heygen', 'renders_resumed', 'succeeded')`);
+      const since = new Date(Date.now() - 60_000).toISOString();
+      for (const kind of ["render", "create_twin"]) {
+        const id = await db.query<{ id: string | null }>("select public.reserve_heygen_spend($1, $2::timestamptz, 1, null, null, null) as id", [kind, since]);
+        expect([kind, id.rows[0].id]).not.toEqual([kind, null]);
+      }
+      await db.exec("delete from public.provider_usage");
+    });
+  });
+
+  it("customers and logged-out visitors can't call it", async () => {
+    await asUser(USER_A, async () => {
+      await expect(resume()).rejects.toThrow(/permission denied/);
+    });
+    await asRole("anon", null, async () => {
+      await expect(resume()).rejects.toThrow(/permission denied/);
     });
   });
 });
@@ -873,11 +1186,24 @@ describe("table privileges for anon and authenticated", () => {
     );
     const names = fns.rows.map((f) => f.name).sort();
     expect(names).toEqual(
-      expect.arrayContaining(["claim_render_slot", "clear_stuck_claim", "reserve_heygen_spend", "save_brand_version"]),
+      expect.arrayContaining([
+        "adopt_late_render",
+        "claim_render_slot",
+        "clear_stuck_claim",
+        "reserve_heygen_spend",
+        "resume_renders",
+        "save_brand_version",
+      ]),
     );
     const seen: Record<string, { anon: boolean; authenticated: boolean; service_role: boolean }> = {};
     for (const { sig, name } of fns.rows) {
-      if (name === "handle_new_user") continue; // trigger function, revoked separately
+      // Trigger functions, revoked from everyone (a trigger fires without EXECUTE; p4-b3 inserts above prove it).
+      if (name === "handle_new_user" || name === "videos_fill_post_id") {
+        for (const role of ["anon", "authenticated"]) {
+          expect((await db.query<{ ok: boolean }>("select has_function_privilege($1, $2, 'EXECUTE') as ok", [role, sig])).rows[0].ok).toBe(false);
+        }
+        continue;
+      }
       const can = async (role: string) =>
         (await db.query<{ ok: boolean }>("select has_function_privilege($1, $2, 'EXECUTE') as ok", [role, sig])).rows[0].ok;
       seen[name] = { anon: await can("anon"), authenticated: await can("authenticated"), service_role: await can("service_role") };
@@ -961,5 +1287,259 @@ describe("brand profile versions (save_brand_version)", () => {
       expect(rows.rows.length).toBe(2);
       expect(rows.rows.every((row) => row.brand_id === BRAND_A)).toBe(true);
     });
+  });
+});
+
+// p4-b1 (QA SF2): one edit run at a time. start_edit claims the row with the
+// run's token; another run is refused while the claim is fresh; the same run
+// (a Trigger.dev retry) may claim again; a claim older than the task's
+// maxDuration (the run is surely dead) may be taken over.
+describe("p4-b1: start_edit (one edit run at a time)", () => {
+  const start = (id: string, run: string, staleS = 1800) =>
+    db.query<{ ok: boolean }>("select public.start_edit($1, $2, $3) as ok", [id, run, staleS]);
+  const video = async (status: string, startedSql = "null", run: string | null = null) =>
+    (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, kind, status, raw_path, edit_run_id, edit_started_at)
+         values ('${BRAND_A}', 'post', $1, 'raw/x.mp4', $2, ${startedSql}) returning id`,
+        [status, run],
+      )
+    ).rows[0].id;
+  const row = async (id: string) =>
+    (await db.query<{ status: string; edit_run_id: string | null }>("select status, edit_run_id from public.videos where id = $1", [id])).rows[0];
+
+  it("the first run claims a rendered video; a second run is REFUSED while the first is editing", async () => {
+    await asRole("service_role", null, async () => {
+      const id = await video("rendered");
+      expect((await start(id, "run_a")).rows[0].ok).toBe(true);
+      expect(await row(id)).toEqual({ status: "editing", edit_run_id: "run_a" });
+      expect((await start(id, "run_b")).rows[0].ok).toBe(false);
+      expect(await row(id)).toEqual({ status: "editing", edit_run_id: "run_a" });
+      await db.query("delete from public.videos where id = $1", [id]);
+    });
+  });
+
+  it("the same run may claim again (a retry after a crash); a claim older than the stale limit may be taken over", async () => {
+    await asRole("service_role", null, async () => {
+      const fresh = await video("editing", "now() - interval '5 minutes'", "run_a");
+      expect((await start(fresh, "run_a")).rows[0].ok).toBe(true);
+      const stale = await video("editing", "now() - interval '31 minutes'", "run_a");
+      expect((await start(stale, "run_b")).rows[0].ok).toBe(true);
+      expect(await row(stale)).toEqual({ status: "editing", edit_run_id: "run_b" });
+      await db.query("delete from public.videos where id in ($1, $2)", [fresh, stale]);
+    });
+  });
+
+  it("never claims a video that is final_qa (or later), a likeness test, or one without a raw file", async () => {
+    await asRole("service_role", null, async () => {
+      const done = await video("final_qa", "now() - interval '2 hours'", "run_a");
+      expect((await start(done, "run_b")).rows[0].ok).toBe(false);
+      const likeness = (
+        await db.query<{ id: string }>(
+          `insert into public.videos (brand_id, kind, status, raw_path) values ('${BRAND_A}', 'likeness_test', 'rendered', 'raw/y.mp4') returning id`,
+        )
+      ).rows[0].id;
+      const noRaw = (
+        await db.query<{ id: string }>(`insert into public.videos (brand_id, kind, status) values ('${BRAND_A}', 'post', 'rendered') returning id`)
+      ).rows[0].id;
+      expect((await start(likeness, "run_c")).rows[0].ok).toBe(false);
+      expect((await start(noRaw, "run_c")).rows[0].ok).toBe(false);
+      expect(await row(done)).toEqual({ status: "final_qa", edit_run_id: "run_a" });
+      await db.query("delete from public.videos where id in ($1, $2, $3)", [done, likeness, noRaw]);
+    });
+  });
+});
+
+// p4-b1 (QA SF1): "Make video" vs a late HeyGen webhook. Both paths take the
+// same per-post advisory lock (create_post_render, adopt_late_render) and a
+// unique partial index allows at most one ACTIVE post video per script
+// (kind = 'post', status not failed/skipped). PGlite has one connection, so
+// the race is replayed step by step in QA's order (race B).
+describe("p4-b1: Make video vs late webhook (create_post_render + adopt_late_render)", () => {
+  const make = (post: string, script: string) =>
+    db.query<{ result: { outcome: string; video_id: string | null } }>(
+      `select public.create_post_render($1, $2, '${BRAND_A}', null, 'avatar_v', 3) as result`,
+      [post, script],
+    );
+  const adopt = (id: string, heygenId: string) =>
+    db.query<{ result: string }>("select public.adopt_late_render($1, $2) as result", [id, heygenId]);
+  const findActive = (script: string) =>
+    db.query("select id from public.videos where script_id = $1 and status not in ('failed', 'skipped')", [script]);
+  /** A post whose first render (V1) was cleared after the wait: V1 failed + retired, post back to approved. */
+  const seed = async () => {
+    const post = (
+      await db.query<{ id: string }>(
+        `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Race test', 'rendering') returning id`,
+      )
+    ).rows[0].id;
+    const script = (
+      await db.query<{ id: string }>(
+        `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 1, 'Hello there.', 'passed') returning id`,
+        [post],
+      )
+    ).rows[0].id;
+    const v1 = (
+      await db.query<{ id: string }>(
+        `insert into public.videos (brand_id, script_id, kind, status, render_started_at)
+         values ('${BRAND_A}', $1, 'post', 'rendering', now() - interval '40 minutes') returning id`,
+        [script],
+      )
+    ).rows[0].id;
+    const cleared = await db.query<{ r: string }>("select public.clear_stuck_claim('video', $1, 'admin@example.com') as r", [v1]);
+    expect(cleared.rows[0].r).toBe("render");
+    return { post, script, v1 };
+  };
+  const cleanup = async (post: string) => {
+    await db.query("delete from public.provider_usage");
+    await db.query("delete from public.videos where script_id in (select id from public.scripts where post_id = $1)", [post]);
+    await db.query("delete from public.posts where id = $1", [post]);
+  };
+
+  it("race B: find-active is empty → the late webhook adopts V1 → V2 is REFUSED (rpc and a raw insert); one active video", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, script, v1 } = await seed();
+      expect((await findActive(script)).rows).toEqual([]); // Make video's check sees nothing active...
+      expect((await adopt(v1, "hg_late_race")).rows[0].result).toBe("adopted"); // ...then the webhook adopts V1
+      const result = (await make(post, script)).rows[0].result; // ...then Make video inserts V2
+      expect(result).toEqual({ outcome: "not_approved", video_id: null });
+      // Even a write that skips the rpc cannot add a second active video for the script.
+      await expect(
+        db.query(`insert into public.videos (brand_id, script_id, kind, status) values ('${BRAND_A}', $1, 'post', 'queued')`, [script]),
+      ).rejects.toMatchObject({ code: "23505" });
+      expect((await findActive(script)).rows).toEqual([{ id: v1 }]);
+      await cleanup(post);
+    });
+  });
+
+  it("the other order: Make video first → the late webhook only records the id (moved_on)", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, script, v1 } = await seed();
+      const made = (await make(post, script)).rows[0].result;
+      expect(made.outcome).toBe("created");
+      expect((await adopt(v1, "hg_late_other")).rows[0].result).toBe("moved_on");
+      expect((await findActive(script)).rows).toEqual([{ id: made.video_id }]);
+      await cleanup(post);
+    });
+  });
+
+  it("create_post_render: a second call returns the existing video; a post that is not approved is refused", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, script } = await seed();
+      const first = (await make(post, script)).rows[0].result;
+      const second = (await make(post, script)).rows[0].result;
+      expect(first.outcome).toBe("created");
+      expect(second).toEqual({ outcome: "existing", video_id: first.video_id });
+      await db.query("update public.posts set status = 'team_review' where id = $1", [post]);
+      const other = (
+        await db.query<{ id: string }>(
+          `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 2, 'Hi.', 'passed') returning id`,
+          [post],
+        )
+      ).rows[0].id;
+      expect((await make(post, other)).rows[0].result).toEqual({ outcome: "not_approved", video_id: null });
+      await cleanup(post);
+    });
+  });
+
+  it("QA NICE: a newer script exists → the late render of the old script is only recorded (moved_on)", async () => {
+    await asRole("service_role", null, async () => {
+      const { post, v1 } = await seed();
+      await db.query(`insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 2, 'Rewritten.', 'passed')`, [post]);
+      expect((await adopt(v1, "hg_late_old_script")).rows[0].result).toBe("moved_on");
+      const row = await db.query("select status, heygen_video_id, late_heygen_video_id from public.videos where id = $1", [v1]);
+      expect(row.rows).toEqual([{ status: "failed", heygen_video_id: null, late_heygen_video_id: "hg_late_old_script" }]);
+      expect((await db.query("select status from public.posts where id = $1", [post])).rows).toEqual([{ status: "approved" }]);
+      await cleanup(post);
+    });
+  });
+
+  it("both functions take the same per-post advisory lock; the index is unique, partial and PER POST (p4-b3, Q8)", async () => {
+    const src = async (name: string) =>
+      (await db.query<{ src: string }>("select prosrc as src from pg_proc where proname = $1", [name])).rows[0].src;
+    const lock = "pg_advisory_xact_lock(hashtext('post_render'), hashtext(";
+    expect(await src("create_post_render")).toContain(lock);
+    expect(await src("adopt_late_render")).toContain(lock);
+    const index = async (name: string) =>
+      (await db.query<{ def: string }>("select indexdef as def from pg_indexes where schemaname = 'public' and indexname = $1", [name])).rows[0]
+        ?.def;
+    expect(await index("videos_one_active_post_video_per_post")).toMatch(
+      /CREATE UNIQUE INDEX .* \(post_id\) WHERE .*kind = 'post'.*failed.*skipped/,
+    );
+    expect(await index("videos_one_active_post_video")).toBeUndefined(); // the per-script one is replaced
+  });
+
+  // p4-b3 (Q8): a post CAN get a second live script: two overlapping "Run checks" runs, one
+  // passing v1 (post → approved) while the other is still rewriting (lib/qa/script-pipeline.ts
+  // inserts v2 with no post-status guard). Make video for v1, then for v2, must not give the post
+  // two active videos (two paid renders). The guard is now per post (videos.post_id).
+  it("Q8: v1 has an active video, then a newer v2 passes → Make video for v2 is refused (other_script); a raw insert too", async () => {
+    await asRole("service_role", null, async () => {
+      const { post } = await seed(); // post back to approved; V0 cleared (failed)
+      const v1 = (await db.query<{ id: string }>("select id from public.scripts where post_id = $1 and version = 1", [post])).rows[0].id;
+      const first = (await make(post, v1)).rows[0].result;
+      expect(first.outcome).toBe("created");
+      const v2 = (
+        await db.query<{ id: string }>(
+          `insert into public.scripts (post_id, version, spoken_text, qa_status) values ($1, 2, 'Rewritten.', 'passed') returning id`,
+          [post],
+        )
+      ).rows[0].id;
+      expect((await make(post, v2)).rows[0].result).toEqual({ outcome: "other_script", video_id: first.video_id });
+      await expect(
+        db.query(`insert into public.videos (brand_id, script_id, kind, status) values ('${BRAND_A}', $1, 'post', 'queued')`, [v2]),
+      ).rejects.toMatchObject({ code: "23505" });
+      const active = await db.query(
+        "select id from public.videos where post_id = $1 and kind = 'post' and status not in ('failed', 'skipped')",
+        [post],
+      );
+      expect(active.rows).toEqual([{ id: first.video_id }]);
+      await cleanup(post);
+    });
+  });
+
+  it("Q8: videos.post_id is filled from the script (insert and script change); likeness tests have none", async () => {
+    const cols = await db.query<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_schema = 'public' and table_name = 'videos'",
+    );
+    expect(cols.rows.map((c) => c.column_name)).toContain("post_id");
+    await asRole("service_role", null, async () => {
+      const { post, script, v1 } = await seed();
+      expect((await db.query("select post_id from public.videos where id = $1", [v1])).rows).toEqual([{ post_id: post }]);
+      // A raw insert that forgets post_id still gets it (trigger), so the per-post index always applies.
+      const other = (
+        await db.query<{ id: string }>(
+          `insert into public.posts (brand_id, scheduled_for, title, status) values ('${BRAND_A}', now(), 'Other', 'approved') returning id`,
+        )
+      ).rows[0].id;
+      const otherScript = (
+        await db.query<{ id: string }>(`insert into public.scripts (post_id, version, qa_status) values ($1, 1, 'passed') returning id`, [other])
+      ).rows[0].id;
+      await db.query("update public.videos set script_id = $1 where id = $2", [otherScript, v1]);
+      expect((await db.query("select post_id from public.videos where id = $1", [v1])).rows).toEqual([{ post_id: other }]);
+      await db.query("update public.videos set script_id = $1 where id = $2", [script, v1]);
+      const likeness = (
+        await db.query<{ post_id: string | null }>(
+          `insert into public.videos (brand_id, kind, status) values ('${BRAND_A}', 'likeness_test', 'queued') returning post_id`,
+        )
+      ).rows[0];
+      expect(likeness).toEqual({ post_id: null });
+      await db.query("delete from public.videos where kind = 'likeness_test' and brand_id = $1 and script_id is null", [BRAND_A]);
+      await db.query("delete from public.scripts where post_id = $1", [other]);
+      await db.query("delete from public.posts where id = $1", [other]);
+      await cleanup(post);
+    });
+  });
+
+  it("customers and logged-out visitors can't call create_post_render (or start_edit)", async () => {
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(db.query("select public.start_edit($1, 'run', 1800)", [POST_A])).rejects.toThrow(/permission denied/);
+      });
+    }
+    for (const role of ["anon", "authenticated"] as const) {
+      await asRole(role, USER_A, async () => {
+        await expect(make(POST_A, POST_A)).rejects.toThrow(/permission denied/);
+      });
+    }
   });
 });

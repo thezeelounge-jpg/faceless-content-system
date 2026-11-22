@@ -55,6 +55,11 @@ export function createSpendStore(): SpendStore {
       const { error } = await db.from("app_settings").upsert({ key: "renders_paused", value: true }, { onConflict: "key" });
       if (error) fail("pause renders", error);
     },
+    async resumeRenders(adminEmail) {
+      const { data, error } = await db.rpc("resume_renders", { p_admin_email: adminEmail });
+      if (error) fail("resume renders", error);
+      return data as "resumed" | "not_paused";
+    },
     async queueCapAlert(alert) {
       if (alert.recipients.length === 0) return 0;
       // Unique dedupe_key: a repeat inserts nothing (on conflict do nothing).

@@ -5,6 +5,7 @@ import {
   getSupabasePublicConfig,
   isMockClaude,
   isMockHeygen,
+  isMockPexels,
   isMockStt,
 } from "@/lib/config";
 
@@ -32,6 +33,17 @@ describe("money-safety mock switches", () => {
     expect(isMockHeygen()).toBe(false);
     expect(isMockStt()).toBe(false);
     expect(isMockClaude()).toBe(false);
+  });
+
+  it("p4-b2: MOCK_PEXELS (B-roll search) follows the same rule: mock unless exactly 'false'", () => {
+    for (const value of [undefined, "", "true", "yes", "FALSE ", "0", "False"]) {
+      vi.stubEnv("MOCK_PEXELS", value as string);
+      expect(isMockPexels()).toBe(value?.trim() !== "false");
+    }
+    vi.stubEnv("MOCK_PEXELS", undefined as unknown as string);
+    expect(isMockPexels()).toBe(true);
+    vi.stubEnv("MOCK_PEXELS", " false ");
+    expect(isMockPexels()).toBe(false);
   });
 
   it("keeps Claude in mock mode when MOCK_CLAUDE is missing", () => {

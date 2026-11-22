@@ -6,7 +6,7 @@ import { z } from "zod";
 import { isMockHeygen, readEnv } from "@/lib/config";
 import { PlainError } from "@/lib/plain-error";
 import { RENDER } from "@/lib/qa/config";
-import { SafeDownloadError, safeDownload, systemResolver, type Resolver } from "@/lib/safe-download";
+import { SafeDownloadError, safeDownload, systemResolver, type Resolver, type Transport } from "@/lib/safe-download";
 import mockAvatarGroup from "@/tests/fixtures/heygen/avatar-group.json";
 import mockConsent from "@/tests/fixtures/heygen/consent.json";
 import mockCreateAvatar from "@/tests/fixtures/heygen/create-avatar.json";
@@ -109,6 +109,11 @@ export type HeygenDeps = {
   maxWaitS: number;
   /** DNS lookup for the safe downloader. Tests inject a fake; never real DNS in tests. */
   resolve: Resolver;
+  /**
+   * Video downloads only. Unset = node:https with the resolved IP pinned
+   * (lib/safe-download.ts). Never the general `fetch` above. Tests pass a fake.
+   */
+  downloadTransport?: Transport;
 };
 
 // ---------------------------------------------------------------------------
@@ -552,7 +557,7 @@ export function createHeygenClient(overrides: Partial<HeygenDeps> = {}) {
       for (let attempt = 1; ; attempt++) {
         try {
           const { bytes } = await safeDownload(url, {
-            fetch: deps.fetch,
+            transport: deps.downloadTransport,
             resolve: deps.resolve,
             allowedHosts: HEYGEN_DOWNLOAD_HOSTS,
             maxBytes: RENDER.download_max_bytes,

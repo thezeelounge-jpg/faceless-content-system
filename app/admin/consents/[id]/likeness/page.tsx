@@ -2,7 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ActionButton } from "@/components/admin/action-button";
 import { ActionForm } from "@/components/admin/action-form";
-import { ClearClaimForm } from "@/components/admin/clear-claim-form";
+import { ClaimClearOrWait } from "@/components/admin/claim-clear-or-wait";
 import { AdminPage } from "@/components/admin/admin-page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { requireAdmin } from "@/lib/auth";
@@ -113,7 +113,7 @@ async function LikenessDetail({ params }: Pick<PageProps<"/admin/consents/[id]/l
                     </p>
                   )}
                   {video.render_started_at && !video.heygen_video_id && (
-                    <ClearClaimForm target="video" id={video.id} />
+                    <ClaimClearOrWait target="video" id={video.id} startedAt={video.render_started_at} status={video.status} />
                   )}
                   {deciding && url && video.engine && (
                     <ActionForm

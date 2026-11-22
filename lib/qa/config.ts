@@ -75,6 +75,107 @@ export const RENDER = {
 } as const;
 
 /**
+ * Waiting for a twin (lib/twin.ts pollTwinUntilReady, trigger/poll-twin.ts):
+ * the first check waits first_wait_s, each next wait doubles up to max_wait_s,
+ * at most max_attempts checks (about a day: HeyGen's consent link lasts 24 hours).
+ */
+export const TWIN_POLL = {
+  first_wait_s: 60,
+  max_wait_s: 1800,
+  max_attempts: 60,
+} as const;
+
+/**
+ * The longest the twin poll waits in total (seconds): the sum of the waits
+ * between its max_attempts checks = 60+120+240+480+960 + 54 × 1800 = 99060 s
+ * (about 27.5 hours). p4-b1 (Rowan 5c): a twin claim may be cleared only after
+ * this long (or once the twin failed). The SQL clear_stuck_claim holds the same
+ * number (tests/db/rls.test.ts checks).
+ */
+export const TWIN_POLL_MAX_S = Array.from({ length: TWIN_POLL.max_attempts - 1 }, (_, i) =>
+  Math.min(TWIN_POLL.first_wait_s * 2 ** i, TWIN_POLL.max_wait_s),
+).reduce((sum, wait) => sum + wait, 0);
+
+/**
+ * The editor (Phase 4, lib/edit-flow.ts). Not a quality gate; the time limits
+ * of one edit. A 60 s reel encodes in about real time on 4 vCPUs (large-1x);
+ * the limit leaves room for a slow machine. The task's maxDuration is longer.
+ */
+export const EDIT = {
+  /** ffmpeg (the final encode) is stopped after this long. */
+  ffmpeg_timeout_s: 900,
+  /** p4-b2: loudness pass 1 (audio only, decodes far faster than real time). */
+  loudness_timeout_s: 90,
+  /** p4-b2: ffprobe for the raw video's length. */
+  probe_timeout_s: 30,
+  /** trigger/edit-video.ts maxDuration (seconds of compute); Trigger.dev stops the run after this. */
+  task_max_duration_s: 1800,
+  /**
+   * p4-b1: an edit claim (videos.edit_run_id) older than this may be taken over
+   * by another run. Equal to the task's maxDuration: by then the old run is stopped.
+   */
+  claim_stale_s: 1800,
+  /**
+   * p4-b1 (QA SF4): storage download / upload in the edit task. Each try is
+   * stopped after storage_timeout_s; at most storage_max_attempts tries, waiting
+   * storage_backoff_ms × 2^(try-1) plus up to one backoff of random jitter.
+   * Worst case for download + upload + ffmpeg stays under task_max_duration_s.
+   */
+  storage_timeout_s: 120,
+  storage_max_attempts: 3,
+  storage_backoff_ms: 2000,
+} as const;
+
+/**
+ * B-roll cut-ins (Phase 4 part B, lib/broll.ts planBroll). PRODUCT.md "Video
+ * formats" + QA-SPEC Gate 4: each cut-in 1.5 to 3 s, 2 to 4 of them when they
+ * fit, total coverage talking ≤ 25% / story ≤ 60% of the video, never during
+ * the hook or the call to action (the face is on screen there).
+ */
+export const BROLL = {
+  min_cut_s: 1.5,
+  max_cut_s: 3,
+  /** Wanted length of one cut-in; shortened (never below min_cut_s) to fit. */
+  target_cut_s: 2.5,
+  min_cuts: 2,
+  max_cuts: 4,
+  /** Share of the whole video that b-roll may cover, per post format. */
+  max_coverage: { talking: 0.25, story: 0.6 },
+  /** The face comes back for at least this long between two cut-ins. */
+  min_gap_s: 0.5,
+} as const;
+
+/**
+ * Music bed under the voice (lib/music.ts). Beds are prepared at about -14
+ * LUFS; bed_gain_db turns them down, and sidechaincompress (the voice is the
+ * sidechain) ducks them further while someone speaks. QA-SPEC Gate 4: the
+ * music stem must be at least 15 dB quieter than the voice stem.
+ */
+export const MUSIC = {
+  bed_gain_db: -22,
+  fade_in_s: 0.5,
+  fade_out_s: 1.5,
+  /** sidechaincompress (ffmpeg 7.1 `-h filter=sidechaincompress`): threshold is linear 0.000976563..1. */
+  duck: { threshold: 0.02, ratio: 8, attack_ms: 20, release_ms: 400 },
+  /** QA-SPEC Gate 4. */
+  min_voice_over_music_db: 15,
+} as const;
+
+/**
+ * Final mix loudness (QA-SPEC Gate 4: -14 LUFS ±1.5, true peak ≤ -1 dBTP; we
+ * aim stricter: ±1). Two-pass loudnorm: pass 1 measures with these targets,
+ * pass 2 applies the measured values with linear=true. Target TP is -1.5 so
+ * the AAC encode keeps 0.5 dB of headroom under the -1 dBTP limit.
+ */
+export const LOUDNESS = {
+  target_i: -14,
+  target_tp: -1.5,
+  target_lra: 11,
+  tolerance_lu: 1,
+  max_true_peak_db: -1,
+} as const;
+
+/**
  * brands.words_per_second: the rolling average of the last 10 real post
  * renders (words in spoken_text / real duration). Samples outside these
  * bounds are ignored as absurd (a broken duration, an empty script).

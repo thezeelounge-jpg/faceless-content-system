@@ -20,6 +20,10 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
   const posts: Post[] = [];
   const scripts: Script[] = [];
   const events: { event_key: string; source: "heygen"; payload: unknown; processed_at: string | null }[] = [];
+  /** videos.claim_cleared_at (p4-fix c2): a cleared row is retired, never claimed again. */
+  const clearedAt = new Map<string, string>();
+  /** videos.late_heygen_video_id: a late HeyGen id recorded when a newer render was kept. */
+  const lateHeygenIds = new Map<string, string>();
   let n = 0;
   const newId = () => `90000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
   const brand = (id: string) => brands.find((b) => b.id === id);
@@ -60,7 +64,7 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
     async claimRenderSlot(id, max) {
       const row = videos.find((v) => v.id === id);
       if (!row) return "missing";
-      if (row.heygen_video_id || row.render_started_at || !["queued", "failed"].includes(row.status)) return "taken";
+      if (row.heygen_video_id || row.render_started_at || clearedAt.has(id) || !["queued", "failed"].includes(row.status)) return "taken";
       if (videos.filter((v) => v.status === "rendering").length >= max) return "busy";
       Object.assign(row, { status: "rendering", render_started_at: new Date().toISOString(), error: null });
       return "claimed";
@@ -74,6 +78,56 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
     async findActiveVideoForScript(scriptId) {
       const rows = videos.filter((v) => v.script_id === scriptId && !["failed", "skipped"].includes(v.status));
       return rows.length ? structuredClone(rows[rows.length - 1]) : null;
+    },
+    // Mirrors create_post_render (migration 20261122180000): one JS turn = the per-post lock;
+    // an active video of ANY script of the post blocks a new one (p4-b3, Q8).
+    async createPostVideo(input) {
+      const post = posts.find((p) => p.id === input.postId && p.brand_id === input.brandId);
+      const latest = scripts.filter((s) => s.post_id === input.postId).sort((a, b) => b.version - a.version)[0];
+      if (post?.status !== "approved" || latest?.id !== input.scriptId) return { outcome: "not_approved", videoId: null };
+      const postScripts = new Set(scripts.filter((s) => s.post_id === input.postId).map((s) => s.id));
+      const active = videos.filter(
+        (v) => v.kind === "post" && v.script_id !== null && postScripts.has(v.script_id) && !["failed", "skipped"].includes(v.status),
+      );
+      const last = active[active.length - 1];
+      if (last) return { outcome: last.script_id === input.scriptId ? "existing" : "other_script", videoId: last.id };
+      const row = await store.insertVideo({
+        brand_id: input.brandId,
+        script_id: input.scriptId,
+        avatar_id: input.avatarId,
+        kind: "post",
+        engine: input.engine,
+        spoken_words: input.spokenWords,
+      });
+      return { outcome: "created", videoId: row.id };
+    },
+    // Mirrors adopt_late_render (migration 20261122150000, which replaced 20261122130000).
+    async adoptLateRender(id, heygenVideoId) {
+      const row = videos.find((v) => v.id === id);
+      if (!row || row.status !== "failed" || row.heygen_video_id || (!row.render_started_at && !clearedAt.has(id))) return "not_late";
+      const active = (v: VideoRow) => v.id !== row.id && !["failed", "skipped"].includes(v.status);
+      const postOf = (v: VideoRow) => scripts.find((s) => s.id === v.script_id)?.post_id;
+      const postId = row.kind === "post" ? postOf(row) : undefined;
+      const version = scripts.find((s) => s.id === row.script_id)?.version ?? 0;
+      const newer =
+        row.kind === "post"
+          ? videos.some((v) => active(v) && v.script_id !== null && postOf(v) === postId) ||
+            scripts.some((s) => s.post_id === postId && s.version > version)
+          : videos.some((v) => active(v) && v.kind === "likeness_test" && v.avatar_id === row.avatar_id && v.engine === row.engine);
+      if (newer) {
+        lateHeygenIds.set(id, heygenVideoId);
+        row.error =
+          "HeyGen finished this video late, after a newer render or script was started. The newer one was kept; the late HeyGen id is saved.";
+        return "moved_on";
+      }
+      Object.assign(row, {
+        heygen_video_id: heygenVideoId,
+        status: "rendering",
+        error: "HeyGen finished this video late (after its claim was cleared or the wait ran out). Downloading it now.",
+      });
+      const post = posts.find((p) => p.id === postId);
+      if (post && ["approved", "team_review"].includes(post.status)) Object.assign(post, { status: "rendering", status_reason: null });
+      return "adopted";
     },
     async listLikenessVideos(avatarId) {
       return structuredClone(videos.filter((v) => v.avatar_id === avatarId && v.kind === "likeness_test"));
@@ -180,7 +234,7 @@ export function memoryVideoStore(consentMem = memoryConsentStore()) {
     return { postId, scriptId };
   }
 
-  return { store, videos, brands, posts, scripts, events, consentMem, seedReadyTwin, seedApprovedPost, brand };
+  return { store, videos, brands, posts, scripts, events, consentMem, seedReadyTwin, seedApprovedPost, brand, clearedAt, lateHeygenIds };
 }
 
 type AvatarStatusLike = "training" | "consent_pending" | "likeness_test" | "ready" | "reshoot_needed" | "failed";

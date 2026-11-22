@@ -1,4 +1,5 @@
 import { AdminPage } from "@/components/admin/admin-page";
+import { ResumeRenders } from "@/components/admin/resume-renders";
 import { StuckClaims } from "@/components/admin/stuck-claims";
 import { EnvStatusList, MockModeList } from "@/components/env-status";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +45,18 @@ export default function SettingsPage() {
             <a className="text-sm underline" href="/api/admin/heygen-check" target="_blank" rel="noreferrer">
               Check HeyGen
             </a>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>HeyGen pause switch</CardTitle>
+            <CardDescription>
+              The daily spend cap pauses all HeyGen work. Check today&apos;s HeyGen spend before resuming. Every resume is logged.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <ResumeRenders />
           </CardContent>
         </Card>
 
