@@ -1,7 +1,7 @@
 import "server-only";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { HumanReviewStore, ReviewOutcome } from "@/lib/qa/human-review";
+import type { HumanReviewRow, HumanReviewStore, ReviewOutcome } from "@/lib/qa/human-review";
 import { createVideoFiles } from "@/lib/video-store";
 
 // p5-b3: the Supabase side of Admin → QA queue. SECRET key: call only after requireAdmin().
@@ -64,7 +64,8 @@ export type QueueItem = {
   watermark: boolean;
   ai_label: boolean;
   created_at: string;
-  post: { title: string; status: string; status_reason: string | null } | null;
+  /** p5-b4: human_reviews = earlier Gate 6 decisions of this post (server only; admins). */
+  post: { title: string; status: string; status_reason: string | null; human_reviews?: HumanReviewRow[] } | null;
   brand: { name: string } | null;
   /** Every gate report of this video AND of its script (Gates 1-2 are per script). Oldest first. */
   reports: QueueReport[];
@@ -83,7 +84,7 @@ export async function listQueue(): Promise<QueueItem[]> {
   const { data, error } = await db
     .from("videos")
     .select(
-      "id, brand_id, post_id, script_id, attempt, error, final_path, raw_path, watermark, ai_label, created_at, post:posts(title, status, status_reason), brand:brands(name)",
+      "id, brand_id, post_id, script_id, attempt, error, final_path, raw_path, watermark, ai_label, created_at, post:posts(title, status, status_reason, human_reviews(decision, reason, note, admin, created_at)), brand:brands(name)",
     )
     .eq("kind", "post")
     .eq("status", "team_review")

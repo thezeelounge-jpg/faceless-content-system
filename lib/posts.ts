@@ -2,6 +2,7 @@ import "server-only";
 import { z } from "zod";
 import type { PlannedPostRow, PlanSettings } from "@/lib/planner";
 import { localDateString } from "@/lib/posting-times";
+import type { HumanReviewRow } from "@/lib/qa/human-review";
 import type { StoredScript } from "@/lib/qa/script-pipeline";
 import type { NewScriptRow } from "@/lib/scripts";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -64,6 +65,8 @@ export type PostWithScript = PostRow & {
   }[];
   /** p5-b1: the post's videos (kind + status only), so the page knows when one is active. */
   videos?: { kind: string; status: string }[];
+  /** p5-b4: the post's Gate 6 decisions (server-only human_reviews; admin pages only). */
+  human_reviews?: HumanReviewRow[];
 };
 
 /** Posts from a week ago onward, oldest first, with their scripts. */
@@ -71,7 +74,7 @@ export async function listPosts(brandId: string): Promise<PostWithScript[]> {
   const since = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const { data, error } = await createAdminClient()
     .from("posts")
-    .select("id, brand_id, scheduled_for, pillar, title, hook, format, status, status_reason, scripts(id, version, qa_status, est_seconds, display_text, spoken_text, hashtags), videos(kind, status)")
+    .select("id, brand_id, scheduled_for, pillar, title, hook, format, status, status_reason, scripts(id, version, qa_status, est_seconds, display_text, spoken_text, hashtags), videos(kind, status), human_reviews(decision, reason, note, admin, created_at)")
     .eq("brand_id", brandId)
     .gte("scheduled_for", since)
     .order("scheduled_for", { ascending: true })

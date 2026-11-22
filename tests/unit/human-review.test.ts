@@ -1,5 +1,43 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { HUMAN_CHECKLIST, humanReviewFromForm, reviewQueuedVideo, REVIEW_MESSAGES, type HumanReviewStore } from "@/lib/qa/human-review";
+import { ReviewHistory } from "@/components/admin/review-history";
+import {
+  HUMAN_CHECKLIST,
+  humanReviewFromForm,
+  lastReject,
+  reviewQueuedVideo,
+  REVIEW_MESSAGES,
+  type HumanReviewStore,
+} from "@/lib/qa/human-review";
+
+describe("p5-b4: past Gate 6 decisions are shown to ADMINS (client page, QA queue)", () => {
+  const reject = { decision: "reject" as const, reason: "lip_sync", note: "Mouth drifts at 0:07.", admin: "ops@x.com", created_at: "2026-11-22T10:00:00Z" };
+  const approve = { decision: "approve" as const, reason: null, note: null, admin: "ops@x.com", created_at: "2026-11-21T10:00:00Z" };
+
+  it("the reject message says the post is back to approved and nothing is rendered automatically", () => {
+    expect(REVIEW_MESSAGES.rejected).toMatch(/back to approved/i);
+    expect(REVIEW_MESSAGES.rejected).toMatch(/Make video/);
+    expect(REVIEW_MESSAGES.rejected).toMatch(/nothing is rendered automatically/i);
+  });
+
+  it("lastReject: the newest decision when it is a reject, else null", () => {
+    expect(lastReject([approve, reject])).toEqual(reject);
+    expect(lastReject([reject, { ...approve, created_at: "2026-11-23T00:00:00Z" }])).toBeNull();
+    expect(lastReject([])).toBeNull();
+    expect(lastReject(undefined)).toBeNull();
+  });
+
+  it("ReviewHistory shows the reason (plain label), the note, who and when, newest first", () => {
+    const html = renderToStaticMarkup(createElement(ReviewHistory, { reviews: [approve, reject] }));
+    expect(html).toContain("Rejected: Lip-sync off");
+    expect(html).toContain("Mouth drifts at 0:07.");
+    expect(html).toContain("ops@x.com");
+    expect(html).toContain("2026-11-22 10:00 UTC");
+    expect(html.indexOf("Rejected")).toBeLessThan(html.indexOf("Approved"));
+    expect(renderToStaticMarkup(createElement(ReviewHistory, { reviews: [] }))).toBe("");
+  });
+});
 
 // p5-b3: Gate 6, Admin → QA queue. Approve needs every checklist box; Reject needs a reason.
 // The Server Action: requireAdmin FIRST, then zod, then the rpc (review_queued_video).

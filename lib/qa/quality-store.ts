@@ -69,7 +69,18 @@ export async function loadQualityInput(db: SupabaseClient, range: { from: Date; 
 
   const done = delivered.filter((v) => v.delivered_at);
 
-  // "Approval to Ready" starts at the post's FIRST post video (made by "Make video" after approval).
+  // p5-b4 (Rowan 7): "Approval to Ready" starts at scripts.approved_at (stamped by trigger
+  // posts_stamp_script_approved, migration 20261123020000). Old rows without it fall back to the
+  // post's FIRST post video (made by "Make video" after approval).
+  const scriptIds = [...new Set(done.map((v) => v.script_id).filter((id): id is string => Boolean(id)))];
+  const approvedAt = new Map<string, string>();
+  const scripts = await readAllPagesIn<{ id: string; approved_at: string | null }>(
+    scriptIds,
+    (slice, a, b) => db.from("scripts").select("id, approved_at").in("id", slice).order("id", { ascending: true }).range(a, b),
+    failer("load script approvals"),
+  );
+  for (const s of scripts) if (s.approved_at) approvedAt.set(s.id, s.approved_at);
+
   const postIds = [...new Set(done.map((v) => v.post_id).filter((id): id is string => Boolean(id)))];
   const firstRender = new Map<string, string>();
   const rows = await readAllPagesIn<{ post_id: string; created_at: string }>(
@@ -84,7 +95,11 @@ export async function loadQualityInput(db: SupabaseClient, range: { from: Date; 
 
   return {
     reports: reports.map((r) => ({ ...r, issues: Array.isArray(r.issues) ? r.issues : [] })),
-    delivered: done.map((v) => ({ id: v.id, delivered_at: v.delivered_at!, started_at: (v.post_id && firstRender.get(v.post_id)) || null })),
+    delivered: done.map((v) => ({
+      id: v.id,
+      delivered_at: v.delivered_at!,
+      started_at: (v.script_id && approvedAt.get(v.script_id)) || (v.post_id && firstRender.get(v.post_id)) || null,
+    })),
     spend: { heygen_usd: sum(heygen), claude_usd: sum(claude) },
   };
 }

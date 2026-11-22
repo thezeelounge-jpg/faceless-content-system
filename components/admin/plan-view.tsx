@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
+import { ReviewHistory } from "@/components/admin/review-history";
 import { calendarWeeks } from "@/lib/plan-calendar";
+import { lastReject } from "@/lib/qa/human-review";
 import { localTimeString } from "@/lib/posting-times";
 import type { PostWithScript } from "@/lib/posts";
 
@@ -58,6 +60,16 @@ export function PlanList({
               {post.status}
             </div>
             {post.status_reason && <div className="text-destructive text-xs">{post.status_reason}</div>}
+            {/* p5-b4: Gate 6 decisions with the internal note (admin page only; customers never see them). */}
+            {post.human_reviews && post.human_reviews.length > 0 && (
+              <div className="space-y-1 rounded-md border p-2 text-xs">
+                <div className="font-medium">
+                  QA queue decisions (team only)
+                  {post.status === "approved" && lastReject(post.human_reviews) ? ": rejected, press Make video to try again." : ""}
+                </div>
+                <ReviewHistory reviews={post.human_reviews} />
+              </div>
+            )}
             <div className="font-medium">{post.title}</div>
             {post.hook && <div className="text-muted-foreground">“{post.hook}”</div>}
             {script && (

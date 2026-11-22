@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { QaReviewForm } from "@/components/admin/qa-review-form";
+import { ReviewHistory } from "@/components/admin/review-history";
 import { Card, CardContent } from "@/components/ui/card";
 import type { ActionState } from "@/lib/plain-error";
 import { gateLabel } from "@/lib/qa/gates";
@@ -26,6 +27,12 @@ export function QueueItemView({
             <span className="font-medium">Why it is here:</span> {item.post?.status_reason ?? "No reason saved."}
           </p>
           {item.error && <p className="text-sm break-words">{item.error}</p>}
+          {item.post?.human_reviews && item.post.human_reviews.length > 0 && (
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Earlier decisions on this post (team only)</p>
+              <ReviewHistory reviews={item.post.human_reviews} />
+            </div>
+          )}
           <p className="text-muted-foreground text-xs">
             Attempt {item.attempt} · {item.ai_label ? "AI label on" : "AI label off"}
             {item.watermark ? " · trial (watermark)" : ""} ·{" "}

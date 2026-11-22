@@ -9,8 +9,8 @@
 // - Human reject rate: gate 'human' rejected / reviewed. Customer redo rate: gate 'customer' (Phase 6).
 // - Average cost per delivered video: real (non-mock) HeyGen render spend + Claude spend in the range,
 //   re-renders included, / videos delivered in the range (videos.delivered_at).
-// - Time from approval to Ready: from the post's first render request (its first post video, made by
-//   "Make video" after the script was approved) to delivered_at.
+// - Time from approval to Ready: from scripts.approved_at (p5-b4) to delivered_at; old rows without
+//   approved_at start at the post's first render request (its first post video, "Make video").
 // - Top failure codes: issue codes of failed reports in the last QUALITY.top_failure_days days of the range.
 import { QUALITY } from "@/lib/qa/config";
 import { GATES, GATE_LABELS } from "@/lib/qa/gates";
@@ -39,7 +39,7 @@ export type Quality = {
 
 export type QualityInput = {
   reports: QualityReport[];
-  /** Videos delivered in the range; started_at = the post's first render request. */
+  /** Videos delivered in the range; started_at = scripts.approved_at, else the post's first render request. */
   delivered: { id: string; delivered_at: string; started_at: string | null }[];
   /** Real spend in the range (mock rows are never counted). */
   spend: { heygen_usd: number; claude_usd: number };

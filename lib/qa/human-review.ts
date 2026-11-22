@@ -37,7 +37,14 @@ export const REJECT_REASON_LABELS: Record<RejectReason, string> = {
   other: "Other",
 };
 
-const TICK_EVERY_BOX = "Tick every box before approving.";
+/**
+ * p5-b4 (QA SF2): what a reject writes into posts.status_reason, which CUSTOMERS can read. Neutral,
+ * never the reason or the admin's note (those live only in the server-only human_reviews table).
+ * Same words as PRODUCT.md's "problem" line. Repeated in migration 20261123020000 (tested equal).
+ */
+export const REJECT_CUSTOMER_REASON = "Taking a little longer. We're fixing it.";
+
+const TICK_EVERY_BOX ="Tick every box before approving.";
 const uuid = z.string().uuid("Unknown video.");
 const note = z.string().trim().max(300, "Keep the note under 300 characters.");
 
@@ -92,13 +99,37 @@ export type HumanReviewStore = {
 
 export const REVIEW_MESSAGES: Record<ReviewOutcome, string> = {
   approved: "Approved. The video is ready for the customer.",
-  rejected: "Rejected. The video will not reach the customer; the post is marked as a problem for the team.",
+  rejected:
+    "Rejected. The video will not reach the customer and never counts. The post is back to approved: press Make video on the client page to try again (nothing is rendered automatically).",
   not_in_queue: "This video is no longer in the QA queue (someone already decided). Nothing changed.",
   not_found: "Video not found.",
   checklist_incomplete: "Tick every box before approving.",
   no_final_file: "This video has no finished edit yet, so it can't be approved. Reject it or fix the edit first.",
   bad_input: "Pick a reason.",
 };
+
+/** p5-b4: one row of the server-only human_reviews table (admins only). */
+export type HumanReviewRow = { decision: "approve" | "reject"; reason: string | null; note: string | null; admin: string; created_at: string };
+
+const newestFirst = (reviews: HumanReviewRow[]) => [...reviews].sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+/** The post's newest Gate 6 decision when it is a reject (the client page shows it next to Make video), else null. */
+export function lastReject(reviews: HumanReviewRow[] | undefined): HumanReviewRow | null {
+  const newest = newestFirst(reviews ?? [])[0];
+  return newest?.decision === "reject" ? newest : null;
+}
+
+/** Admin wording for one decision, e.g. "Rejected: Lip-sync off". */
+export function reviewHeadline(review: HumanReviewRow): string {
+  if (review.decision === "approve") return "Approved";
+  const label = REJECT_REASON_LABELS[review.reason as RejectReason] ?? review.reason ?? "no reason";
+  return `Rejected: ${label}`;
+}
+
+/** Newest first, for the history list. */
+export function sortReviews(reviews: HumanReviewRow[]): HumanReviewRow[] {
+  return newestFirst(reviews);
+}
 
 /**
  * Approve or reject one queued video. The caller (Server Action) has ALREADY run requireAdmin().
