@@ -12,6 +12,7 @@
 //   after-talking-big_words-no-label.mp4  ai_label off (payload and row)
 //   after-talking-big_words-{hook,broll,broll2,cta}.png   frames at 0.8 s, 4.0 s, 6.5 s, 8.5 s
 //   after-talking-big_words-{trial,no-label}-hook.png     frames at 0.8 s
+//   after-talking-big_words-trial-broll.png               trial frame at 4.0 s (b-roll under the centre mark, p4-b3)
 //   probe.json                       ffprobe summary + loudness (I, TP) + MP4 box order + the ffmpeg commands
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -78,6 +79,8 @@ it("writes the Phase 4 before/after files", async () => {
   }
   const trial = await one("after-talking-big_words-trial", "big_words", { watermark: true });
   grabFrame(trial, FRAMES.hook, path.join(OUT, "after-talking-big_words-trial-hook.png"));
+  // p4-b3: the big faint centre mark + the boxed corner tag over light b-roll.
+  grabFrame(trial, FRAMES.broll, path.join(OUT, "after-talking-big_words-trial-broll.png"));
   const noLabel = await one("after-talking-big_words-no-label", "big_words", { aiLabel: false });
   grabFrame(noLabel, FRAMES.hook, path.join(OUT, "after-talking-big_words-no-label-hook.png"));
 
